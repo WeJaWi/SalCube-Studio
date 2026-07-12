@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden;
+    font-family:-apple-system,"Avenir Next","Segoe UI",Roboto,sans-serif; }
+  body { background:#FAF6EF; color:#1F3A4D; }
+  #stage { position:relative; width:100%; height:100%; display:flex;
+           flex-direction:column; justify-content:center; gap:4.5vh;
+           padding:0 14vw; }
+  .card { background:#fff; border-radius:2vw; padding:4vh 3vw;
+          box-shadow:0 1.2vh 4vh rgba(31,58,77,.10); opacity:0; }
+  .tag { display:inline-block; font-size:1.8vw; font-weight:800;
+         letter-spacing:.18em; text-transform:uppercase; padding:.9vh 1.4vw;
+         border-radius:999px; margin-bottom:2vh; }
+  #myth .tag { background:#fdeeea; color:#E2725B; }
+  #fact .tag { background:#e7f3f1; color:#2C8C8C; }
+  .text { font-size:2.6vw; font-weight:650; line-height:1.45; position:relative;
+          display:inline; }
+  #myth { border-left:1vw solid #E2725B; }
+  #fact { border-left:1vw solid #2C8C8C; }
+  #strike { position:absolute; left:0; top:55%; height:.6vh; width:0%;
+            background:#E2725B; border-radius:1vh; }
+  #mytext { position:relative; display:inline-block; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="card" id="myth">
+    <span class="tag">Myth</span><br/>
+    <span id="mytext" class="text"><span id="strike"></span><span id="mythwords"></span></span>
+  </div>
+  <div class="card" id="fact">
+    <span class="tag">Fact</span><br/>
+    <span class="text" id="factwords"></span>
+  </div>
+</div>
+<script>
+let D = 9;
+const clamp = (x,a,b)=>Math.min(b,Math.max(a,x));
+const prog = (t,s,l)=>clamp((t-s)/l,0,1);
+const easeOut = p=>1-Math.pow(1-p,3);
+
+function setup(params, duration) {
+  D = duration;
+  document.getElementById("mythwords").textContent = params.myth || "";
+  document.getElementById("factwords").textContent = params.fact || "";
+  seek(0);
+}
+function seek(t) {
+  const m = easeOut(prog(t, .25, .6));
+  const myth = document.getElementById("myth");
+  myth.style.opacity = m; myth.style.transform = `translateX(${(1-m)*-3}vw)`;
+  document.getElementById("strike").style.width =
+    `${easeOut(prog(t, 1.1, .7)) * 100}%`;
+  const fDelay = clamp(D * .38, 1.9, 3.2);
+  const f = easeOut(prog(t, fDelay, .6));
+  const fact = document.getElementById("fact");
+  fact.style.opacity = f; fact.style.transform = `translateX(${(1-f)*3}vw)`;
+}
+</script>
+</body>
+</html>

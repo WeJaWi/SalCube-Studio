@@ -1,0 +1,15 @@
+# secrets — NEVER commit
+.env
+
+# generated content & caches
+output/
+overlays/
+server.log
+nohup.out
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# personal voice test files
+voice_tests/

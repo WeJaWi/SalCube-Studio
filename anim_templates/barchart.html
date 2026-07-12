@@ -1,0 +1,90 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden;
+    font-family:-apple-system,"Avenir Next","Segoe UI",Roboto,sans-serif; }
+  body { background:#FAF6EF; color:#1F3A4D; }
+  .blob { position:absolute; border-radius:50%; opacity:.10; }
+  #b1 { width:40vw; height:40vw; background:#2C8C8C; top:-16vw; right:-11vw; }
+  #stage { position:relative; width:100%; height:100%; padding:7vh 10vw; }
+  #title { font-size:4vw; font-weight:800; opacity:0; }
+  #unit { font-size:1.8vw; font-weight:600; color:#7a8a94; margin-top:1vh;
+          opacity:0; }
+  #bars { margin-top:5.5vh; }
+  .row { display:flex; align-items:center; gap:2vw; margin-bottom:3.6vh;
+         opacity:0; }
+  .row .label { width:20vw; font-size:2.2vw; font-weight:700; text-align:right;
+                flex:0 0 auto; }
+  .row .track { display:block; flex:1; height:5.2vh; background:#eee4d4;
+                border-radius:1.2vh; overflow:hidden; }
+  .row .fill { display:block; height:100%; width:0%; border-radius:1.2vh;
+               background:linear-gradient(90deg,#2C8C8C,#3aa8a8); }
+  .row:first-child .fill { background:linear-gradient(90deg,#E2725B,#e98d76); }
+  .row .val { width:9vw; font-size:2.2vw; font-weight:800; color:#2C8C8C;
+              flex:0 0 auto; }
+  .row:first-child .val { color:#E2725B; }
+</style>
+</head>
+<body>
+<div class="blob" id="b1"></div>
+<div id="stage">
+  <div id="title"></div>
+  <div id="unit"></div>
+  <div id="bars"></div>
+</div>
+<script>
+let D = 10, rows = [], maxV = 1;
+const clamp = (x,a,b)=>Math.min(b,Math.max(a,x));
+const prog = (t,s,l)=>clamp((t-s)/l,0,1);
+const easeOut = p=>1-Math.pow(1-p,3);
+
+function setup(params, duration) {
+  D = duration;
+  document.getElementById("title").textContent = params.title || "";
+  document.getElementById("unit").textContent = params.unit || "";
+  const data = (params.bars || []).slice(0, 5)
+    .map(b => ({label: String(b.label || ""), value: Number(b.value) || 0}))
+    .sort((a, b) => b.value - a.value);
+  maxV = Math.max(1, ...data.map(b => b.value));
+  const wrap = document.getElementById("bars");
+  wrap.innerHTML = "";
+  rows = data.map(b => {
+    const el = document.createElement("div");
+    el.className = "row";
+    el.innerHTML = `<span class="label"></span>
+      <span class="track"><span class="fill"></span></span>
+      <span class="val"></span>`;
+    el.querySelector(".label").textContent = b.label;
+    el.dataset.value = b.value;
+    wrap.appendChild(el);
+    return el;
+  });
+  seek(0);
+}
+function fmt(x) {
+  return (Math.round(x * 10) / 10).toLocaleString("en-US");
+}
+function seek(t) {
+  document.getElementById("b1").style.transform =
+    `translate(${Math.sin(t*.5)*1.2}vw, ${Math.cos(t*.4)*1.1}vh)`;
+  const tp = easeOut(prog(t, .2, .6));
+  const title = document.getElementById("title");
+  title.style.opacity = tp; title.style.transform = `translateY(${(1-tp)*2.5}vh)`;
+  document.getElementById("unit").style.opacity = easeOut(prog(t, .5, .6));
+  const n = rows.length || 1;
+  const gap = clamp((D - 3.2) / n, .4, 1.1);
+  rows.forEach((el, i) => {
+    const s = 1.1 + i * gap;
+    el.style.opacity = easeOut(prog(t, s, .4));
+    const grow = easeOut(prog(t, s + .15, .9));
+    const v = Number(el.dataset.value);
+    el.querySelector(".fill").style.width = `${(v / maxV) * 100 * grow}%`;
+    el.querySelector(".val").textContent = fmt(v * grow);
+  });
+}
+</script>
+</body>
+</html>

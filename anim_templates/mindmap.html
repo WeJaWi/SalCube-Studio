@@ -1,0 +1,143 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden;
+    font-family:-apple-system,"Avenir Next","Segoe UI",Roboto,sans-serif; }
+  body { background:#FAF6EF; color:#1F3A4D;
+         background-image:radial-gradient(circle, rgba(31,58,77,.07) 1.2px, transparent 1.2px);
+         background-size:34px 34px; }
+  #world { position:absolute; inset:0; transform-origin:0 0; }
+  svg#links { position:absolute; inset:0; width:100%; height:100%; }
+  svg#links path { fill:none; stroke:#2C8C8C; stroke-width:3; opacity:.55; }
+  .node { position:absolute; transform:translate(-50%,-50%);
+          background:#fff; border:2px solid #e0d7c4; border-radius:1.1vw;
+          padding:1.6vh 1.5vw; font-size:1.75vw; font-weight:700;
+          box-shadow:0 .8vh 2.6vh rgba(31,58,77,.12); white-space:nowrap;
+          max-width:24vw; overflow:hidden; text-overflow:ellipsis; }
+  .node.center { background:#1F3A4D; color:#FAF6EF; font-size:2.2vw;
+                 border:none; padding:2.4vh 2.2vw; border-radius:1.4vw;
+                 max-width:30vw; white-space:normal; text-align:center; }
+  .node.focused { border-color:#2C8C8C; border-width:3px;
+                  box-shadow:0 1vh 3.4vh rgba(44,140,140,.4); }
+  .node .idx { display:inline-block; width:1.9vw; height:1.9vw; line-height:1.9vw;
+               text-align:center; border-radius:50%; background:#e7f3f1;
+               color:#2C8C8C; font-size:1.15vw; margin-right:.7vw;
+               vertical-align:middle; }
+  #cursor { position:absolute; width:26px; height:38px; z-index:50;
+            filter:drop-shadow(1px 2px 2px rgba(0,0,0,.35)); }
+  #ring { position:absolute; width:70px; height:70px; border-radius:50%;
+          border:3px solid #2C8C8C; z-index:49; opacity:0;
+          transform:translate(-50%,-50%); }
+</style>
+</head>
+<body>
+<div id="world">
+  <svg id="links"></svg>
+  <div id="nodes"></div>
+</div>
+<div id="ring"></div>
+<svg id="cursor" viewBox="0 0 26 38">
+  <path d="M2 2 L2 30 L9.5 24 L14 35 L18.5 33 L14 22 L24 21 Z"
+        fill="#fff" stroke="#1F3A4D" stroke-width="2"/>
+</svg>
+<script>
+let D = 12, N = [], FOCUS = 0, W = 0, H = 0, pos = [];
+
+const clamp = (x,a,b)=>Math.min(b,Math.max(a,x));
+const prog  = (t,s,l)=>clamp((t-s)/l,0,1);
+const easeIO = p => p < .5 ? 2*p*p : 1 - Math.pow(-2*p+2, 2)/2;
+const easeOut = p => 1 - Math.pow(1-p, 3);
+
+function setup(params, duration) {
+  D = duration;
+  W = window.innerWidth; H = window.innerHeight;
+  FOCUS = Math.max(0, Math.min(Number(params.focus) || 0,
+                               (params.nodes || []).length - 1));
+  const labels = (params.nodes || []).slice(0, 8);
+
+  // layout: center node + branches alternating right/left
+  pos = [{x: W * .5, y: H * .5}];
+  const right = [], left = [];
+  labels.forEach((_, i) => (i % 2 === 0 ? right : left).push(i));
+  const place = (list, x) => {
+    list.forEach((idx, row) => {
+      const y = H * (list.length === 1 ? .5
+                     : .18 + (.64 * row / (list.length - 1)));
+      pos[idx + 1] = {x, y};
+    });
+  };
+  place(right, W * .78);
+  place(left, W * .22);
+
+  const nodes = document.getElementById("nodes");
+  nodes.innerHTML = "";
+  const c = document.createElement("div");
+  c.className = "node center";
+  c.textContent = params.title || "";
+  c.style.left = pos[0].x + "px"; c.style.top = pos[0].y + "px";
+  nodes.appendChild(c);
+  labels.forEach((lb, i) => {
+    const el = document.createElement("div");
+    el.className = "node" + (i === FOCUS ? " focused-target" : "");
+    el.id = "n" + i;
+    el.innerHTML = `<span class="idx">${i + 1}</span>`;
+    el.appendChild(document.createTextNode(typeof lb === "string" ? lb : (lb.label || "")));
+    el.style.left = pos[i + 1].x + "px"; el.style.top = pos[i + 1].y + "px";
+    nodes.appendChild(el);
+  });
+
+  const svg = document.getElementById("links");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = labels.map((_, i) => {
+    const a = pos[0], b = pos[i + 1];
+    const mx = (a.x + b.x) / 2;
+    return `<path d="M${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}"/>`;
+  }).join("");
+  seek(0);
+}
+
+function seek(t) {
+  const target = pos[FOCUS + 1] || pos[0];
+
+  // cursor: rest near bottom-center, glide to the node, arrive with a click
+  const start = {x: W * .46, y: H * .82};
+  const g = easeIO(prog(t, 0.9, 1.5));
+  const cx = start.x + (target.x - start.x) * g;
+  const cy = start.y + (target.y - start.y) * g;
+
+  // click pulse on arrival
+  const ring = document.getElementById("ring");
+  const pulse = prog(t, 2.5, 0.55);
+  ring.style.opacity = pulse > 0 && pulse < 1 ? String(1 - pulse) : "0";
+  ring.style.transform =
+    `translate(-50%,-50%) scale(${0.3 + pulse * 1.1})`;
+
+  // highlight the node once clicked
+  const node = document.getElementById("n" + FOCUS);
+  if (node) node.classList.toggle("focused", t > 2.9);
+
+  // zoom into the node after the click, hold with a slow creep
+  const zStart = 3.1;
+  const zp = easeIO(prog(t, zStart, 1.4));
+  const hold = clamp((t - zStart - 1.4) / Math.max(D - zStart - 1.4, .1), 0, 1);
+  const s = 1 + zp * 1.15 + hold * 0.12;          // 1 → ~2.15 → creep 2.27
+  const world = document.getElementById("world");
+  // scale about the focus node: p' = p*s + (1-s)*origin
+  const ox = target.x, oy = target.y;
+  world.style.transform =
+    `translate(${(1 - s) * ox}px, ${(1 - s) * oy}px) scale(${s})`;
+
+  // the cursor lives in SCREEN space — map its map-position through the zoom
+  const sx = cx * s + (1 - s) * ox;
+  const sy = cy * s + (1 - s) * oy;
+  const cur = document.getElementById("cursor");
+  cur.style.left = sx + "px"; cur.style.top = sy + "px";
+  ring.style.left = (target.x * s + (1 - s) * ox) + "px";
+  ring.style.top = (target.y * s + (1 - s) * oy) + "px";
+}
+</script>
+</body>
+</html>

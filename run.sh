@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -e
+cd "$(dirname "$0")"
+
+if [ ! -d .venv ]; then
+  echo "Creating virtualenv…"
+  python3 -m venv .venv
+fi
+source .venv/bin/activate
+pip install -q -r requirements.txt
+
+# Headless Chromium for the animation templates (no-op once installed).
+python -m playwright install chromium
+
+if [ ! -f .env ]; then
+  echo "⚠️  No .env found — copy .env.example to .env and add your keys."
+  cp .env.example .env
+fi
+
+# video-studio uses 5050; this studio defaults to 5062
+# (NOT 5060/5061 — Chrome blocks those as unsafe SIP ports).
+export PORT="${PORT:-5062}"
+echo ""
+echo "  ▶  Open  http://127.0.0.1:${PORT}   (keep this terminal open)"
+echo ""
+python app.py

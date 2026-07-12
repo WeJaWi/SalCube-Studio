@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Senior Health Studio — Grandma Hannah</title>
+<style>
+  :root { --bg:#0e1116; --panel:#161b22; --border:#2a313c; --fg:#e6edf3;
+          --muted:#8b949e; --accent:#2c8c8c; --ok:#3fb950; --err:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--fg); }
+  .wrap { max-width:900px; margin:0 auto; padding:32px 20px 80px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .panel { background:var(--panel); border:1px solid var(--border);
+           border-radius:12px; padding:20px; margin-bottom:20px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:0 0 6px; }
+  input, select, textarea { width:100%; background:#0d1117; color:var(--fg);
+      border:1px solid var(--border); border-radius:8px; padding:11px 12px;
+      font-size:15px; font-family:inherit; }
+  textarea { resize:vertical; min-height:70px; }
+  .row { display:flex; gap:14px; }
+  .row > div { flex:1; }
+  button { margin-top:16px; background:var(--accent); color:#fff; border:0;
+      border-radius:8px; padding:12px 20px; font-size:15px; font-weight:600;
+      cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .warn { background:#3d1e1e; border:1px solid var(--err); color:#ffb3ae;
+      padding:12px 14px; border-radius:8px; font-size:13px; margin-bottom:20px; }
+  .warn code, .note code { color:#ffd7d3; }
+  .note { background:#2b2413; border:1px solid #8a6d1a; color:#e8d48b;
+      padding:12px 14px; border-radius:8px; font-size:13px; margin-bottom:20px; }
+  .check { display:flex; align-items:center; gap:10px; font-size:15px;
+      color:var(--fg); margin:0 0 8px; }
+  .check input { width:20px; height:20px; }
+  .log { font-family:ui-monospace,Menlo,monospace; font-size:13px;
+      max-height:340px; overflow:auto; }
+  .log .line { padding:3px 0; border-bottom:1px solid #1d232c; display:flex; gap:10px; }
+  .log .t { color:var(--muted); }
+  .log .step { color:#7fd4d4; min-width:76px; }
+  .badge { display:inline-block; font-size:12px; padding:3px 10px; border-radius:999px;
+      background:#21262d; color:var(--muted); }
+  .badge.running { background:#123a3a; color:#7fd4d4; }
+  .badge.awaiting_approval { background:#3a2f10; color:#e8c96b; }
+  .badge.done { background:#132d1c; color:var(--ok); }
+  .badge.error { background:#3d1e1e; color:var(--err); }
+  video { width:100%; border-radius:10px; margin-top:8px; background:#000; }
+  a.dl { display:inline-block; margin-top:12px; color:#7fd4d4; }
+  .hidden { display:none; }
+  .hook { border:1px solid var(--border); border-radius:10px; padding:14px;
+      margin-bottom:10px; cursor:pointer; font-size:14px; line-height:1.45; }
+  .hook.sel { border-color:var(--accent); background:#12211f; }
+  .hook .htype { font-size:12px; font-weight:700; color:#7fd4d4;
+      text-transform:uppercase; letter-spacing:.05em; display:block;
+      margin-bottom:6px; }
+  #outline { min-height:220px; font-family:ui-monospace,Menlo,monospace;
+      font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🩺 Senior Health Studio — Grandma Hannah</h1>
+  <p class="sub">Outline + 4 hooks (Sonnet 5) → your approval → full script → Hannah on camera (HeyGen, budgeted) → b-roll (Pixabay · AI video · animations) → voice + subtitles (ai33) → music (Suno) → FFmpeg render</p>
+
+  {% if missing_keys %}
+  <div class="warn">
+    Missing API keys: {% for k in missing_keys %}<code>{{ k }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.
+    Add them to <code>.env</code> and restart.
+  </div>
+  {% endif %}
+  {% if not heygen_ready %}
+  <div class="note">
+    HeyGen is not configured yet — set <code>HEYGEN_API_KEY</code> and <code>HEYGEN_AVATAR_ID</code> in <code>.env</code>.
+    Until then, Hannah's on-camera moments fall back to a still image (<code>hosts/&lt;profile&gt;.png</code>, if you drop one there) or plain b-roll.
+  </div>
+  {% endif %}
+
+  <div class="panel">
+    <label>Title / topic</label>
+    <textarea id="title" placeholder="e.g. Why you are always tired (and the three things your body is missing)"></textarea>
+    <div class="row" style="margin-top:14px">
+      <div>
+        <label>Language</label>
+        <input id="language" placeholder="English" />
+      </div>
+      <div>
+        <label>Length (characters ≈ minutes×1000)</label>
+        <input id="length" type="number" placeholder="15000" />
+      </div>
+      <div>
+        <label>Profile</label>
+        <select id="profile">
+          {% for p in profiles %}<option value="{{ p }}"{% if p=='grandma-hannah' %} selected{% endif %}>{{ p }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <div>
+        <label>Cited thinker(s) — Matthias profile (e.g. "Joseph Murphy" or "C. G. Jung"; ignored by Hannah)</label>
+        <input id="philosophers" placeholder="Joseph Murphy" />
+      </div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <div>
+        <label>Script model</label>
+        <select id="script_model">
+          <option value="sonnet-5" selected>Claude Sonnet 5</option>
+          <option value="gpt-5.6-terra">GPT 5.6 Terra</option>
+          <option value="gpt-5.6-luna">GPT 5.6 Luna</option>
+          <option value="gpt-5.6-sol">GPT 5.6 Sol</option>
+        </select>
+      </div>
+      <div>
+        <label>Hook approval</label>
+        <select id="auto_hook">
+          <option value="" selected>Approval gate — I pick the hook & approve the outline</option>
+          <option value="bold_statement">Auto: bold statement hook</option>
+          <option value="question">Auto: question hook</option>
+          <option value="story">Auto: story hook</option>
+          <option value="comment">Auto: comment hook</option>
+        </select>
+      </div>
+      <div>
+        <label>Stock matching</label>
+        <select id="smart_stock">
+          <option value="vision" selected>AI vision — model looks at candidates (most accurate)</option>
+          <option value="text">AI text — model compares descriptions (near-free)</option>
+          <option value="off">Keyword only (legacy)</option>
+        </select>
+      </div>
+    </div>
+
+    <div style="margin-top:18px">
+      <label>B-roll sources (Hannah is on camera for the intro + budgeted split-screens)</label>
+      <label class="check"><input type="checkbox" id="broll_stock" checked /> Stock footage (Pixabay + Pexels)</label>
+      <label class="check"><input type="checkbox" id="broll_stock_image" checked /> Stock photos with slow zoom (Pixabay + Pexels)</label>
+      <label class="check"><input type="checkbox" id="broll_ai_video" checked /> AI video (Grok Imagine — used sparingly)</label>
+      <label class="check"><input type="checkbox" id="broll_animation" checked /> Animation templates</label>
+      <label class="check" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)"><input type="checkbox" id="mindmap" /> Mind-map presentation (a recurring slide with cursor that zooms into the point being discussed)</label>
+    </div>
+
+    <div style="margin-top:14px;padding:14px;border:1px solid var(--border);border-radius:10px" id="tplBox">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <label style="margin:0">Allowed animation templates</label>
+        <button type="button" id="tplAll" style="margin:0;padding:6px 12px;font-size:13px;background:#21262d">Select all</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px 14px">
+        {% for t in anim_templates %}
+        <label class="check" style="margin-bottom:4px"><input type="checkbox" class="tpl" value="{{ t }}" checked /> {{ t }}</label>
+        {% endfor %}
+      </div>
+      <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+        <label>Color schemes (graphics rotate through the checked ones)</label>
+        <div style="display:flex;gap:18px;flex-wrap:wrap">
+          {% for th in anim_themes %}
+          <label class="check" style="margin-bottom:2px">
+            <input type="checkbox" class="theme" value="{{ th }}"{% if th == 'classic' %} checked{% endif %} />
+            <span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:{{ {'classic':'#2C8C8C','crimson':'#C44536','amber':'#D99114','forest':'#55884D','plum':'#8E5A9E'}[th] }}"></span>
+            {{ th }}
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px">
+      <label>Call-to-actions (woven into the script per the Hannah profile)</label>
+      <label class="check"><input type="checkbox" id="cta_comment" checked /> Comment prompts (midpoint + closing)</label>
+      <label class="check"><input type="checkbox" id="cta_ebook" /> E-book CTA (midpoint, sandwich form — flag only on chosen videos)</label>
+      <label class="check"><input type="checkbox" id="qr_badge" /> QR badge — small e-book QR card pinned top-left for the whole video (profile must have one; Hannah's → grandmahannah.store)</label>
+      <textarea id="ebook_text" placeholder="Optional: exact e-book CTA block to insert verbatim (Matthias: pasted German block, auto-converted to Sie; leave blank to auto-write)" style="min-height:56px;margin:4px 0 8px"></textarea>
+      <input type="number" id="ebook_cta_at" placeholder="Optional: CTA position in characters (e.g. 12000 — woven in at the nearest sentence; blank = profile's midpoint section)" style="margin:0 0 8px" />
+      <label class="check"><input type="checkbox" id="cta_community" /> Community/support CTA (end)</label>
+      <label class="check"><input type="checkbox" id="patreon_split" /> Patreon split (philosopher profile: cliffhanger cut — the cut point is reported, never spoken)</label>
+      <div class="row" style="margin:4px 0 8px">
+        <div><input type="number" id="patreon_from" placeholder="Cut range from (chars, e.g. 70000)" /></div>
+        <div><input type="number" id="patreon_to" placeholder="Cut range to (chars, e.g. 80000) — blank = midpoint" /></div>
+      </div>
+      <p class="sub" style="font-size:12px;margin:8px 0 0">The soft like/subscribe ask and the end-screen funnel are always on, per the profile. No spoken AI disclosure — remember your title/description disclosure AND YouTube's altered-content flag on every upload; they're what keeps the channel compliant.</p>
+    </div>
+
+    <button id="go">Generate video</button>
+  </div>
+
+  <div id="jobPanel" class="panel hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <strong id="jobTitle">Working…</strong>
+      <span id="badge" class="badge">queued</span>
+    </div>
+
+    <div id="voiceGate" class="hidden" style="margin-bottom:16px;background:#12211f;border:1px solid var(--accent);border-radius:10px;padding:16px">
+      <h3 style="margin:0 0 6px;font-size:16px">Voice is ready</h3>
+      <p id="voiceInfo" style="margin:0 0 8px;font-size:14px"></p>
+      <p class="sub" style="font-size:12px;margin:0">Approve to start generating visuals (this is where footage/image costs begin).</p>
+      <button id="approveVoice">Approve — generate the video</button>
+    </div>
+
+    <div id="gate" class="hidden" style="margin-bottom:16px">
+      <h3 style="margin:0 0 4px;font-size:16px">Pick Hannah's hook</h3>
+      <p class="sub" style="font-size:13px;margin:0 0 12px">One of these opens the video right after the AI disclosure. Click to select.</p>
+      <div id="hookList"></div>
+      <h3 style="margin:16px 0 4px;font-size:16px">Outline</h3>
+      <p class="sub" style="font-size:13px;margin:0 0 8px">Edit freely — the script is written from exactly what's in this box.</p>
+      <textarea id="outline"></textarea>
+      <button id="approve">Approve & write the script</button>
+    </div>
+
+    <div id="log" class="log"></div>
+    <div id="videoWrap" class="hidden">
+      <video id="video" controls></video>
+      <a class="dl" id="download" download>⬇ Download MP4</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let timer = null, currentJob = null, selectedHook = null, gateShown = false;
+
+// each profile has its own default color schemes
+const PROFILE_THEMES = {{ profile_theme_defaults | tojson }};
+function applyProfileThemes() {
+  const defaults = PROFILE_THEMES[$("#profile").value] || ["classic"];
+  document.querySelectorAll(".theme").forEach(c => {
+    c.checked = defaults.includes(c.value);
+  });
+}
+$("#profile").addEventListener("change", applyProfileThemes);
+applyProfileThemes();
+
+// template picker: "Select all" toggles between all-on and all-off
+$("#tplAll").addEventListener("click", () => {
+  const boxes = [...document.querySelectorAll(".tpl")];
+  const allOn = boxes.every(b => b.checked);
+  boxes.forEach(b => b.checked = !allOn);
+});
+// the picker is only meaningful when animations are enabled
+$("#broll_animation").addEventListener("change", () => {
+  $("#tplBox").style.opacity = $("#broll_animation").checked ? 1 : .4;
+});
+
+$("#go").addEventListener("click", async () => {
+  const title = $("#title").value.trim();
+  if (!title) { alert("Enter a title"); return; }
+  $("#go").disabled = true;
+  $("#jobPanel").classList.remove("hidden");
+  $("#gate").classList.add("hidden");
+  $("#videoWrap").classList.add("hidden");
+  $("#log").innerHTML = "";
+  $("#jobTitle").textContent = "“" + title + "”";
+  gateShown = false; selectedHook = null;
+
+  try {
+    const res = await fetch("/api/render", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        title,
+        language: $("#language").value.trim(),
+        length_chars: parseInt($("#length").value) || null,
+        profile: $("#profile").value,
+        script_model: $("#script_model").value,
+        auto_hook: $("#auto_hook").value,
+        smart_stock: $("#smart_stock").value,
+        broll_stock: $("#broll_stock").checked,
+        broll_stock_image: $("#broll_stock_image").checked,
+        broll_ai_video: $("#broll_ai_video").checked,
+        broll_animation: $("#broll_animation").checked,
+        mindmap: $("#mindmap").checked,
+        anim_templates: [...document.querySelectorAll(".tpl:checked")].map(c => c.value),
+        anim_themes: [...document.querySelectorAll(".theme:checked")].map(c => c.value),
+        comment_cta: $("#cta_comment").checked,
+        patreon_split: $("#patreon_split").checked,
+        patreon_cut_from: parseInt($("#patreon_from").value) || null,
+        patreon_cut_to: parseInt($("#patreon_to").value) || null,
+        promote_ebook: $("#cta_ebook").checked,
+        qr_badge: $("#qr_badge").checked,
+        ebook_text: $("#ebook_text").value.trim(),
+        ebook_cta_at: parseInt($("#ebook_cta_at").value) || null,
+        promote_community: $("#cta_community").checked,
+        cited_philosophers: $("#philosophers").value.trim()
+      })
+    });
+    const data = await res.json();
+    if (data.error) { serverError(data.error); return; }
+    currentJob = data.job_id;
+    poll(data.job_id);
+  } catch (e) {
+    serverError("Can't reach the server. Is it running? Start it with ./run.sh and open the printed URL.");
+  }
+});
+
+$("#approveVoice").addEventListener("click", async () => {
+  $("#approveVoice").disabled = true;
+  await fetch("/api/approve_voice/" + currentJob, {method: "POST"});
+  $("#approveVoice").disabled = false;
+  $("#voiceGate").classList.add("hidden");
+});
+
+$("#approve").addEventListener("click", async () => {
+  if (!selectedHook) { alert("Pick a hook first"); return; }
+  $("#approve").disabled = true;
+  await fetch("/api/approve/" + currentJob, {
+    method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ hook_type: selectedHook, outline: $("#outline").value })
+  });
+  $("#gate").classList.add("hidden");
+  $("#approve").disabled = false;
+  gateShown = false;
+});
+
+function showGate(awaiting) {
+  if (gateShown) return;
+  gateShown = true;
+  const list = $("#hookList");
+  list.innerHTML = "";
+  for (const [type, text] of Object.entries(awaiting.hooks)) {
+    const div = document.createElement("div");
+    div.className = "hook";
+    const label = type.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
+    div.innerHTML = `<span class="htype">${label}</span>`;
+    div.appendChild(document.createTextNode(text));
+    div.addEventListener("click", () => {
+      document.querySelectorAll(".hook").forEach(h => h.classList.remove("sel"));
+      div.classList.add("sel");
+      selectedHook = type;
+    });
+    list.appendChild(div);
+  }
+  $("#outline").value = awaiting.outline;
+  $("#gate").classList.remove("hidden");
+  $("#gate").scrollIntoView({behavior:"smooth"});
+}
+
+function serverError(msg) {
+  const badge = $("#badge");
+  badge.className = "badge error";
+  badge.textContent = "error";
+  $("#log").innerHTML = `<div class="line"><span class="step">error</span><span>${escapeHtml(msg)}</span></div>`;
+  $("#go").disabled = false;
+}
+
+function poll(jobId) {
+  clearInterval(timer);
+  let misses = 0;
+  timer = setInterval(async () => {
+    try {
+      const r = await fetch("/api/status/" + jobId);
+      const j = await r.json();
+      misses = 0;
+      render(j, jobId);
+      if (j.status === "done" || j.status === "error") {
+        clearInterval(timer);
+        $("#go").disabled = false;
+      }
+    } catch (e) {
+      // Keep retrying — brief server restarts shouldn't orphan the page.
+      // A resumable job survives on disk anyway (README: resume).
+      misses += 1;
+      if (misses >= 20) {
+        clearInterval(timer);
+        serverError("Lost connection to the server for 30s+ — it may have stopped. "
+          + "Restart it (./run.sh) and reload this page: a running job re-attaches "
+          + "automatically, and an interrupted one can be resumed without re-paying "
+          + "(see README).");
+      }
+    }
+  }, 1500);
+}
+
+// On page load, re-attach to the most recent active job (if any).
+(async () => {
+  try {
+    const r = await fetch("/api/jobs");
+    const list = await r.json();
+    const active = list.find(j => ["queued", "running", "awaiting_approval"].includes(j.status));
+    if (active) {
+      currentJob = active.job_id;
+      $("#jobPanel").classList.remove("hidden");
+      $("#jobTitle").textContent = "“" + (active.title || active.job_id) + "”";
+      $("#go").disabled = true;
+      poll(active.job_id);
+    }
+  } catch (e) { /* server not ready — ignore */ }
+})();
+
+function render(j, jobId) {
+  const badge = $("#badge");
+  badge.className = "badge " + j.status;
+  badge.textContent = j.status === "awaiting_approval" ? "your turn" : j.status;
+  const log = $("#log");
+  log.innerHTML = (j.log || []).map(l =>
+    `<div class="line"><span class="t">${l.t}</span>`
+    + `<span class="step">${l.step}</span><span>${escapeHtml(l.message)}</span></div>`
+  ).join("");
+  log.scrollTop = log.scrollHeight;
+
+  if (j.status === "awaiting_approval" && j.awaiting) showGate(j.awaiting);
+
+  if (j.status === "awaiting_voice_approval" && j.voice_info) {
+    const vi = j.voice_info;
+    $("#voiceInfo").textContent =
+      `Total voiceover ≈ ${vi.total_time} across ${vi.beats} beats · ` +
+      `Patreon cut after beat ${vi.cut_beat} at ≈ ${vi.cut_time}.`;
+    $("#voiceGate").classList.remove("hidden");
+  } else {
+    $("#voiceGate").classList.add("hidden");
+  }
+
+  if (j.status === "done") {
+    $("#videoWrap").classList.remove("hidden");
+    const url = "/api/video/" + jobId;
+    $("#video").src = url;
+    $("#download").href = url;
+  }
+}
+
+function escapeHtml(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+</script>
+</body>
+</html>

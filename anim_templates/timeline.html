@@ -1,0 +1,81 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden;
+    font-family:-apple-system,"Avenir Next","Segoe UI",Roboto,sans-serif; }
+  body { background:#FAF6EF; color:#1F3A4D; }
+  .blob { position:absolute; border-radius:50%; opacity:.10; }
+  #b1 { width:40vw; height:40vw; background:#2C8C8C; top:-17vw; left:-11vw; }
+  #stage { position:relative; width:100%; height:100%; padding:9vh 9vw; }
+  #title { font-size:4.2vw; font-weight:800; text-align:center; opacity:0; }
+  #line { position:absolute; top:52%; left:9vw; right:9vw; height:.7vh;
+          background:#e4d8c4; border-radius:1vh; }
+  #fill { height:100%; width:0%; background:#2C8C8C; border-radius:1vh; }
+  #points { position:absolute; top:0; left:9vw; right:9vw; height:100%; }
+  .pt { position:absolute; top:52%; transform:translate(-50%,-50%); opacity:0; }
+  .dot { width:3vw; height:3vw; border-radius:50%; background:#fff;
+         border:.7vw solid #2C8C8C; margin:0 auto; }
+  .pt .label { position:absolute; left:50%; transform:translateX(-50%);
+               top:-9vh; font-size:2vw; font-weight:800; color:#2C8C8C;
+               white-space:nowrap; }
+  .pt .text { position:absolute; left:50%; transform:translateX(-50%);
+              top:5vh; font-size:1.8vw; font-weight:600; width:16vw;
+              text-align:center; line-height:1.35; }
+  .pt:nth-child(even) .label { top:auto; bottom:-9vh; }
+  .pt:nth-child(even) .text { top:auto; bottom:5vh; }
+</style>
+</head>
+<body>
+<div class="blob" id="b1"></div>
+<div id="stage">
+  <div id="title"></div>
+  <div id="line"><div id="fill"></div></div>
+  <div id="points"></div>
+</div>
+<script>
+let D = 10, pts = [];
+const clamp = (x,a,b)=>Math.min(b,Math.max(a,x));
+const prog = (t,s,l)=>clamp((t-s)/l,0,1);
+const easeOut = p=>1-Math.pow(1-p,3);
+
+function setup(params, duration) {
+  D = duration;
+  document.getElementById("title").textContent = params.title || "";
+  const wrap = document.getElementById("points");
+  wrap.innerHTML = "";
+  const data = (params.points || []).slice(0, 5);
+  pts = data.map((p, i) => {
+    const el = document.createElement("div");
+    el.className = "pt";
+    el.style.left = `${data.length < 2 ? 50 : (i / (data.length - 1)) * 100}%`;
+    el.innerHTML = `<span class="label"></span><span class="dot"></span>
+                    <span class="text"></span>`;
+    el.querySelector(".label").textContent = p.label || "";
+    el.querySelector(".text").textContent = p.text || "";
+    wrap.appendChild(el);
+    return el;
+  });
+  seek(0);
+}
+function seek(t) {
+  document.getElementById("b1").style.transform =
+    `translate(${Math.sin(t*.5)*1.2}vw, ${Math.cos(t*.42)*1.1}vh)`;
+  const tp = easeOut(prog(t, .25, .6));
+  const title = document.getElementById("title");
+  title.style.opacity = tp; title.style.transform = `translateY(${(1-tp)*2.5}vh)`;
+  const n = pts.length || 1;
+  const gap = clamp((D - 3.0) / n, .5, 1.4);
+  const total = 1.0 + (n - 1) * gap + .6;
+  document.getElementById("fill").style.width =
+    `${easeOut(prog(t, .9, total - .9)) * 100}%`;
+  pts.forEach((el, i) => {
+    const p = easeOut(prog(t, 1.0 + i * gap, .5));
+    el.style.opacity = p;
+  });
+}
+</script>
+</body>
+</html>

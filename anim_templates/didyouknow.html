@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden;
+    font-family:-apple-system,"Avenir Next","Segoe UI",Roboto,sans-serif; }
+  body { background:#FAF6EF; color:#1F3A4D; }
+  .blob { position:absolute; border-radius:50%; opacity:.10; }
+  #b1 { width:44vw; height:44vw; background:#E2A25B; top:-18vw; right:-12vw; }
+  #stage { position:relative; width:100%; height:100%; display:flex;
+           flex-direction:column; align-items:center; justify-content:center;
+           text-align:center; padding:0 15vw; }
+  #bulb { width:9vw; height:9vw; border-radius:50%; background:#fdf3e2;
+          display:flex; align-items:center; justify-content:center;
+          font-size:4.6vw; opacity:0; box-shadow:0 1vh 4vh rgba(226,162,91,.35); }
+  #eyebrow { font-size:1.9vw; font-weight:800; color:#E2A25B;
+             letter-spacing:.22em; text-transform:uppercase; margin-top:4vh;
+             opacity:0; }
+  #fact { font-size:3.2vw; font-weight:700; line-height:1.5; margin-top:2.6vh;
+          opacity:0; }
+</style>
+</head>
+<body>
+<div class="blob" id="b1"></div>
+<div id="stage">
+  <div id="bulb">💡</div>
+  <div id="eyebrow">Did you know?</div>
+  <div id="fact"></div>
+</div>
+<script>
+let D = 8;
+const clamp = (x,a,b)=>Math.min(b,Math.max(a,x));
+const prog = (t,s,l)=>clamp((t-s)/l,0,1);
+const easeOut = p=>1-Math.pow(1-p,3);
+
+function setup(params, duration) {
+  D = duration;
+  document.getElementById("fact").textContent = params.fact || "";
+  seek(0);
+}
+function seek(t) {
+  document.getElementById("b1").style.transform =
+    `translate(${Math.sin(t*.5)*1.2}vw, ${Math.cos(t*.4)*1.1}vh)`;
+  const b = easeOut(prog(t, .2, .55));
+  const bulb = document.getElementById("bulb");
+  bulb.style.opacity = b;
+  bulb.style.transform =
+    `scale(${.6+.4*b}) rotate(${Math.sin(t*1.1)*4}deg)`;
+  document.getElementById("eyebrow").style.opacity = easeOut(prog(t, .65, .5));
+  const f = easeOut(prog(t, .95, .7));
+  const fact = document.getElementById("fact");
+  fact.style.opacity = f; fact.style.transform = `translateY(${(1-f)*2.4}vh)`;
+}
+</script>
+</body>
+</html>

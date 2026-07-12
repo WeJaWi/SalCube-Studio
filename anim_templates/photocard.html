@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden;
+    font-family:-apple-system,"Avenir Next","Segoe UI",Roboto,sans-serif; }
+  body { background:#efe7d8; color:#1F3A4D; }
+  .blob { position:absolute; border-radius:50%; opacity:.12; }
+  #b1 { width:46vw; height:46vw; background:#2C8C8C; top:-20vw; right:-13vw; }
+  #b2 { width:32vw; height:32vw; background:#E2A25B; bottom:-15vw; left:-9vw; }
+  #stage { position:relative; width:100%; height:100%; display:flex;
+           align-items:center; justify-content:center; }
+  #card { background:#fff; padding:2vw 2vw 6.5vh; border-radius:.8vw;
+          box-shadow:0 2.4vh 7vh rgba(31,58,77,.28); opacity:0; }
+  #frame { width:52vw; height:56vh; overflow:hidden; border-radius:.4vw;
+           background:#ddd; }
+  #photo { width:100%; height:100%; object-fit:cover;
+           transform-origin:center; }
+  #caption { text-align:center; margin-top:3.4vh; font-size:2.2vw;
+             font-weight:650; font-family:Georgia,serif; font-style:italic;
+             color:#42576a; }
+  #tape { position:absolute; top:-2.2vh; left:50%;
+          transform:translateX(-50%) rotate(-3deg); width:9vw; height:4.4vh;
+          background:rgba(226,162,91,.45); border-radius:.3vw; }
+</style>
+</head>
+<body>
+<div class="blob" id="b1"></div>
+<div class="blob" id="b2"></div>
+<div id="stage">
+  <div id="card">
+    <div id="tape"></div>
+    <div id="frame"><img id="photo" /></div>
+    <div id="caption"></div>
+  </div>
+</div>
+<script>
+let D = 10;
+const clamp = (x,a,b)=>Math.min(b,Math.max(a,x));
+const prog = (t,s,l)=>clamp((t-s)/l,0,1);
+const easeOut = p=>1-Math.pow(1-p,3);
+
+function setup(params, duration) {
+  D = duration;
+  if (params.image_data) document.getElementById("photo").src = params.image_data;
+  document.getElementById("caption").textContent = params.caption || "";
+  seek(0);
+}
+function seek(t) {
+  document.getElementById("b1").style.transform =
+    `translate(${Math.sin(t*.5)*1.2}vw, ${Math.cos(t*.4)*1.1}vh)`;
+  document.getElementById("b2").style.transform =
+    `translate(${Math.cos(t*.46)*1.3}vw, ${Math.sin(t*.5)*1.2}vh)`;
+  const c = easeOut(prog(t, .25, .7));
+  const card = document.getElementById("card");
+  card.style.opacity = c;
+  card.style.transform =
+    `rotate(${-2.2 + c * 1.2}deg) translateY(${(1-c)*4}vh) scale(${.94+.06*c})`;
+  // slow Ken Burns inside the frame for the whole beat
+  const z = 1.04 + (t / Math.max(D, 1)) * .1;
+  document.getElementById("photo").style.transform = `scale(${z})`;
+}
+</script>
+</body>
+</html>

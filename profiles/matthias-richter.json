@@ -1,0 +1,89 @@
+{
+  "name": "matthias-richter",
+  "description": "Matthias Richter German channel: philosophy & manifestation, first-person character narrator, HeyGen host + mixed b-roll.",
+  "engine": "hannah",
+  "channel_context": "the Matthias Richter German YouTube channel — philosophy, manifestation, and the laws of the mind, narrated in first person by the fixed character Matthias Richter, who shares what HE learned from the great thinkers (per-video cited philosophers such as Joseph Murphy or C. G. Jung). He is the one talking, never the philosopher",
+  "audience_line": "speaks to ONE German-speaking viewer (formal Sie) who is searching for depth, meaning, and practical inner change",
+  "video": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "ken_burns": true,
+    "beat_seconds": 15,
+    "broll_mix": {"stock": 0.34, "stock_image": 0.24, "animation": 0.32, "ai_video": 0.1},
+    "max_template_repeats": 2,
+    "anim_themes_default": ["amber", "plum"],
+    "ai_video_resolution": "720p",
+    "overlay": {"enabled": true, "opacity": 0.32},
+    "transitions": {"enabled": true, "seconds": 0.5,
+                    "types": ["fade", "fade", "smoothleft", "fade", "circleopen", "fade", "smoothright"]},
+    "host_intro_min_seconds": 20,
+    "host_intro_max_seconds": 50,
+    "host_budget_seconds": 240,
+    "split_every_seconds": 150,
+    "split_max_seconds": 35
+  },
+  "defaults": {
+    "language": "German",
+    "length_chars": 15000
+  },
+  "host": {
+    "persona": "Matthias Richter, 63. A German man who has studied the great thinkers of the human mind and soul since 2004 and has LIVED their ideas rather than merely read them — tested on himself, day after day. His life today is better than ever: calmer, freer, richer in every sense, said plainly and without bragging. He is the narrator and the brand: every script is HIM talking, in the first person, sharing what he learned. He cites and draws on the philosophers as his teachers; he never impersonates them.",
+    "register": "Warm, plainspoken, unhurried, sincere. First person throughout. Authority from lived experience and specificity, never volume. A calm, certain guide who has done the digging and is simply handing it to one person. No manufactured outrage, no hype. Treats the viewer as a capable adult.",
+    "heygen_avatar_id": "5b73c440c2fe46e39d4000ff27505398",
+    "heygen_avatar_type": "talking_photo",
+    "image": ""
+  },
+  "ai_disclosure": "",
+  "style": {
+    "broll_style": "cinematic, moody, atmospheric, contemplative b-roll — old books, candlelight, misty landscapes, solitary figures thinking, dramatic natural light, timeless, painterly, photorealistic",
+    "music_style": "slow ambient cinematic score, contemplative, minimal piano and sustained strings, deeply reflective, no vocals, low and unobtrusive"
+  },
+  "music": {
+    "enabled": true,
+    "tracks": "auto",
+    "minutes_per_track": 20,
+    "min_tracks": 1,
+    "max_tracks": 4
+  },
+  "voices": {
+    "German": "clone_2616153",
+    "English": "clone_2616153"
+  },
+  "writing_sections": [
+    {"name": "self_introduction", "weight": 0.06, "hint": "Woven in right after the hook, regenerated FRESH each video (never a copy-paste block): who Matthias is, so the viewer knows out of which life these words come. Fixed facts, all accurate: his name is Matthias Richter; he has studied the great thinkers of the human mind and soul since 2004, naming THIS video's cited philosopher(s) as among his teachers; he has not merely read their ideas but lived them, tested on himself day after day; today he is dreiundsechzig (63) years old — spell the age out in German words — and his life is better than ever, calmer, freer, richer in every sense, said plainly without bragging; not because he is cleverer, but because he understood a few laws woven into the world like magnetism or gravity — they work on everyone whether one believes in them or not, and the only choice is whether they work FOR you or AGAINST you; most people let them work against them their whole lives without noticing. End with a one-line bridge into this video's teaching. Keep it tight."},
+    {"name": "promise_tease_kill_exits", "weight": 0.08, "hint": "PROMISE + TEASE: state plainly what Matthias will reveal; tease the buried/forgotten knowledge and that he will show exactly how it works; plant the first open loop (e.g. 'the one moment almost everyone gets wrong'). Then KILL THE EXITS: stay with me, even if you have tried everything, even if you are sceptical, even if this sounds too small to matter — remove the viewer's reasons to leave."},
+    {"name": "stakes", "weight": 0.07, "hint": "The cost of NOT knowing this, framed psychologically and personally: years lost, staying stuck, the quiet daily damage. The 'this should bother you' beat. Kind but unflinching."},
+    {"name": "teaching_mechanism", "weight": 0.28, "hint": "The largest section. The real insight in the cited philosopher's AUTHENTIC concepts and vocabulary, spoken by Matthias to one person. If the mechanism is Murphy's: das Unterbewusstsein answers the FEELING not the words, the feeling of the wish fulfilled, impressing the subconscious. If Jung's: das Unbewusste, der Schatten, die Individuation, das Selbst — his genuine terms. Never invent terms; never fabricate studies, documents, institutions, or statistics. Weave the rare/hidden-knowledge positioning in here: this lives in very old books the modern stores no longer stock, passed down quietly — Matthias found it through two decades of study."},
+    {"name": "lineage_why_hidden", "weight": 0.09, "hint": "LINEAGE + WHY YOU WERE NEVER TAUGHT THIS: reverence for where it came from (old teachers, old books, passed quietly down generations; the cited philosophers as Matthias's own way in), PLUS the honest soft villain answering 'if this works, why isn't everyone doing it?': the inner life was left out of schooling; modern self-help watered it down; the world trains a certain reflex; your own conditioning. NEVER a suppression conspiracy — no 'they banned it', no 'they don't want you to know'."},
+    {"name": "midpoint_ctas", "weight": 0.04, "hint": "MIDPOINT COMMENT PROMPT: at a natural pause, Matthias invites the viewer to share their opinion or experience about one specific point from the video (»schreiben Sie es mir unten — ich lese es«). Warm, genuine, never mechanical. {EBOOK} Then immediately re-hook with a stronger tease so this is never an exit point."},
+    {"name": "practical_howto", "weight": 0.15, "hint": "Exactly how to use it: the practice, the words, what to do today or this week. Concrete and specific — specificity is the credibility engine. Include a pre-sleep / drowsy-state deepener where the mechanism supports it (Murphy's does: impressing the subconscious in the drowsy state before sleep)."},
+    {"name": "proof", "weight": 0.08, "hint": "PROOF, distinct from any story hook: a concrete, vivid, grounded example from Matthias's experience or observation that the method works. Plausible and human; never a fabricated study, statistic, or invented named real person. Miracles are chains of ordinary, explainable events."},
+    {"name": "close_block", "weight": 0.15, "hint": "CLOSE: zoom out, restate the moral, land the identity line (»wenn Sie der Mensch sind, der...«) and the line that this knowledge was always there — the viewer simply was never given it. Then CLOSING COMMENT PROMPT: which city they are watching from and whether something clicked today, plus a warm invitation to scroll down and read a few other comments. {LIKE_SUBSCRIBE} Then END-SCREEN FUNNEL: the final 10-20 seconds build curiosity for whatever video is recommended next WITHOUT naming it (»was ich Ihnen dort zeige, geht noch tiefer...«), folded with a LIGHT impermanence line — this kind of knowledge does not stay easily reachable forever. Atmospheric only; never a fake deadline."}
+  ],
+  "cta_lines": {
+    "ebook": "EBOOK CTA (flagged ON for this video): sandwich it at the midpoint — value, then the CTA, then an immediate re-hook into a bigger reveal. Straightforward, never forced; credibility through restraint.",
+    "like_subscribe": "SOFT LIKE/SUBSCRIBE: ask them to like and subscribe ONLY if they genuinely enjoyed the video and found it valuable, and make explicit it is not because he needs the count. Calm and unneedy.",
+    "community": "COMMUNITY CTA (flagged ON): honest and value-framed — the goal is not to take their money but to fund and improve the videos."
+  },
+  "north_star": "Trust is the single most important outcome of every video, because trust is what later lets the channel sell an e-book. Never say out loud that the video is about trust or relationship-building — it is shown, never announced. Never address a crowd; speak to ONE person, with Sie, as if teaching them and only them. Build trust three ways: deliver a genuinely valuable real teaching; show restraint by never forcing CTAs; position the material as rare, old, hard-to-find knowledge the viewer is fortunate to have found. The character brand is itself a trust engine: a named, consistent person with a real biography and a life that visibly works. Every hook is a promise the script must keep. Import the buried-secret FORMAT and FRAMING, never dishonest CONTENT.",
+  "rules": [
+    "GERMAN, fixed: the full script body is always German. Formal 'Sie' throughout, regardless of an informal 'du' in the title. German guillemets for quoted speech: »so«. Em-dashes for asides. 'du' only inside quoted inner-voice fragments or authentic quoted material (e.g. »Es geschieht dir nach deinem Glauben«) — body narration never drifts into du.",
+    "Matthias speaks in the FIRST PERSON as himself, drawing on the cited philosopher(s) as his teachers. He never impersonates a philosopher and never references who is reading the script.",
+    "Use the cited philosopher's genuine concepts and vocabulary accurately. No fabricated studies, fake suppressed documents, invented institutions or statistics, or false factual/health/financial claims. The 'secret' must be a real teaching.",
+    "The old/rare framing is carried by the genuine wisdom lineage of the ideas, never by naming a fabricated specific old document.",
+    "The honest villain only: the inner life was left out of schooling, modern self-help diluted it, the world trains a reflex, your own conditioning. Never suppression conspiracies.",
+    "Speak to ONE person with Sie; never 'Sie alle', 'ihr da draußen', or anything addressing a crowd. It must feel like a private teaching.",
+    "Credibility through restraint: every CTA soft, brief, optional-feeling, never begged; any mid-video CTA is immediately re-hooked.",
+    "Frame 'instant' language honestly: the inner shift begins the moment the feeling changes; when the outer result shows is left to time.",
+    "Light impermanence is allowed ONLY in the close/end-screen (knowledge does not stay easily reachable forever) — atmospheric, never a fake deadline.",
+    "Body is pure continuous prose: no headers, labels, bullets, or stage directions."
+  ],
+  "hook_types": {
+    "bold_statement": "An exaggerated, arresting statement of what the video is actually about, spoken by Matthias in first person. Exaggerate to grip, but stay within what the script can defend — overstate the stakes, never lie about the content.",
+    "short_story": "A short story from Matthias's own experience or observation — a person he watched or knew who had the very problem the viewer has, while Matthias already saw the real hidden cause. Told in his first person ('A man once came to me...'). The story must mirror exactly what the viewer needs or believes going in.",
+    "pattern_break": "Matthias breaks the pattern of what the viewer expects the intro to be — the break itself conveys authority and signals this is not a shallow video.",
+    "question": "Matthias asks a real question the viewer genuinely needs to stop and think about — never a rhetorical throwaway; it must tie directly to the core mechanism of the video.",
+    "you_told_me_in_the_comments": "Matthias opens as if reacting to what viewers said in the comments of HIS previous video, then pivots ('but what if that is not the whole truth'). Invented reactions must be plausible, on-theme feelings/situations — never fabricated studies, numbers, or named real people."
+  }
+}

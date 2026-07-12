@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden;
+    font-family:-apple-system,"Avenir Next","Segoe UI",Roboto,sans-serif; }
+  body { background:#FAF6EF; color:#1F3A4D; }
+  #stage { position:relative; width:100%; height:100%; display:flex;
+           align-items:center; justify-content:center; padding:0 14vw; }
+  #card { background:#fff; border-radius:2.4vw; padding:6vh 4vw;
+          box-shadow:0 1.6vh 5vh rgba(31,58,77,.14); width:100%;
+          border-top:1.6vh solid #E2725B; opacity:0; text-align:center; }
+  #icon { width:8vw; height:8vw; margin:0 auto 3vh; border-radius:50%;
+          background:#fdeeea; display:flex; align-items:center;
+          justify-content:center; font-size:4.6vw; font-weight:800;
+          color:#E2725B; }
+  #title { font-size:3.6vw; font-weight:800; color:#E2725B; opacity:0; }
+  #text { font-size:2.5vw; font-weight:600; line-height:1.5; margin-top:2.6vh;
+          opacity:0; }
+  #chips { margin-top:3.4vh; display:flex; gap:1.2vw; justify-content:center;
+           flex-wrap:wrap; }
+  .chip { background:#fdeeea; color:#c05740; font-size:1.9vw; font-weight:700;
+          padding:1.2vh 1.6vw; border-radius:999px; opacity:0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="card">
+    <div id="icon">!</div>
+    <div id="title"></div>
+    <div id="text"></div>
+    <div id="chips"></div>
+  </div>
+</div>
+<script>
+let D = 8, chips = [];
+const clamp = (x,a,b)=>Math.min(b,Math.max(a,x));
+const prog = (t,s,l)=>clamp((t-s)/l,0,1);
+const easeOut = p=>1-Math.pow(1-p,3);
+
+function setup(params, duration) {
+  D = duration;
+  document.getElementById("title").textContent = params.title || "Check first";
+  document.getElementById("text").textContent = params.text || "";
+  const wrap = document.getElementById("chips");
+  wrap.innerHTML = "";
+  chips = (params.items || []).slice(0, 5).map(x => {
+    const el = document.createElement("span");
+    el.className = "chip";
+    el.textContent = x;
+    wrap.appendChild(el);
+    return el;
+  });
+  seek(0);
+}
+function seek(t) {
+  const c = easeOut(prog(t, .2, .6));
+  const card = document.getElementById("card");
+  card.style.opacity = c;
+  card.style.transform = `translateY(${(1-c)*4}vh) scale(${.96+.04*c})`;
+  const icon = document.getElementById("icon");
+  icon.style.transform = `scale(${1 + Math.max(0, Math.sin(t*2.2))*.06})`;
+  document.getElementById("title").style.opacity = easeOut(prog(t, .6, .5));
+  const x = easeOut(prog(t, .9, .6));
+  const text = document.getElementById("text");
+  text.style.opacity = x; text.style.transform = `translateY(${(1-x)*1.6}vh)`;
+  chips.forEach((el, i) => {
+    el.style.opacity = easeOut(prog(t, 1.5 + i * .25, .4));
+  });
+}
+</script>
+</body>
+</html>
