@@ -161,3 +161,31 @@ b-roll of the beats it replaces.
 - Suno can stall; music is submitted early and skipped gracefully.
 - Subtitle style lives in `render._sub_style` (BorderStyle=4 on purpose —
   3 draws a shadow-copy artifact).
+
+---
+
+## Setup on a new machine (friend edition)
+
+1. **Requirements**: macOS or Linux with Python 3.9+, `ffmpeg` on PATH
+   (`brew install ffmpeg` on a Mac), and ~10 GB free disk.
+2. Clone this repo, then:
+   ```bash
+   ./run.sh
+   ```
+   First run creates the venv, installs Python deps and the headless
+   Chromium used for animation templates.
+3. **Keys**: copy `.env.example` to `.env` and fill in the values —
+   ask North for the current key set (NEVER commit `.env`; it's
+   git-ignored). All generation (voice, avatar, stock, LLM) bills to
+   these keys, so coordinate before big renders.
+4. Open http://127.0.0.1:5062, pick the profile (matthias-richter for
+   the German channel), enter a title, Generate. The gate pauses for
+   your hook choice; the video lands in `output/<job>/final.mp4`
+   (add `?download=1` to the video URL for a download).
+
+Notes:
+- If a job dies (disk, credits, crash), free the blocker and POST
+  `{"resume_job": "<job id>"}` to `/api/render` — everything already
+  generated is reused, nothing is re-billed.
+- Videos are ~1 GB/hour of runtime; old job folders can be deleted
+  once the final is saved elsewhere.
