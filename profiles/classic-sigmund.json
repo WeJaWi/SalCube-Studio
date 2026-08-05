@@ -1,0 +1,121 @@
+{
+  "name": "classic-sigmund",
+  "description": "Classic format: blurred stock background, Sigmund Freud cutout right, voice waveform left with subtitles beneath, up to 3h, ~90% stock + 10% grok stills. Very cheap. Fixed author: Sigmund Freud (no per-video cited-thinker switch).",
+  "engine": "hannah",
+  "channel_context": "the North long-form philosopher YouTube channel: single-voice narrations written and taught in the authentic voice of Sigmund Freud. The narrator speaks AS Freud would speak and teach, using his own concepts, vocabulary, and manner; there is no on-camera host",
+  "audience_line": "speaks to ONE viewer seeking depth, inner change, and the teachings of Sigmund Freud",
+  "video": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "ken_burns": true,
+    "beat_seconds": 40,
+    "broll_mix": {
+      "stock": 0.9,
+      "ai_image": 0.1
+    },
+    "max_template_repeats": 2,
+    "ai_video_resolution": "720p",
+    "overlay": {
+      "enabled": false
+    },
+    "transitions": {
+      "enabled": false
+    },
+    "host_budget_seconds": 0,
+    "layout": "classic",
+    "encode_preset": "veryfast",
+    "bg_blur": 8,
+    "figure": {
+      "image": "figures/freud.png",
+      "height_frac": 0.92,
+      "margin": 10
+    },
+    "subtitle": {
+      "font": "Nunito Bold",
+      "outline": 0
+    },
+    "waveform": {
+      "rate": 15,
+      "color": "0xFAF6EF@0.9",
+      "width_frac": 0.46,
+      "height_frac": 0.3,
+      "n": 5,
+      "scale": "sqrt"
+    }
+  },
+  "defaults": {
+    "language": "German",
+    "length_chars": 60000
+  },
+  "host": {
+    "enabled": false,
+    "persona": "The narration is written AS Sigmund Freud would speak and teach — his own concepts, vocabulary, and manner. Never mention who is reading the script; never break Freud's voice.",
+    "register": "Sober physician of the soul, dignified, honest, no false uplift — the reward is truth and self-knowledge, not easy happiness. Unhurried, certain, deeply humane."
+  },
+  "ai_disclosure": "",
+  "style": {
+    "broll_style": "cinematic, moody, atmospheric, painterly, dramatic natural light, timeless, high detail",
+    "music_style": "slow ambient cinematic score, contemplative, minimal piano and sustained strings, deeply reflective, no vocals, low and unobtrusive"
+  },
+  "music": {
+    "enabled": true,
+    "tracks": "auto",
+    "minutes_per_track": 20,
+    "min_tracks": 2,
+    "max_tracks": 8
+  },
+  "voices": {
+    "English": "elevenlabs_CwhRBWXzGAHq8TQ4Fs17",
+    "German": "elevenlabs_nPczCjzI2devNBz1zQrb"
+  },
+  "writing_sections": [
+    {
+      "name": "teaching",
+      "weight": 0.5,
+      "hint": "The core teaching — the largest part. Deliver the real insight in Freud's voice, speaking personally to the viewer. Weave in the rare-hidden-knowledge positioning naturally (knowledge rarely found online, living in old books, passed down quietly) — never repeat it mechanically, and never a suppression conspiracy."
+    },
+    {
+      "name": "midpoint_ctas",
+      "weight": 0.03,
+      "hint": "A warm, genuine invitation for the viewer to share their opinion or experience about one specific point from the video in the comments — never mechanical. {EBOOK} {PATREON} Then immediately re-hook so this is never an exit point."
+    },
+    {
+      "name": "practical",
+      "weight": 0.22,
+      "hint": "How to actually apply the information: the practice, the words, what to do today and this week. The practical how-to part, concrete and specific — specificity is the credibility engine."
+    },
+    {
+      "name": "proof_story",
+      "weight": 0.12,
+      "hint": "A concrete story (NOT the opening hook) that proves the teaching works, with real, grounded detail. Never a fabricated study, statistic, or invented named real person presented as real."
+    },
+    {
+      "name": "close_block",
+      "weight": 0.13,
+      "hint": "Wrap up warmly and bring the piece to a natural, resonant close in Freud's voice. Then a closing comment prompt: which city they are watching from and what one thing they will try this week, plus a warm invitation to scroll down and read a few other comments. {LIKE_SUBSCRIBE} End with the final 10-20 seconds building curiosity for whatever video is recommended next WITHOUT naming it."
+    }
+  ],
+  "cta_lines": {
+    "ebook": "EBOOK CTA (flagged ON for this video): a short, straightforward mention, easy and never forced, in the spirit of: 'If you want more on this, take a look in the description; I have linked an e-book there, inspired by Freud's teachings.' Sandwich with value and re-hook immediately.",
+    "like_subscribe": "SOFT LIKE/SUBSCRIBE: ask to like and subscribe ONLY if they actually enjoyed the video and found it valuable; make explicit it is not forced. Calm and unneedy.",
+    "community": "COMMUNITY CTA (flagged ON): honest and value-framed — the goal is not to take their money but to fund and improve the videos. In the spirit of: 'If you want to learn more and join a group of people who genuinely care, join the Skool community in the description. Yes, it is paid, but that money goes into making more of these videos and raising the quality every day.'"
+  },
+  "north_star": "Trust is the single most important outcome. Every hook, teaching, and CTA exists to prove the premise is real and build a genuine relationship. Never sacrifice trust for a cheap hook or pushy sell. Trust is shown, never announced — never say the video is about trust, and never address a crowd; speak to ONE person (you / your).",
+  "rules": [
+    "Write AS Sigmund Freud would speak and teach (his own concepts, vocabulary, manner). Never mention who is reading the script, the production, or anything behind the channel.",
+    "Speak directly to the viewer (you / your). Do not overdo it. Never address a crowd.",
+    "Weave in rare-hidden-knowledge positioning naturally (info rarely found online, passed down in old books) — never repeat it mechanically, never a suppression conspiracy.",
+    "The teaching must be Freud's genuine material: his real concepts and vocabulary used accurately. No fabricated studies, documents, institutions, or statistics.",
+    "Trust over everything: never a manipulative or dishonest hook or CTA; credibility through restraint.",
+    "If the language is German: formal Sie throughout (even if the title uses du), German guillemets »…«, em-dashes for asides.",
+    "Body is pure continuous prose: no headers, labels, bullets, or stage directions.",
+    "Freud's authentic term vocabulary (DE): das Unbewusste, das Es / das Ich / das Über-Ich, die Verdrängung, die Fehlleistungen, der Wiederholungszwang, die Reaktionsbildung, die Sublimierung, die Libido, die Traumdeutung, das Lustprinzip, das Realitätsprinzip, die Übertragung, der Widerstand. Register: sober physician of the soul, dignified, honest, no false uplift."
+  ],
+  "hook_types": {
+    "bold_statement": "An exaggerated, arresting statement of what the video is actually about, in Freud's voice. Overstate the stakes, never lie about the content — the script must earn the claim. (Spirit: 'You do not really control your behaviours, and it may already be forty years too late. But you CAN finally understand why you act the way you do.')",
+    "short_story": "A short story — e.g. Freud meeting a patient who believes they are cursed or doomed, while he already sees the real hidden cause. It mirrors exactly what the viewer needs or believes going in; a mirror, not decoration, and never the proof.",
+    "pattern_break": "Break the pattern of what the viewer expects the intro to be — the break itself conveys authority and proves this is not a shallow video. (Spirit: 'This is not a video about getting rich… this is a video about putting YOU in the position where making that money finally becomes possible.')",
+    "question": "A real question the viewer genuinely needs to stop and answer from their own life — never rhetorical filler; it must tie directly to the core mechanism. (Spirit: 'What was the very last thought you had last night, right before you fell asleep?')"
+  }
+}

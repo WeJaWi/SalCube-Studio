@@ -43,7 +43,13 @@
   "host_budget_seconds": 120,
   "split_every_seconds": 420,
   "split_max_seconds": 15,
-  "corner_badge": "branding/grandma-hannah-qr.png"
+  "corner_badge": "branding/grandma-hannah-qr.png",
+  "subtitle": {
+    "size": 18,
+    "blur": 1,
+    "margin_v": 24,
+    "color": "&H00FFFFFF"
+  }
  },
  "defaults": {
   "language": "English",

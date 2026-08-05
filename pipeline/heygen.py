@@ -111,10 +111,14 @@ def collect_talking(video_id: str, dest: Path, audio_path: Optional[Path] = None
 def _poll(video_id: str, timeout_s: int, interval: float) -> str:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        r = requests.get(f"{config.HEYGEN_BASE_URL}/v1/video_status.get",
-                         headers={"X-Api-Key": config.HEYGEN_API_KEY},
-                         params={"video_id": video_id}, timeout=60)
-        data = (r.json().get("data") or {})
+        try:
+            r = requests.get(f"{config.HEYGEN_BASE_URL}/v1/video_status.get",
+                             headers={"X-Api-Key": config.HEYGEN_API_KEY},
+                             params={"video_id": video_id}, timeout=60)
+            data = (r.json().get("data") or {})
+        except (requests.RequestException, ValueError):
+            time.sleep(interval)  # transient — keep polling
+            continue
         status = data.get("status")
         if status == "completed":
             url = data.get("video_url")
@@ -158,10 +162,15 @@ def collect_talking_v3(video_id: str, dest: Path, timeout_s: int = 2400,
     """Wait for a v3 (Avatar IV/V) clip and download it."""
     waited = 0.0
     while waited < timeout_s:
-        r = requests.get(f"{config.HEYGEN_BASE_URL}/v3/videos/{video_id}",
-                         headers={"X-Api-Key": config.HEYGEN_API_KEY},
-                         timeout=60)
-        d = (r.json().get("data") or {})
+        try:
+            r = requests.get(f"{config.HEYGEN_BASE_URL}/v3/videos/{video_id}",
+                             headers={"X-Api-Key": config.HEYGEN_API_KEY},
+                             timeout=60)
+            d = (r.json().get("data") or {})
+        except (requests.RequestException, ValueError):
+            time.sleep(interval)
+            waited += interval
+            continue
         status = d.get("status")
         if status == "completed" and d.get("video_url"):
             media = requests.get(d["video_url"], timeout=600)

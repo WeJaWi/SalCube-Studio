@@ -17,10 +17,10 @@ if [ ! -f .env ]; then
   cp .env.example .env
 fi
 
-# video-studio uses 5050; this studio defaults to 5062
+# video-studio uses 5050; Dmiqwi defaults to 5062
 # (NOT 5060/5061 — Chrome blocks those as unsafe SIP ports).
 export PORT="${PORT:-5062}"
 echo ""
-echo "  ▶  Open  http://127.0.0.1:${PORT}   (keep this terminal open)"
+echo "  ▶  Dmiqwi  →  http://127.0.0.1:${PORT}   (keep this terminal open)"
 echo ""
 python app.py

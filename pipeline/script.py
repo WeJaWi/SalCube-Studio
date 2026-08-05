@@ -68,6 +68,24 @@ def _ebook_line(inputs: Dict[str, Any], profile: Dict[str, Any]) -> str:
     return line
 
 
+def _spotify_line(inputs: Dict[str, Any], profile: Dict[str, Any]) -> str:
+    """Optional Spotify popup cue woven into midpoint/close CTAs."""
+    if not inputs.get("spotify_popup"):
+        return ""
+    url = (inputs.get("spotify_url") or "").strip()
+    custom = (profile.get("cta_lines", {}) or {}).get("spotify", "").strip()
+    if custom:
+        base = custom
+    else:
+        base = ("A Spotify card sits in the bottom-right corner of the video. "
+                "Add ONE natural half-sentence inviting the viewer to listen "
+                "on Spotify (or check the link in the description) — warm, "
+                "optional, never salesy. Mention it only once.")
+    if url:
+        base += f" The Spotify link is: {url}."
+    return base
+
+
 def _disclosure(profile: Dict[str, Any]) -> str:
     """The spoken AI disclosure as plain text. Tolerates a structured value
     (dict with a text-ish field) so a doc-style profile can't crash a job."""
@@ -78,77 +96,198 @@ def _disclosure(profile: Dict[str, Any]) -> str:
 
 
 # ─────────────────────── Stage 1: outline + hooks ───────────────────────
-def outline_and_hooks(inputs: Dict[str, Any], profile: Dict[str, Any],
-                      log=lambda *_: None) -> Dict[str, Any]:
-    """Return {"outline": str, "hooks": {type: text}} — English, for approval."""
-    hook_types = profile.get("hook_types", {})
-    hook_order = list(hook_types) or HOOK_ORDER
-    hooks_def = "\n".join(f'- "{k}": {v}' for k, v in hook_types.items())
-    sections = "\n".join(
-        f"{i+1}. {s['name']}: {s['hint'][:220]}"
-        for i, s in enumerate(profile.get("writing_sections", [])))
+# Models often truncate when asked for 4–5 long hooks + a full outline in
+# one JSON blob. Generate hooks and outline in separate calls; re-ask only
+# for missing hook keys.
+_HOOK_KEY_ALIASES = {
+    "story": "short_story",
+    "shortstory": "short_story",
+    "comment": "you_told_me_in_the_comments",
+    "comments": "you_told_me_in_the_comments",
+    "you_told_me": "you_told_me_in_the_comments",
+    "pattern": "pattern_break",
+    "bold": "bold_statement",
+}
+
+
+def _normalize_hooks_dict(raw: Any, hook_order: List[str]) -> Dict[str, str]:
+    """Map model hook keys onto the profile's expected keys."""
+    if not isinstance(raw, dict):
+        return {k: "" for k in hook_order}
+    by_lower = {str(k).strip().lower(): v for k, v in raw.items()}
+    out: Dict[str, str] = {}
+    for want in hook_order:
+        val = by_lower.get(want.lower(), "")
+        if not val:
+            for alias, canon in _HOOK_KEY_ALIASES.items():
+                if canon == want and alias in by_lower:
+                    val = by_lower[alias]
+                    break
+        if not val:
+            # fuzzy: model used a close key (e.g. "short_story_hook")
+            for rk, rv in by_lower.items():
+                if want.lower() in rk or rk in want.lower():
+                    val = rv
+                    break
+        out[want] = str(val or "").strip()
+    return out
+
+
+def _generate_hooks(inputs: Dict[str, Any], profile: Dict[str, Any],
+                    hook_order: List[str], hook_types: Dict[str, Any],
+                    model: str, log=lambda *_: None) -> Dict[str, str]:
+    """Generate all hook options; fill gaps with targeted re-asks."""
     audience = profile.get(
         "audience_line", "speaks to ONE viewer aged 60-80")
-    ebook = ("The e-book CTA IS flagged for this video — mark its position "
-             "near the midpoint comment prompt." if inputs.get("promote_ebook")
-             else "No e-book CTA in this video.")
     opening = ("The hook follows the channel's fixed AI disclosure"
                if _disclosure(profile)
                else "The hook is the literal opening of the video")
-    hooks_json = ", ".join(f'"{k}": "..."' for k in hook_order)
+    hooks: Dict[str, str] = {k: "" for k in hook_order}
+    # Full batch first, then only missing keys (avoids one mega-JSON with outline)
+    for attempt in range(4):
+        missing = [k for k in hook_order if not hooks[k]]
+        if not missing:
+            break
+        hooks_def = "\n".join(
+            f'- "{k}": {hook_types.get(k, "")}' for k in missing)
+        hooks_json = ", ".join(f'"{k}": "..."' for k in missing)
+        n = len(missing)
+        prompt = (
+            f"{_persona_context(inputs, profile)}\n"
+            f"Target length of the finished video: {inputs['length_chars']} "
+            f"characters (~{inputs['length_chars'] // 1000} minutes spoken).\n\n"
+            f"Write EXACTLY {n} hook OPTION(S) in ENGLISH (working language), "
+            f"one for each type below. Each is a real spoken opening of roughly "
+            f"120–200 words that {audience} and makes only promises the video "
+            f"can honestly keep. {opening}, so its first sentence must grab "
+            f"attention and do real work.\n"
+            f"Hook type(s):\n{hooks_def}\n\n"
+            f"Return ONLY JSON (no outline, no other keys):\n"
+            f"{{\"hooks\": {{{hooks_json}}}}}"
+        )
+        log(f"hooks attempt {attempt + 1}/4 "
+            f"({'all' if n == len(hook_order) else 'fill ' + ', '.join(missing)})…")
+        data = llm.chat_json(prompt, model, max_tokens=12000, timeout=240)
+        got = data.get("hooks", data) if isinstance(data, dict) else {}
+        filled = _normalize_hooks_dict(got, missing)
+        for k, v in filled.items():
+            if v and not hooks[k]:
+                hooks[k] = v
+        still = [k for k in hook_order if not hooks[k]]
+        if still:
+            log(f"hooks still missing: {', '.join(still)}")
+
+    # Last resort: generate each missing hook as plain prose (no JSON)
+    for k in [k for k in hook_order if not hooks[k]]:
+        log(f"hooks: plain-text fallback for '{k}'…")
+        text = llm.chat(
+            f"{_persona_context(inputs, profile)}\n"
+            f"Write ONE video hook in ENGLISH, type '{k}': "
+            f"{hook_types.get(k, '')}\n"
+            f"~120–200 spoken words, {audience}. "
+            f"Output ONLY the hook prose — no labels, no JSON.",
+            model, max_tokens=1500, timeout=120,
+        ).strip()
+        if text:
+            hooks[k] = text
+
+    missing = [k for k, v in hooks.items() if not v]
+    if missing:
+        raise RuntimeError(
+            f"hook generation incomplete (missing: {', '.join(missing)})")
+    return hooks
+
+
+def _generate_outline(inputs: Dict[str, Any], profile: Dict[str, Any],
+                      model: str, log=lambda *_: None) -> str:
+    """Detailed outline as plain text (or JSON.outline) — separate from hooks."""
+    sections = "\n".join(
+        f"{i+1}. {s['name']}: {s['hint'][:220]}"
+        for i, s in enumerate(profile.get("writing_sections", [])))
+    ebook = ("The e-book CTA IS flagged for this video — mark its position "
+             "near the midpoint comment prompt." if inputs.get("promote_ebook")
+             else "No e-book CTA in this video.")
     prompt = (
         f"{_persona_context(inputs, profile)}\n"
         f"Target length: {inputs['length_chars']} characters (~"
         f"{inputs['length_chars'] // 1000} minutes spoken).\n\n"
-        f"Deliver, in ENGLISH (the working language, regardless of the script's "
-        f"target language):\n"
-        f"(a) EXACTLY {len(hook_order)} hooks as OPTIONS, one of each type, "
-        f"each a real spoken opening of roughly 120-220 words that {audience} "
-        f"and makes only promises the video can honestly keep. {opening}, so "
-        f"its first sentence must grab attention and do real work. Hook "
-        f"types:\n{hooks_def}\n\n"
-        f"(b) a DETAILED outline of the whole video — every section below with "
-        f"its beats sketched in a few lines each, any safety caveats flagged "
-        f"where they will appear, a short SOURCE LIST for every claim-bearing "
-        f"section (the real tradition, book, or teaching in plain words — never "
-        f"fabricated), and suggested on-screen evidence moments for the "
+        f"Write a DETAILED outline of the whole video IN ENGLISH (working "
+        f"language). Cover every section below with its beats sketched in a "
+        f"few lines each, flag any safety caveats where they will appear, "
+        f"include a short SOURCE LIST for every claim-bearing section (the "
+        f"real tradition, book, or teaching in plain words — never "
+        f"fabricated), and suggest on-screen evidence moments for the "
         f"editor. {profile.get('outline_extras', '')} {ebook}\n"
         f"Sections (after the chosen hook):\n"
         f"{sections}\n\n"
         f"Return ONLY JSON:\n"
-        f"{{\"hooks\": {{{hooks_json}}}, \"outline\": \"...\"}}"
+        f'{{\"outline\": \"...full outline as one string, use \\\\n for newlines...\"}}'
     )
-    # Models occasionally return the JSON with a hook or the outline missing
-    # (usually a truncated reply salvaged by the repair pass) — retry the
-    # whole call rather than killing the job on one bad roll.
-    last_missing = "?"
     for attempt in range(3):
-        data = llm.chat_json(prompt, max_tokens=16000)
-        hooks = {k: str(data.get("hooks", {}).get(k, "")).strip()
-                 for k in hook_order}
-        outline = str(data.get("outline", "")).strip()
-        missing = [k for k, v in hooks.items() if not v]
-        if not outline:
-            missing.append("outline")
-        if not missing:
-            log(f"outline ready ({len(outline)} chars), "
-                f"{len(hook_order)} hooks ready")
-            return {"outline": outline, "hooks": hooks}
-        last_missing = ", ".join(missing)
-        log(f"outline attempt {attempt + 1}/3 incomplete "
-            f"(missing: {last_missing}) — retrying")
-    raise RuntimeError(f"outline/hooks generation incomplete after 3 attempts "
-                       f"(missing: {last_missing})")
+        log(f"outline attempt {attempt + 1}/3…")
+        data = llm.chat_json(prompt, model, max_tokens=12000, timeout=240)
+        outline = ""
+        if isinstance(data, dict):
+            outline = str(data.get("outline") or data.get("body") or "").strip()
+            # model sometimes returns sections as a list
+            if not outline and isinstance(data.get("sections"), list):
+                outline = "\n\n".join(str(s) for s in data["sections"]).strip()
+        if len(outline) >= 400:
+            return outline
+        log(f"outline attempt {attempt + 1}/3 too short "
+            f"({len(outline)} chars) — retrying")
+
+    # Plain-text fallback (no JSON wrapper to truncate)
+    log("outline: plain-text fallback…")
+    text = llm.chat(
+        f"{_persona_context(inputs, profile)}\n"
+        f"Target length: {inputs['length_chars']} characters.\n\n"
+        f"Write a DETAILED video outline in ENGLISH covering every section:\n"
+        f"{sections}\n\n"
+        f"{ebook} {profile.get('outline_extras', '')}\n"
+        f"Include beats, safety flags, source list, and on-screen evidence "
+        f"notes. Output ONLY the outline prose — no JSON, no preamble.",
+        model, max_tokens=12000, timeout=240,
+    ).strip()
+    if len(text) < 400:
+        raise RuntimeError(
+            f"outline generation incomplete after retries ({len(text)} chars)")
+    return text
+
+
+def outline_and_hooks(inputs: Dict[str, Any], profile: Dict[str, Any],
+                      model: str, log=lambda *_: None) -> Dict[str, Any]:
+    """Return {"outline": str, "hooks": {type: text}} — English, for approval.
+
+    Hooks and outline are separate LLM calls so long Matthias/classic hook
+    sets no longer truncate the outline (or vice versa) mid-JSON.
+    """
+    hook_types = profile.get("hook_types", {}) or {}
+    hook_order = list(hook_types) or list(HOOK_ORDER)
+    log(f"generating {len(hook_order)} hooks, then outline (split calls)…")
+    hooks = _generate_hooks(inputs, profile, hook_order, hook_types, model, log=log)
+    outline = _generate_outline(inputs, profile, model, log=log)
+    log(f"outline ready ({len(outline)} chars), {len(hooks)} hooks ready")
+    return {"outline": outline, "hooks": hooks}
 
 
 # ─────────────────────── Stage 3: full script ───────────────────────────
 def _generate_section(name: str, target_chars: int, ctx: str, tail: str,
-                      extra: str, language: str = "English") -> str:
-    """Generate one structural section, continuing until ~target length."""
+                      extra: str, model: str, language: str = "English",
+                      log=lambda *_: None) -> str:
+    """Generate one structural section, continuing until ~target length.
+
+    Large sections (e.g. 40k teaching) are written in moderate chunks — a
+    single 16k-token call often triggers provider 500s on kie. Smaller
+    chunks + retries in llm.chat() is more reliable.
+    """
     out = ""
     guard = 0
-    while len(out) < int(target_chars * 0.97) and guard < 8:
+    # ~3–4k chars per call is safer than asking for the full remaining 40k
+    chunk_chars = 3500
+    while len(out) < int(target_chars * 0.97) and guard < 20:
         remaining = target_chars - len(out)
+        ask = min(remaining, chunk_chars)
         cont = (f"Continue seamlessly from where this leaves off, without repeating it:\n"
                 f"...{(tail + out)[-600:]}\n\n") if (tail or out) else ""
         prompt = (
@@ -157,11 +296,14 @@ def _generate_section(name: str, target_chars: int, ctx: str, tail: str,
             f"every sentence must be {language}, regardless of the language of "
             f"any excerpt above.\n{extra}\n"
             f"{cont}"
-            f"Write approximately {remaining} more characters (spaces included). "
+            f"Write approximately {ask} more characters (spaces included) — "
+            f"not more. "
             f"Output ONLY the narration prose for this part — no headings, labels, "
             f"quotes around it, or notes. Continuous prose only."
         )
-        chunk = llm.chat(prompt, max_tokens=16000)
+        log(f"  {name}: chunk {guard + 1} (~{ask} chars, have {len(out)}/{target_chars})")
+        # 8k tokens is enough for ~3.5k chars of prose with headroom
+        chunk = llm.chat(prompt, model, max_tokens=8000, timeout=180)
         if not chunk:
             break
         out += ("" if not out else " ") + chunk.strip()
@@ -170,7 +312,7 @@ def _generate_section(name: str, target_chars: int, ctx: str, tail: str,
 
 
 def write_script(inputs: Dict[str, Any], profile: Dict[str, Any],
-                 outline: str, hook_text: str,
+                 outline: str, hook_text: str, model: str,
                  log=lambda *_: None) -> str:
     """Produce the full narration: disclosure + hook + outlined sections."""
     disclosure = _disclosure(profile)
@@ -188,11 +330,12 @@ def write_script(inputs: Dict[str, Any], profile: Dict[str, Any],
             f"voice, impact, and promises (adapt idioms naturally, follow the "
             f"language conventions in the rules). Output ONLY the {language} "
             f"prose:\n\n{hook_text}",
-            max_tokens=2000).strip() or hook_text
+            model, max_tokens=2000).strip() or hook_text
     body_target = max(600, int(inputs["length_chars"]) - len(disclosure) - len(hook_text))
 
     ctas = profile.get("cta_lines", {})
     ebook_line = _ebook_line(inputs, profile)
+    spotify_line = _spotify_line(inputs, profile)
     ctx = (
         f"{_persona_context(inputs, profile)}\n"
         f"THE APPROVED OUTLINE for this video (follow it; the sources listed in "
@@ -207,6 +350,7 @@ def write_script(inputs: Dict[str, Any], profile: Dict[str, Any],
 
     parts: List[str] = [disclosure, hook_text]
     tail = hook_text[-800:]
+    spotify_placed = False
     for sec in profile.get("writing_sections", []):
         hint = sec["hint"]
         if "{EBOOK}" in hint:
@@ -226,10 +370,28 @@ def write_script(inputs: Dict[str, Any], profile: Dict[str, Any],
         if sec["name"] == "midpoint_ctas" and not inputs.get("comment_cta", True):
             hint = ("A short natural mid-video pause with a gentle re-hook tease "
                     "for what comes next. No comment prompt in this video.")
+        # One natural Spotify mention when the on-screen popup is enabled
+        if spotify_line and not spotify_placed and sec["name"] in (
+                "midpoint_ctas", "close_block", "close"):
+            hint = (hint + " " + spotify_line).strip()
+            spotify_placed = True
         target = max(250, int(body_target * float(sec.get("weight", 0.1))))
         log(f"writing {sec['name']} (~{target} chars)")
-        text = _generate_section(sec["name"], target, ctx, tail, hint,
-                                 language=language)
+        try:
+            text = _generate_section(sec["name"], target, ctx, tail, hint,
+                                     model, language=language, log=log)
+        except Exception as e:  # noqa: BLE001
+            # Surface which section died so the UI / resume is clear.
+            # Transient 5xx is already retried inside llm.chat; if we still
+            # land here the provider stayed down — re-raise with context.
+            raise RuntimeError(
+                f"script section '{sec['name']}' failed after retries: {e}"
+            ) from e
+        if not text.strip():
+            raise RuntimeError(
+                f"script section '{sec['name']}' came back empty — "
+                f"provider may be overloaded; resume this job to retry")
+        log(f"  {sec['name']}: done ({len(text)} chars)")
         parts.append(text)
         tail = text[-800:]
     return "\n\n".join(p for p in parts if p).strip()
@@ -348,7 +510,7 @@ QUERY_RULES = (
 
 
 def plan_beats(narration: str, profile: Dict[str, Any], broll_modes: List[str],
-               anim_templates: Optional[List[str]] = None,
+               model: str, anim_templates: Optional[List[str]] = None,
                language: str = "English",
                log=lambda *_: None) -> Tuple[List[Dict[str, Any]], str]:
     """Type every beat as b-roll. Returns (beats, music_prompt).
@@ -461,7 +623,7 @@ def plan_beats(narration: str, profile: Dict[str, Any], broll_modes: List[str],
         if len(idx_all) > BATCH:
             log(f"planning beats {start + 1}-{start + len(batch)} of {len(idx_all)}")
         try:
-            data = llm.chat_json(_batch_prompt(batch), max_tokens=16000)
+            data = llm.chat_json(_batch_prompt(batch), model, max_tokens=16000)
             if start == 0:
                 music_prompt = data.get("music_prompt", music_prompt)
             for b in data.get("beats", []):
@@ -492,7 +654,7 @@ PATREON_MARKER = "[—— HIER ABSCHNEIDEN · WEITER AUF PATREON ——]"
 
 
 def insert_patreon_cut(narration: str, position: int, language: str,
-                       log=lambda *_: None) -> str:
+                       model: str, log=lambda *_: None) -> str:
     """Surgically insert the Patreon cut at ~`position` characters.
 
     The passage around the chosen sentence boundary is rewritten so the free
@@ -527,7 +689,7 @@ def insert_patreon_cut(narration: str, position: int, language: str,
         f"text replacing A+B including the marker line.\n\n"
         f"EXCERPT A:\n{before}\n\nEXCERPT B:\n{after}"
     )
-    data = llm.chat_json(prompt, max_tokens=4000)
+    data = llm.chat_json(prompt, model, max_tokens=4000)
     replacement = str(data.get("replacement", "")).strip()
     if "ABSCHNEIDEN" not in replacement:
         raise RuntimeError("cut rewrite did not include the marker")
@@ -535,9 +697,33 @@ def insert_patreon_cut(narration: str, position: int, language: str,
     return narration[:start] + replacement + narration[end:]
 
 
+def insert_patreon_cut_fallback(narration: str, position: int,
+                                language: str = "English",
+                                log=lambda *_: None) -> str:
+    """Insert the Patreon marker at a sentence boundary (no LLM rewrite).
+
+    Used when the cliffhanger rewrite fails (provider/JSON errors). The free
+    half still ends cleanly enough for a hard cut + end CTA clip.
+    """
+    position = max(500, min(int(position), max(len(narration) - 500, 500)))
+    boundary = position
+    match = re.compile(r'[.!?…]["»]?\s').search(narration, position)
+    if match:
+        boundary = match.end()
+    if language.lower().startswith(("german", "deutsch")):
+        reopen = "Sie sind also weitergegangen. "
+    else:
+        reopen = "So you decided to keep going. "
+    insert = (
+        f"\n\n{PATREON_MARKER}\n\n{reopen}"
+    )
+    log(f"Patreon cut (fallback marker) at ~{boundary} chars")
+    return narration[:boundary].rstrip() + insert + narration[boundary:].lstrip()
+
+
 def insert_ebook_cta(narration: str, inputs: Dict[str, Any],
                      profile: Dict[str, Any], position: int,
-                     log=lambda *_: None) -> str:
+                     model: str, log=lambda *_: None) -> str:
     """Surgically weave the e-book CTA at ~`position` characters.
 
     Mirrors insert_patreon_cut: the passage around the nearest sentence
@@ -569,7 +755,7 @@ def insert_ebook_cta(narration: str, inputs: Dict[str, Any],
         f"including the CTA.\n\n"
         f"EXCERPT A:\n{before}\n\nEXCERPT B:\n{after}"
     )
-    data = llm.chat_json(prompt, max_tokens=4000)
+    data = llm.chat_json(prompt, model, max_tokens=4000)
     replacement = str(data.get("replacement", "")).strip()
     if len(replacement) < (len(before) + len(after)) * 0.6:
         raise RuntimeError("CTA weave came back suspiciously short")
@@ -578,7 +764,7 @@ def insert_ebook_cta(narration: str, inputs: Dict[str, Any],
 
 
 def plan_mindmap(inputs: Dict[str, Any], outline: str,
-                 beats: List[Dict[str, Any]],
+                 beats: List[Dict[str, Any]], model: str,
                  log=lambda *_: None) -> Optional[Dict[str, Any]]:
     """Build the video's recurring mind-map slide and place its appearances.
 
@@ -609,7 +795,7 @@ def plan_mindmap(inputs: Dict[str, Any], outline: str,
         f"SEGMENTS:\n{numbered}"
     )
     try:
-        data = llm.chat_json(prompt, max_tokens=3000)
+        data = llm.chat_json(prompt, model, max_tokens=3000)
         nodes = [str(n) for n in data.get("nodes", [])][:8]
         placements: Dict[int, int] = {}
         for p in data.get("placements", []):

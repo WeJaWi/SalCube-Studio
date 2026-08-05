@@ -4,12 +4,27 @@
 # generated content & caches
 output/
 overlays/
+logs/
 server.log
 nohup.out
 __pycache__/
 *.pyc
 .venv/
 .DS_Store
+
+# local editor / worker-machine state
+.claude/
+
+# Thumbnail history is personal/generated. Keep only the reusable default
+# template as a project asset.
+thumbnails/*
+!thumbnails/templates/
+!thumbnails/templates/default.png
+
+# Optional external tooling and unrelated browser-extension workspace. The
+# core pipeline only detects waveformr when present; workers do not need it.
+vendor/
+x-post-deleter/
 
 # personal voice test files
 voice_tests/

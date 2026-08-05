@@ -8,15 +8,17 @@ Both providers are queried for every beat. Selection modes:
              narration. No thumbnail downloads; near-free.
   "off"    — plain keyword overlap between the query and metadata (legacy).
 
-`used` is a per-run set of provider-namespaced asset ids — footage never
-repeats within one video.
+`used` is a per-run {provider-namespaced asset id: use count} map — each
+clip may appear at most `max_repeats` times (default 1 — no repeats) before
+it's excluded from selection. Raise it per profile if a long video needs to
+lean on a small relevant pool instead of falling through to blank cards.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import requests
 
@@ -183,12 +185,13 @@ def _gather(query: str, sources) -> List[Hit]:
 
 
 def _select(hits: List[Hit], dest: Path, min_score: float,
-            used: Optional[set], narration: str, query: str,
-            smart: str) -> Optional[Path]:
+            used: Optional[Dict[str, int]], narration: str, query: str,
+            smart: str, max_repeats: int = 1) -> Optional[Path]:
     """Pick and download one hit. Smart modes ask the curator; if the judge
     is unavailable (network/LLM failure) we degrade to keyword scoring so a
     render never dies on the choosing step."""
-    hits = [h for h in hits if not (used is not None and h.nid in used)]
+    hits = [h for h in hits
+            if not (used is not None and used.get(h.nid, 0) >= max_repeats)]
     hits.sort(key=lambda h: -h.score)
     if smart in ("vision", "text") and hits:
         from . import curator
@@ -209,7 +212,7 @@ def _select(hits: List[Hit], dest: Path, min_score: float,
                     return None
                 continue
             if used is not None:
-                used.add(h.nid)
+                used[h.nid] = used.get(h.nid, 0) + 1
             return path
     for h in hits:
         if h.score < min_score:
@@ -220,23 +223,26 @@ def _select(hits: List[Hit], dest: Path, min_score: float,
             print(f"[footage] download failed for {h.nid}: {e}")
             continue
         if used is not None:
-            used.add(h.nid)
+            used[h.nid] = used.get(h.nid, 0) + 1
         return path
     return None
 
 
 def fetch_stock(query: str, dest: Path, min_width: int = 1280,
-                min_score: float = 0.4, used: Optional[set] = None,
-                narration: str = "", smart: str = "off") -> Optional[Path]:
+                min_score: float = 0.4, used: Optional[Dict[str, int]] = None,
+                narration: str = "", smart: str = "off",
+                max_repeats: int = 1) -> Optional[Path]:
     """Best-matching stock VIDEO across both providers, or None."""
     hits = _gather(query, (lambda q: _pixabay_videos(q, min_width),
                            lambda q: _pexels_videos(q, min_width)))
-    return _select(hits, dest, min_score, used, narration, query, smart)
+    return _select(hits, dest, min_score, used, narration, query, smart,
+                   max_repeats)
 
 
 def fetch_stock_image(query: str, dest: Path, min_score: float = 0.4,
-                      used: Optional[set] = None, narration: str = "",
-                      smart: str = "off") -> Optional[Path]:
+                      used: Optional[Dict[str, int]] = None, narration: str = "",
+                      smart: str = "off", max_repeats: int = 1) -> Optional[Path]:
     """Best-matching stock PHOTO across both providers (Ken Burns at render)."""
     hits = _gather(query, (_pixabay_photos, _pexels_photos))
-    return _select(hits, dest, min_score, used, narration, query, smart)
+    return _select(hits, dest, min_score, used, narration, query, smart,
+                   max_repeats)

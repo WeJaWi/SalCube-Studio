@@ -16,24 +16,54 @@ import requests
 from . import config
 
 
-def _retrying(fn, attempts: int = 3, backoff: float = 5.0):
-    """Run fn(); retry transient network failures with linear backoff."""
+def _retrying(fn, attempts: int = 4, backoff: float = 5.0):
+    """Run fn(), retrying network failures AND rate-limit/server errors
+    (429/5xx) — several videos submitting jobs concurrently makes a 429
+    more likely, and it must not fail the call outright. Honors a
+    Retry-After header on 429 when the provider sends one.
+
+    fn() may return a raw requests.Response (most callers — the 429/5xx
+    check applies) OR an already-validated result like download()'s Path
+    (raise_for_status() already ran inside fn() itself) — only Response
+    objects are inspected for a retryable status code.
+    """
     last: Exception = RuntimeError("no attempt made")
     for a in range(attempts):
         try:
-            return fn()
+            r = fn()
         except requests.RequestException as e:
             last = e
             if a < attempts - 1:
                 time.sleep(backoff * (a + 1))
+            continue
+        if (isinstance(r, requests.Response)
+                and (r.status_code == 429 or r.status_code >= 500)):
+            last = RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+            if a < attempts - 1:
+                wait = backoff * (a + 1)
+                retry_after = r.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        wait = max(wait, float(retry_after))
+                    except ValueError:
+                        pass
+                time.sleep(min(wait, 60.0))
+                continue
+        return r
     raise last
 
 
 def download(url: str, dest: Path) -> Path:
     def _dl():
-        r = requests.get(url, timeout=300)
+        # Stream downloads to disk. A provider URL normally points at a tiny
+        # stock clip, but buffering a multi-GB response in RAM can kill the
+        # render process before its retry logic gets a chance to help.
+        r = requests.get(url, timeout=300, stream=True)
         r.raise_for_status()
-        dest.write_bytes(r.content)
+        with dest.open("wb") as out:
+            for block in r.iter_content(chunk_size=1024 * 1024):
+                if block:
+                    out.write(block)
         return dest
     return _retrying(_dl)
 
@@ -85,7 +115,11 @@ def ai33_poll(task_id: str, timeout_s: int = 1200, interval: float = 5.0,
         except requests.RequestException:
             time.sleep(interval)  # transient — keep polling
             continue
-        data = r.json()
+        try:
+            data = r.json()
+        except ValueError:  # 502/504 HTML page — transient, keep polling
+            time.sleep(interval)
+            continue
         status = data.get("status")
         if on_progress:
             on_progress(data.get("progress", 0))
@@ -128,7 +162,11 @@ def kie_poll(task_id: str, timeout_s: int = 600, interval: float = 4.0,
         except requests.RequestException:
             time.sleep(interval)  # transient — keep polling
             continue
-        data = r.json().get("data") or {}
+        try:
+            data = r.json().get("data") or {}
+        except ValueError:  # 502/504 HTML page — transient, keep polling
+            time.sleep(interval)
+            continue
         state = data.get("state")
         if state == "success":
             result = data.get("resultJson")
@@ -141,20 +179,22 @@ def kie_poll(task_id: str, timeout_s: int = 600, interval: float = 4.0,
     raise RuntimeError(f"kie task {task_id} timed out after {timeout_s}s")
 
 
-def kie_upload(path: Path, upload_dir: str = "health-studio") -> str:
+def kie_upload(path: Path, upload_dir: str = "health-studio",
+              api_key: Optional[str] = None) -> str:
     """Upload a local file to kie's temp storage (3-day retention).
 
     Returns a downloadUrl usable as image_url/audio_url in kie model inputs.
     """
     url = f"{config.KIE_UPLOAD_BASE_URL}/api/file-stream-upload"
     with open(path, "rb") as f:
-        r = requests.post(
-            url,
-            headers={"Authorization": f"Bearer {config.KIE_API_KEY}"},
-            data={"uploadPath": upload_dir, "fileName": path.name},
-            files={"file": f},
-            timeout=300,
-        )
+        file_bytes = f.read()
+    r = _retrying(lambda: requests.post(
+        url,
+        headers={"Authorization": f"Bearer {api_key or config.KIE_API_KEY}"},
+        data={"uploadPath": upload_dir, "fileName": path.name},
+        files={"file": file_bytes},
+        timeout=300,
+    ))
     data = r.json()
     if not data.get("success") or not (data.get("data") or {}).get("downloadUrl"):
         raise RuntimeError(f"kie upload error {r.status_code}: {data.get('msg') or r.text[:300]}")

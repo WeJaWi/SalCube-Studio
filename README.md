@@ -1,12 +1,15 @@
-# 🩺 Senior Health Studio — Grandma Hannah & Matthias Richter
+# Dmiqwi — video studio
+
+Formerly *Senior Health Studio*. Channel profiles still include Grandma Hannah & Matthias Richter.
 
 Three channels, one tool — pick the profile in the UI:
-- **north-philosopher** — English/German long-form philosopher narrations in
+- **classic** — English/German long-form philosopher narrations in
   the cited author's own voice (default Joseph Murphy — change per video via
-  "cited thinker(s)"). NO on-camera avatar: pure voice-over b-roll with the
-  Murphy cutout pinned bottom-right (`video.figure` in the profile; captions
-  auto-clear it). Replaces the old ~/video-studio tool with the full modern
-  pipeline (transitions, particles, templates, no-repeat stock).
+  "cited thinker(s)"). Classic cheap format: NO on-camera avatar, pure voice-over
+  b-roll with the Murphy cutout pinned bottom-right (`video.figure` in the
+  profile; captions auto-clear it). Very stock-heavy and inexpensive. (See
+  also **north-pro** for the modern full-pipeline version with animations,
+  transitions, and particles.)
 - **grandma-hannah** — English senior-health, warm disclosed-AI grandmother.
 - **matthias-richter** — GERMAN philosophy/manifestation, first-person
   character narrator (63, studying the great thinkers since 2004). Per-video
@@ -52,7 +55,30 @@ cd ~/health-studio
 ./run.sh                 # venv + deps + server → http://127.0.0.1:5062
 ```
 
+On Windows, double-click `run.bat` (or `powershell -ExecutionPolicy Bypass -File run.ps1`).
+It does the same thing: venv, deps, Chromium, then starts the server.
+
 Port note: 5062 on purpose — Chrome refuses to connect to 5060/5061 (SIP).
+
+### Windows setup (render worker)
+
+The pipeline runs on Windows as well as macOS — useful for putting a second
+machine's CPU/GPU to work. One-time setup:
+
+1. **Python 3.11+** from python.org — tick *"Add python.exe to PATH"* during install.
+2. **ffmpeg on PATH**: `winget install Gyan.FFmpeg`, then open a **new** terminal
+   so the updated PATH is picked up. `run.ps1` warns if it can't find ffmpeg.
+3. `git clone` the repo — keep it on the **same commit** as your main machine, since
+   profiles reference repo assets (`figures/`, `branding/`, `fonts/`, `anim_templates/`).
+4. Run `run.bat`. It creates the venv, installs dependencies, and downloads Chromium
+   (needed for the animation templates).
+5. Copy `.env` across, or give the machine its own provider keys.
+6. Enable long-path support if the repo lives in a deeply-nested folder
+   (`LongPathsEnabled` in the registry, or via Group Policy).
+
+Hardware encoding is detected automatically and is still H.264 either way —
+VideoToolbox on a Mac, NVENC / QuickSync / AMF on Windows, falling back to
+libx264 when no hardware encoder is present.
 
 ## The workflow (per the Grandma Hannah script profile)
 
@@ -104,6 +130,46 @@ on camera per video)**, `split_every_seconds` (240), `split_max_seconds` (35).
   (kie dashboard → API Keys), or those beats fall back to stock.
 - Animations are free (rendered locally).
 - Test with the `test-short` profile first.
+
+## Google Drive deliverables
+
+When `GDRIVE_CLIENT_SECRET_FILE` points to a Google **Desktop OAuth client**
+JSON, finished videos upload to an app-owned `videos` folder in Drive. The
+first time, after restarting the app, open:
+
+```
+http://localhost:5062/api/drive/authorize
+```
+
+Approve the Google prompt. The refresh token is saved in the gitignored
+`output/gdrive_token.json`; every later upload refreshes automatically. The
+uploader streams 8 MB chunks, resumes a valid interrupted session, verifies
+the remote size/checksum, and only then deletes the local deliverable. Drive
+files are private—both free and Patreon parts are served through this app's
+normal authenticated video route, never an "anyone with the link" share.
+
+If a render completed before authorization or an upload temporarily fails,
+the local video is retained. Retry it with:
+
+```
+curl -X POST http://localhost:5062/api/drive/retry/JOB_ID
+```
+
+## Render fleet (Mac main + Windows worker)
+
+Install Tailscale on both machines and confirm the Mac can reach the Windows
+machine through its `100.x.y.z` tailnet address. The worker only polls the
+main; no inbound port needs opening on Windows and no video file crosses the
+home internet connection—finished videos upload directly to Drive.
+
+On the Mac, set `FLEET_ROLE=main`, a strong `FLEET_PAIRING_TOKEN`, and
+`ACCESS_KEYS`; bind `HOST` to the Mac's Tailscale address. On Windows, use the
+same token, set `FLEET_ROLE=worker`, and point
+`FLEET_MAIN_URL` at `http://<mac-tailscale-ip>:5066`. Start it with `run.bat`.
+The Mac keeps rendering while it has capacity; when it is full, a waiting job
+is dispatched whole to the Windows worker. Hook approval still appears in the
+Mac UI. The worker needs its own local `.env`, provider keys, and one-time
+Drive authorization.
 
 ## Animation templates (`anim_templates/`)
 

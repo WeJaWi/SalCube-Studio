@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Dict
 
@@ -61,6 +62,14 @@ def _themed_template(template: str, theme: str, workdir: Path) -> Path:
 
 OVERLAYS_DIR = config.ROOT / "overlays"
 
+# ensure_particles() writes to a resolution-keyed shared path — with several
+# videos rendering at once, two jobs hitting the same resolution for the
+# first time would both try to render into (and delete) the same frames_dir
+# concurrently. One lock per resolution serializes just that first render;
+# every later call for the same resolution hits the on-disk cache instead.
+_PARTICLE_LOCKS: Dict[Path, threading.Lock] = {}
+_PARTICLE_LOCKS_GUARD = threading.Lock()
+
 
 def ensure_particles(width: int, height: int, fps: int,
                      seconds: float = 16.0) -> Path:
@@ -72,7 +81,12 @@ def ensure_particles(width: int, height: int, fps: int,
     dest = OVERLAYS_DIR / f"particles_{width}x{height}_{fps}.mp4"
     if dest.exists():
         return dest
-    return render_animation("particles", {}, seconds, dest, width, height, fps)
+    with _PARTICLE_LOCKS_GUARD:
+        lock = _PARTICLE_LOCKS.setdefault(dest, threading.Lock())
+    with lock:
+        if dest.exists():  # another job finished this exact render while we waited
+            return dest
+        return render_animation("particles", {}, seconds, dest, width, height, fps)
 
 
 def render_animation(template: str, params: Dict[str, Any], duration: float,

@@ -1,6 +1,6 @@
 {
-  "name": "north-classic",
-  "description": "North philosopher channel — CLASSIC format: blurred stock background, philosopher cutout right, voice waveform left with subtitles beneath, up to 3h, ~90% stock + 10% grok stills. Very cheap.",
+  "name": "classic",
+  "description": "Classic format: blurred stock background, philosopher cutout right, voice waveform left with subtitles beneath, up to 3h, ~90% stock + 10% grok stills. Very cheap.",
   "engine": "hannah",
   "channel_context": "the North long-form philosopher YouTube channel: single-voice narrations written and taught in the authentic voice of a great thinker of the mind (default Joseph Murphy — the 'cited thinker' input can change the author per video). The narrator speaks AS the author would speak and teach, using their concepts, vocabulary, and manner; there is no on-camera host",
   "audience_line": "speaks to ONE viewer seeking depth, inner change, and the teachings of the great thinkers of the mind",
@@ -30,6 +30,18 @@
       "image": "figures/murphy.png",
       "height_frac": 0.92,
       "margin": 40
+    },
+    "subtitle": {
+      "font": "Nunito Bold",
+      "outline": 0
+    },
+    "waveform": {
+      "rate": 15,
+      "color": "0xFAF6EF@0.9",
+      "width_frac": 0.46,
+      "height_frac": 0.3,
+      "n": 5,
+      "scale": "sqrt"
     }
   },
   "defaults": {
@@ -54,8 +66,8 @@
     "max_tracks": 8
   },
   "voices": {
-    "English": "elevenlabs_CwhRBWXzGAHq8TQ4Fs17",
-    "German": "edge_de-DE-ConradNeural"
+    "English": "elevenlabs_TTyZrDYo6LQowrH8mixJ",
+    "German": "elevenlabs_TTyZrDYo6LQowrH8mixJ"
   },
   "writing_sections": [
     {
