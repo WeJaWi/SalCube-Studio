@@ -305,6 +305,12 @@ def _restore_queue() -> None:
                                 if drive_complete else
                                 "Restored after restart — final deliverable already present"),
                 })
+            elif st == "paused":
+                # A deliberate Stop must survive a restart, or restarting
+                # the server would silently undo it.
+                step = "paused"
+                progress_pct = row.get("progress_pct", 0)
+                log = list(row.get("log") or [])
             elif st in ("running", "awaiting_approval", "queued", "retry_wait"):
                 # retry_wait's sleeping timer thread died with the process,
                 # so it would otherwise sit in that state forever — fold it
@@ -401,7 +407,7 @@ def _schedule_retry(job_id: str) -> None:
                 return  # user intervened (stopped/retried/cancelled) — leave it
             job["status"] = "queued"
             job["step"] = "queued"
-            job["priority_at"] = datetime.now().isoformat(timespec="seconds")
+            job["priority_at"] = "1:" + datetime.now().isoformat(timespec="seconds")
             job["log"].append({
                 "t": datetime.now().strftime("%H:%M:%S"), "step": "queue",
                 "message": "Auto-retry: back in the queue"})
@@ -429,16 +435,38 @@ def _preempt_for(job_id: str) -> bool:
         running.sort(key=lambda x: x[1].get("progress_pct", 0))
         victim_id, victim = running[0]
         token = victim["_cancel"]
-        victim["_requeue_on_stop"] = True
-        # Preempted work was already in flight, so it earns the next slot
-        # rather than starving behind everything else.
-        victim["priority_at"] = "0000"
+        # "queued", not "paused": this job didn't ask to stop, so it must
+        # come back on its own once a slot frees.
+        victim["_stop_target"] = "queued"
+        # Priority is "<class>:<time>" and sorts as a plain string, so the
+        # class prefix decides who goes first. The victim MUST rank below
+        # the retry it is making room for ("1:" vs "0:") — ranking it first
+        # meant it instantly reclaimed the slot it had just freed, which
+        # defeated the whole preemption.
+        victim["priority_at"] = "1:" + datetime.now().isoformat(timespec="seconds")
         victim["log"].append({
             "t": datetime.now().strftime("%H:%M:%S"), "step": "queue",
             "message": (f"Paused at {victim.get('progress_pct', 0)}% so a "
                         f"manual retry could start — resumes next")})
     token.cancel()
     return True
+
+
+def _abort_local_job(job_id: str) -> None:
+    """Stop a job running on THIS machine because main asked us to.
+
+    Used on a fleet worker: main has no ffmpeg of its own to kill for a
+    dispatched job, so the stop has to be carried out where the work is.
+    """
+    with LOCK:
+        job = JOBS.get(job_id)
+        token = job.get("_cancel") if job else None
+        if job is not None:
+            job["_stop_target"] = "cancelled"  # main owns the requeue decision
+    if token is not None:
+        killed = token.cancel()
+        print(f"[fleet] aborted {job_id} on request from main "
+              f"({killed} process(es) killed)")
 
 
 def _kick_queue() -> None:
@@ -793,15 +821,23 @@ def _run_job(job_id: str, inputs: dict, profile: str, *,
         with LOCK:
             job = JOBS.get(job_id)
             if job is not None:
-                requeue = bool(job.pop("_requeue_on_stop", False))
-                job["status"] = "queued" if requeue else "cancelled"
-                job["step"] = "queued" if requeue else "cancelled"
+                # "paused"  — a deliberate Stop: waits for the user, and is
+                #             NOT auto-started, or it would restart in the
+                #             same second the slot it just freed reopens.
+                # "queued"  — preempted to make room for a manual retry:
+                #             should come back on its own.
+                target = job.pop("_stop_target", "paused")
+                job["status"] = target
+                job["step"] = target
                 job.pop("_cancel", None)
                 job["log"].append({
                     "t": datetime.now().strftime("%H:%M:%S"), "step": "queue",
-                    "message": ("Stopped — back in the queue, will resume "
-                                "from what's already on disk"
-                                if requeue else "Stopped and cancelled")})
+                    "message": {
+                        "paused": ("Stopped. Work so far is kept — Resume "
+                                   "continues from here instead of restarting"),
+                        "queued": ("Paused to free a slot — resumes next, "
+                                   "continuing from what's on disk"),
+                    }.get(target, "Stopped and cancelled")})
         _persist_queue()
         _jm_call("manual_log", "STOPPED by user")
         _jm_call("manual_finish", 1)
@@ -1004,10 +1040,24 @@ def start_render():
         with LOCK:
             job = JOBS.get(job_ids[0])
             if job is not None and job.get("status") == "queued":
-                job["priority_at"] = datetime.now().isoformat(timespec="seconds")
+                # "0:" ranks retries above preempted jobs ("1:"), which in
+                # turn rank above ordinary FIFO work.
+                job["priority_at"] = "0:" + datetime.now().isoformat(timespec="seconds")
                 job["retries"] = 0  # manual attempt resets the auto-retry budget
             free_now = config.max_concurrent_jobs() - _active_slot_count()
-        if free_now <= 0 and not config.queue_setting("queue_paused"):
+        # Only interrupt local work as a last resort: if a fleet worker has
+        # a free slot it can take this job without anything being stopped.
+        remote_free = 0
+        with _FLEET_LOCK:
+            for w in FLEET_WORKERS.values():
+                try:
+                    age = (datetime.now()
+                           - datetime.fromisoformat(w["last_seen"])).total_seconds()
+                except Exception:  # noqa: BLE001
+                    continue
+                if age <= config.FLEET_STALE_SECONDS:
+                    remote_free += max(0, int((w.get("capacity") or {}).get("free") or 0))
+        if free_now <= 0 and remote_free <= 0 and not config.queue_setting("queue_paused"):
             _preempt_for(job_ids[0])
 
     _kick_queue()
@@ -1116,8 +1166,13 @@ def fleet_heartbeat():
         for spec in new_dispatch:
             worker.setdefault("dispatch", {})[spec["job_id"]] = spec
         dispatch = list(worker.get("dispatch", {}).values())
+        # Abort requests are drained here: the worker acts on them and the
+        # resulting state change comes back as an ordinary status report.
+        aborts = list(worker.get("aborts") or [])
+        worker["aborts"] = []
     _persist_queue()
-    return jsonify({"dispatch": dispatch, "approvals": approvals})
+    return jsonify({"dispatch": dispatch, "approvals": approvals,
+                    "aborts": aborts})
 
 
 @app.route("/api/workers")
@@ -1125,14 +1180,24 @@ def fleet_workers():
     now = datetime.now().timestamp()
     with _FLEET_LOCK:
         rows = []
-        for worker in FLEET_WORKERS.values():
-            row = {k: v for k, v in worker.items() if k not in ("approvals", "dispatch")}
+        for wid, worker in FLEET_WORKERS.items():
+            row = {k: v for k, v in worker.items()
+                   if k not in ("approvals", "dispatch", "aborts")}
             try:
                 age = max(0, now - datetime.fromisoformat(row["last_seen"]).timestamp())
             except Exception:  # noqa: BLE001
                 age = config.FLEET_STALE_SECONDS + 1
+            # Defaults so a half-populated record can never break the panel.
+            row.setdefault("worker_id", wid)
+            row.setdefault("name", wid)
+            row.setdefault("hardware", {})
+            row.setdefault("capacity", {})
             row["stale"] = age > config.FLEET_STALE_SECONDS
             row["age_seconds"] = round(age)
+            # "online" is what the UI's green light keys off: heard from
+            # recently AND actually able to take work.
+            row["online"] = (not row["stale"]
+                             and int((row.get("capacity") or {}).get("max_jobs") or 0) > 0)
             rows.append(row)
     return jsonify(rows)
 
@@ -1240,7 +1305,11 @@ def api_jobs():
             # Drives the Stop button: only a job with a live cancel token
             # can actually be stopped, and retry_wait can be pulled out of
             # its wait.
-            "stoppable": bool(j.get("_cancel")) or j.get("status") == "retry_wait",
+            "stoppable": (bool(j.get("_cancel"))
+                          or j.get("status") == "retry_wait"
+                          # dispatched work is stopped via the worker
+                          or bool(j.get("dispatched_to")
+                                  and j.get("status") in ("running", "dispatched"))),
             "prioritized": bool(j.get("priority_at")),
         }
 
@@ -1296,29 +1365,84 @@ def stop_running(job_id: str):
     if not _allowed_profile(_job_profile(job_id) or ""):
         abort(403)
     data = request.get_json(silent=True) or {}
-    requeue = not bool(data.get("cancel"))
+    target = "cancelled" if data.get("cancel") else "paused"
+    # NOTE: _persist_queue() acquires LOCK itself and threading.Lock is not
+    # reentrant, so it must NEVER be called while holding LOCK — doing so
+    # deadlocks the whole app permanently. Decide under the lock, act after.
+    token = None
+    remote = None
     with LOCK:
         job = JOBS.get(job_id)
         if not job:
             return jsonify({"error": "unknown job"}), 404
         if job.get("status") == "retry_wait":
             # Waiting to auto-retry — no thread to stop, just take it out.
-            job["status"] = "queued" if requeue else "cancelled"
-            job["step"] = job["status"]
-            token = None
+            job["status"] = target
+            job["step"] = target
+        elif job.get("dispatched_to") and job.get("_cancel") is None:
+            # Running on a fleet worker: there is no local ffmpeg to kill,
+            # so ask that machine to stop it. The worker reports the result
+            # back through its normal heartbeat.
+            remote = job["dispatched_to"]
+            job["_stop_target"] = target
+            job["log"].append({
+                "t": datetime.now().strftime("%H:%M:%S"), "step": "queue",
+                "message": f"Stop requested — telling {remote} to halt it"})
         else:
             token = job.get("_cancel")
             if token is None:
                 return jsonify({
-                    "error": f"job is not running (status={job.get('status')})"
+                    "error": (f"job can't be stopped right now "
+                              f"(status={job.get('status')}) — it has no active "
+                              f"worker on this machine")
                 }), 409
-            job["_requeue_on_stop"] = requeue
-    # Outside LOCK: cancel() kills child processes, and the job's own thread
-    # needs the lock to record its stopped state.
+            job["_stop_target"] = target
+
+    # --- everything below runs WITHOUT LOCK held ---
+    if remote is not None:
+        with _FLEET_LOCK:
+            # Only queue an abort for a worker that has actually registered.
+            # setdefault() here would invent a nameless phantom worker that
+            # then shows up in the Workers panel with no hardware and never
+            # goes away.
+            w = FLEET_WORKERS.get(remote)
+            if w is None:
+                return jsonify({
+                    "error": f"worker '{remote}' is not connected — it can't be "
+                             f"told to stop. It will report in when it returns."}), 409
+            w.setdefault("aborts", []).append(job_id)
+            w.get("dispatch", {}).pop(job_id, None)  # don't re-send it
+        _persist_queue()
+        return jsonify({"ok": True, "job_id": job_id, "remote": remote,
+                        "paused": target == "paused",
+                        "note": "asked the worker to stop; may take a heartbeat"})
     killed = token.cancel() if token is not None else 0
     _persist_queue()
-    return jsonify({"ok": True, "job_id": job_id, "requeued": requeue,
+    return jsonify({"ok": True, "job_id": job_id, "paused": target == "paused",
                     "killed_processes": killed})
+
+
+@app.route("/api/queue/<job_id>/resume", methods=["POST"])
+def resume_paused(job_id: str):
+    """Put a paused job back in the queue. It continues from whatever is
+    already on disk rather than restarting."""
+    if not _allowed_profile(_job_profile(job_id) or ""):
+        abort(403)
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "unknown job"}), 404
+        if job.get("status") != "paused":
+            return jsonify({
+                "error": f"job is not paused (status={job.get('status')})"}), 409
+        job["status"] = "queued"
+        job["step"] = "queued"
+        job["priority_at"] = "0:" + datetime.now().isoformat(timespec="seconds")
+        job["log"].append({"t": datetime.now().strftime("%H:%M:%S"),
+                           "step": "queue", "message": "Resumed"})
+    _persist_queue()
+    _kick_queue()
+    return jsonify({"ok": True, "job_id": job_id})
 
 
 @app.route("/api/queue/pause", methods=["GET", "POST"])
@@ -1641,7 +1765,8 @@ if __name__ == "__main__":
     _restore_queue()
     atexit.register(_persist_queue)
     if config.FLEET_ROLE == "worker":
-        FLEET_WORKER = fleet.FleetWorker(_run_fleet_worker_job)
+        FLEET_WORKER = fleet.FleetWorker(_run_fleet_worker_job,
+                                         aborter=_abort_local_job)
         FLEET_WORKER.start()
         print(f"[fleet] worker {FLEET_WORKER.worker_id} polling {config.FLEET_MAIN_URL}")
     app.run(host=host, port=port, debug=False, threaded=True)

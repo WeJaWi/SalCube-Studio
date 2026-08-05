@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 from typing import Callable, Optional, Set
 
 
@@ -101,6 +102,23 @@ def check() -> None:
     tok = current()
     if tok is not None:
         tok.check()
+
+
+def sleep(seconds: float, step: float = 1.0) -> None:
+    """time.sleep(), but wake promptly if the job gets cancelled.
+
+    The pipeline waits a LOT: provider retry backoffs run up to 90s each,
+    and the submit-then-poll loops wait up to 20 minutes for TTS/music/
+    video. A plain sleep in any of those makes Stop look broken, because
+    nothing checks the flag until the wait is over.
+    """
+    end = time.monotonic() + max(0.0, seconds)
+    while True:
+        check()
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(step, remaining))
 
 
 def adopt(token: Optional[CancelToken], fn: Callable) -> Callable:

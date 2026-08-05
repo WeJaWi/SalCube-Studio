@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from . import config
+from . import cancel, config
 
 _WRITER_INSTRUCTIONS = ("You are a world-class long-form scriptwriter and "
                         "video planner. Follow the user's instructions "
@@ -157,7 +157,7 @@ def chat(user: str, model: str, system: Optional[str] = None,
                 wait = 4.0 * (attempt + 1)
             print(f"[llm] {model} attempt {attempt + 1}/{retries + 1} "
                   f"failed ({last_err}); retrying in {wait:.0f}s…", flush=True)
-            time.sleep(wait)
+            cancel.sleep(wait)
 
     if config.CLAUDE_CLI_FALLBACK:
         try:
@@ -187,7 +187,7 @@ def _chat_via_cli(user: str, system: Optional[str], retries: int = 2) -> str:
             if attempt < retries:
                 print(f"[llm] claude-cli attempt {attempt + 1}/{retries + 1} "
                       f"failed ({e}); retrying in 5s…", flush=True)
-                time.sleep(5)
+                cancel.sleep(5)
     raise last_err
 
 

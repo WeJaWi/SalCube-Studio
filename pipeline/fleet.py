@@ -4,6 +4,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
+import traceback
 import uuid
 from typing import Any, Callable, Dict
 
@@ -61,8 +62,13 @@ class FleetReporter:
 
 class FleetWorker:
     """Poll the main over Tailscale and run complete dispatched jobs."""
-    def __init__(self, runner: Callable[[dict, FleetReporter], None]):
+    def __init__(self, runner: Callable[[dict, FleetReporter], None],
+                 aborter: Callable[[str], None] | None = None):
         self.runner = runner
+        # Called when main asks for a dispatched job to be stopped. Without
+        # it, a Stop on main can't reach work running on this machine —
+        # main has no ffmpeg of its own to kill for a remote job.
+        self.aborter = aborter
         self.worker_id = config.FLEET_WORKER_ID or socket.gethostname()
         self.name = config.FLEET_WORKER_NAME or socket.gethostname()
         self._jobs: Dict[str, FleetReporter] = {}
@@ -106,6 +112,16 @@ class FleetWorker:
             self._stop.wait(config.FLEET_HEARTBEAT_SECONDS)
 
     def _handle(self, reply: dict) -> None:
+        # Aborts first: if main wants a job stopped, don't spend this cycle
+        # starting more work for it.
+        for jid in reply.get("aborts") or []:
+            jid = str(jid or "")
+            if not jid or self.aborter is None:
+                continue
+            try:
+                self.aborter(jid)
+            except Exception as e:  # noqa: BLE001
+                print(f"[fleet] abort of {jid} failed: {e}")
         for approval in reply.get("approvals") or []:
             with self._lock:
                 reporter = self._jobs.get(str(approval.get("job_id") or ""))
@@ -127,4 +143,9 @@ class FleetWorker:
         try:
             self.runner(spec, reporter)
         except Exception as e:  # noqa: BLE001
-            reporter.fail(str(e))
+            # This is the only exception boundary visible to the fleet main.
+            # Preserve the traceback (bounded so heartbeat payloads stay
+            # small) — a bare Windows OSError message is not actionable when
+            # the worker's console is on another machine.
+            detail = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            reporter.fail(detail[-6000:])

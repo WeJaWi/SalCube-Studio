@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from . import config
+from . import cancel, config
 
 
 def _retrying(fn, attempts: int = 4, backoff: float = 5.0):
@@ -34,7 +34,7 @@ def _retrying(fn, attempts: int = 4, backoff: float = 5.0):
         except requests.RequestException as e:
             last = e
             if a < attempts - 1:
-                time.sleep(backoff * (a + 1))
+                cancel.sleep(backoff * (a + 1))
             continue
         if (isinstance(r, requests.Response)
                 and (r.status_code == 429 or r.status_code >= 500)):
@@ -47,7 +47,7 @@ def _retrying(fn, attempts: int = 4, backoff: float = 5.0):
                         wait = max(wait, float(retry_after))
                     except ValueError:
                         pass
-                time.sleep(min(wait, 60.0))
+                cancel.sleep(min(wait, 60.0))
                 continue
         return r
     raise last
@@ -113,12 +113,12 @@ def ai33_poll(task_id: str, timeout_s: int = 1200, interval: float = 5.0,
                                            "Content-Type": "application/json"},
                              timeout=60)
         except requests.RequestException:
-            time.sleep(interval)  # transient — keep polling
+            cancel.sleep(interval)  # transient — keep polling
             continue
         try:
             data = r.json()
         except ValueError:  # 502/504 HTML page — transient, keep polling
-            time.sleep(interval)
+            cancel.sleep(interval)
             continue
         status = data.get("status")
         if on_progress:
@@ -127,7 +127,7 @@ def ai33_poll(task_id: str, timeout_s: int = 1200, interval: float = 5.0,
             return data
         if status in ("error", "failed"):
             raise RuntimeError(f"ai33 task failed: {data.get('error_message')}")
-        time.sleep(interval)
+        cancel.sleep(interval)
     raise RuntimeError(f"ai33 task {task_id} timed out after {timeout_s}s")
 
 
@@ -160,12 +160,12 @@ def kie_poll(task_id: str, timeout_s: int = 600, interval: float = 4.0,
             r = requests.get(url, headers={"Authorization": f"Bearer {api_key or config.KIE_API_KEY}"},
                              params={"taskId": task_id}, timeout=60)
         except requests.RequestException:
-            time.sleep(interval)  # transient — keep polling
+            cancel.sleep(interval)  # transient — keep polling
             continue
         try:
             data = r.json().get("data") or {}
         except ValueError:  # 502/504 HTML page — transient, keep polling
-            time.sleep(interval)
+            cancel.sleep(interval)
             continue
         state = data.get("state")
         if state == "success":
@@ -175,7 +175,7 @@ def kie_poll(task_id: str, timeout_s: int = 600, interval: float = 4.0,
             return (result or {}).get("resultUrls", [])
         if state == "fail":
             raise RuntimeError(f"kie task failed: {data.get('failMsg')}")
-        time.sleep(interval)
+        cancel.sleep(interval)
     raise RuntimeError(f"kie task {task_id} timed out after {timeout_s}s")
 
 

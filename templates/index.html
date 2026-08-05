@@ -304,6 +304,8 @@
   .badge.done { background: rgba(107,191,150,0.12); color: var(--ok); border: 1px solid rgba(107,191,150,0.25); }
   .badge.error { background: rgba(212,136,136,0.12); color: var(--err); border: 1px solid rgba(212,136,136,0.25); }
   .badge.cancelled { background: #2a2e35; color: var(--muted-2); }
+  .badge.paused { background: #2a2e35; color: var(--warn); border: 1px solid rgba(201,168,106,0.28); }
+  .badge.retry_wait { background: rgba(201,168,106,0.14); color: var(--warn); border: 1px solid rgba(201,168,106,0.28); }
 
   .badge.size-small { background: rgba(148,156,168,0.12); color: #a8aeb8; border: 1px solid rgba(148,156,168,0.22); }
   .badge.size-medium { background: rgba(94,200,216,0.1); color: var(--cyan); border: 1px solid rgba(94,200,216,0.22); }
@@ -388,6 +390,18 @@
     margin-top: 18px;
   }
   .btn-row button { margin-top: 0; }
+  /* Connection light on the "Send to worker" button: green only when a
+     worker has heartbeated recently AND can actually accept work. */
+  .dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 999px;
+    margin-right: 7px; vertical-align: middle;
+    background: var(--muted-2);
+    box-shadow: 0 0 0 2px rgba(255,255,255,0.03);
+  }
+  .dot.online { background: var(--ok); box-shadow: 0 0 6px rgba(107,191,150,0.7); }
+  .dot.busy   { background: var(--warn); box-shadow: 0 0 6px rgba(201,168,106,0.6); }
+  .dot.offline{ background: var(--muted-2); box-shadow: none; }
+  #goWorker:disabled { opacity: .45; cursor: not-allowed; }
 
   #queuePanel .qrow {
     display: flex;
@@ -630,6 +644,9 @@
 
     <div class="btn-row">
       <button id="go">Add to queue</button>
+      <button id="goWorker" class="secondary" title="Render on the connected worker machine instead of this one">
+        <span class="dot" id="workerDot"></span><span id="goWorkerLabel">Send to worker</span>
+      </button>
       <span class="hint" id="queueHint">Several jobs can run at once. Use Auto hook for unattended batches.</span>
     </div>
   </div>
@@ -822,6 +839,75 @@ $("#go").addEventListener("click", async () => {
   $("#go").disabled = false;
 });
 
+// ── "Send to worker": same submit, then hand each job straight to a
+// connected worker machine instead of letting it wait for a local slot.
+let workerOnline = false;
+function applyWorkerLight(workers) {
+  const dot = $("#workerDot"), btn = $("#goWorker"), label = $("#goWorkerLabel");
+  const live = (workers || []).filter(w => !w.stale);
+  const ready = live.filter(w => w.online);
+  const free = ready.filter(w => (w.capacity || {}).free > 0);
+  workerOnline = ready.length > 0;
+  dot.className = "dot " + (free.length ? "online" : (ready.length ? "busy" : "offline"));
+  btn.disabled = !workerOnline;
+  if (!live.length) {
+    label.textContent = "No worker connected";
+    btn.title = "No worker machine is reporting in. Start Dmiqwi on it with FLEET_ROLE=worker.";
+  } else if (free.length) {
+    const w = free[0];
+    label.textContent = "Send to worker";
+    btn.title = `${w.name} — ${(w.hardware||{}).cpu_cores || "?"} cores, `
+      + `${(w.hardware||{}).hw_encoder || "no hw encoder"}, `
+      + `${(w.capacity||{}).free} slot(s) free`;
+  } else {
+    label.textContent = "Worker busy";
+    btn.title = "The worker is connected but has no free slot — it will pick this up when it frees.";
+  }
+}
+async function refreshWorkerLight() {
+  try {
+    applyWorkerLight(await (await fetch("/api/workers")).json());
+  } catch (e) { applyWorkerLight([]); }
+}
+refreshWorkerLight();
+setInterval(refreshWorkerLight, 5000);
+
+$("#goWorker").addEventListener("click", async () => {
+  const title = $("#title").value.trim();
+  if (!title) { alert("Enter a title (or several — one per line)"); return; }
+  const btn = $("#goWorker");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/render", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify(buildPayload(title))
+    });
+    const data = await res.json();
+    if (data.error) { alert(data.error); btn.disabled = false; return; }
+    $("#title").value = "";
+    const ids = data.job_ids || [data.job_id];
+    // Dispatch is a separate step so a worker that drops out between
+    // submitting and dispatching just leaves the job safely in the queue.
+    let sent = 0, failed = [];
+    for (const id of ids) {
+      try {
+        const r = await fetch("/api/dispatch/" + id, {method: "POST"});
+        const d = await r.json();
+        if (d.error) failed.push(d.error); else sent++;
+      } catch (e) { failed.push("network error"); }
+    }
+    $("#queueHint").textContent = failed.length
+      ? `${sent}/${ids.length} sent to the worker — the rest stayed in the queue (${failed[0]})`
+      : `Sent ${sent} to the worker.`;
+    selectJob(ids[0]);
+    refreshQueue();
+    refreshWorkerLight();
+  } catch (e) {
+    alert("Can't reach the server. Is it running?");
+  }
+  btn.disabled = false;
+});
+
 $("#copyTitle").addEventListener("click", copyCurrentTitle);
 
 $("#approve").addEventListener("click", async () => {
@@ -911,6 +997,7 @@ function poll(jobId) {
 function statusLabel(st) {
   if (st === "awaiting_approval") return "your turn (hook)";
   if (st === "retry_wait") return "retrying soon";
+  if (st === "paused") return "stopped";
   return st;
 }
 
@@ -1029,12 +1116,14 @@ async function refreshQueue() {
       const canRetry = j.status === "error";
       const canSendToWorker = j.status === "queued";
       const canStop = !!j.stoppable;
+      const canResume = j.status === "paused";
       return `<div class="qrow${j.job_id===currentJob?' sel':''}" data-id="${j.job_id}">
         <span class="badge ${j.status}">${statusLabel(j.status)}</span>
         <span class="qtitle" title="${escapeHtml(j.title || j.job_id)}">${escapeHtml(j.title || j.job_id)}</span>
         <span class="qmeta">${pos}${escapeHtml(j.profile || "")}${j.step && j.status==='running' ? ' · '+escapeHtml(j.step) : ''}${jobMeta(j)}</span>
         ${sizeBadge(j)}
         ${canCancel ? `<button class="danger qcancel" data-id="${j.job_id}">Remove</button>` : ""}
+        ${canResume ? `<button class="secondary qresume" data-id="${j.job_id}" title="Continue from where it stopped" style="margin:0;padding:6px 12px;font-size:12px">Resume</button>` : ""}
         ${canStop ? `<button class="danger qstop" data-id="${j.job_id}" title="Stop now and put it back in the queue — work already done is kept and reused" style="margin:0;padding:6px 12px;font-size:12px">Stop</button>` : ""}
         ${canSendToWorker ? `<button class="secondary qdispatch" data-id="${j.job_id}" style="margin:0;padding:6px 12px;font-size:12px">Send to worker</button>` : ""}
         ${canRetry ? `<button class="secondary qretry" data-id="${j.job_id}" style="margin:0;padding:6px 12px;font-size:12px">Retry</button>` : ""}
@@ -1042,7 +1131,7 @@ async function refreshQueue() {
     }).join("");
     qList.querySelectorAll(".qrow").forEach(el => {
       el.addEventListener("click", e => {
-        if (e.target.closest(".qcancel") || e.target.closest(".qretry") || e.target.closest(".qdispatch") || e.target.closest(".qstop")) return;
+        if (e.target.closest(".qcancel") || e.target.closest(".qretry") || e.target.closest(".qdispatch") || e.target.closest(".qstop") || e.target.closest(".qresume")) return;
         selectJob(el.dataset.id);
       });
     });
@@ -1059,6 +1148,18 @@ async function refreshQueue() {
         const data = await r.json();
         if (data.error) { alert(data.error); btn.disabled = false; return; }
         selectJob(btn.dataset.id);
+        refreshQueue();
+      });
+    });
+    qList.querySelectorAll(".qresume").forEach(btn => {
+      btn.addEventListener("click", async e => {
+        e.stopPropagation();
+        btn.disabled = true;
+        try {
+          const r = await fetch("/api/queue/" + btn.dataset.id + "/resume", {method: "POST"});
+          const data = await r.json();
+          if (data.error) alert(data.error);
+        } catch (err) { alert("Couldn't resume the job."); }
         refreshQueue();
       });
     });
