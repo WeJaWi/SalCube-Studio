@@ -486,6 +486,10 @@
       <input type="checkbox" id="gpuToggle" />
       <span id="gpuToggleLabel">GPU encode</span>
     </label>
+    <label class="top-toggle" id="pauseToggleWrap" title="Stops picking up NEW jobs. Anything already running keeps going.">
+      <input type="checkbox" id="pauseToggle" />
+      <span id="pauseToggleLabel">Pause queue</span>
+    </label>
     <a class="top-tag" href="/thumbnails" style="text-decoration:none">Thumbnails →</a>
   </div>
 </header>
@@ -721,6 +725,29 @@ $("#gpuToggle").addEventListener("change", async () => {
   }
 });
 
+function applyPauseToggleUi(on) {
+  $("#pauseToggle").checked = on;
+  $("#pauseToggleWrap").classList.toggle("on", on);
+  $("#pauseToggleLabel").textContent = on ? "Queue paused" : "Pause queue";
+}
+fetch("/api/queue/pause").then(r => r.json())
+  .then(s => applyPauseToggleUi(!!s.paused)).catch(() => {});
+$("#pauseToggle").addEventListener("change", async () => {
+  const on = $("#pauseToggle").checked;
+  applyPauseToggleUi(on); // optimistic — reconciled by the response below
+  try {
+    const r = await fetch("/api/queue/pause", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({paused: on}),
+    });
+    const s = await r.json();
+    applyPauseToggleUi(!!s.paused);
+    refreshQueue();
+  } catch (e) {
+    applyPauseToggleUi(!on); // revert on failure
+  }
+});
+
 $("#tplAll").addEventListener("click", () => {
   const boxes = [...document.querySelectorAll(".tpl")];
   const allOn = boxes.every(b => b.checked);
@@ -883,6 +910,7 @@ function poll(jobId) {
 
 function statusLabel(st) {
   if (st === "awaiting_approval") return "your turn (hook)";
+  if (st === "retry_wait") return "retrying soon";
   return st;
 }
 
