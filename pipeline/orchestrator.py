@@ -843,10 +843,12 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
     # dedicated card regardless of narration language.
     popup = None
     popup_windows = None
+    popup_full_duration = False
     if inputs.get("spotify_popup"):
         default_popup = _spotify_popup_asset(inputs)
         if inputs.get("spotify_popup_style") == "geistmeister":
             popup_rel = default_popup
+            popup_full_duration = True
         else:
             popup_rel = (v.get("spotify_popup") or default_popup).strip()
         # If profile forces a path but language has a better localized file
@@ -862,7 +864,18 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
             # Plan windows from rough total duration (sum of VO lengths)
             est_dur = sum(float(bb.get("duration") or 0) for bb in beats)
             seed_path = job_dir / "spotify_popup.json"
-            if seed_path.exists():
+            if popup_full_duration:
+                seed = None
+                popup_windows = [(0.0, max(1.0, est_dur + 1.0))]
+                seed_path.write_text(json.dumps({
+                    "mode": "full_duration",
+                    "windows": popup_windows,
+                    "language": inputs.get("language"),
+                    "asset": str(p.relative_to(config.ROOT))
+                    if p.is_relative_to(config.ROOT) else str(p),
+                    "url": url,
+                }, indent=1))
+            elif seed_path.exists():
                 try:
                     saved = json.loads(seed_path.read_text())
                     popup_windows = [tuple(w) for w in saved.get("windows") or []]
@@ -880,9 +893,10 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                     if p.is_relative_to(config.ROOT) else str(p),
                     "url": url,
                 }, indent=1))
-            emit("render",
-                 f"Spotify popup ON ({p.name}): "
-                 + ", ".join(f"{s:.0f}–{e:.0f}s" for s, e in (popup_windows or []))
+            timing = ("entire video" if popup_full_duration else
+                      ", ".join(f"{s:.0f}–{e:.0f}s"
+                                for s, e in (popup_windows or [])))
+            emit("render", f"Spotify popup ON ({p.name}): {timing}"
                  + (f" · link {url}" if url else ""))
             if url:
                 (job_dir / "spotify_url.txt").write_text(
@@ -901,6 +915,7 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
     render.render_video(beats, profile, music_path, job_dir, out_path,
                         overlay=overlay, badge=badge, popup=popup,
                         popup_windows=popup_windows,
+                        popup_full_duration=popup_full_duration,
                         cut_after_beat=cut_beat,
                         log=lambda m: emit("render", m.strip()),
                         gpu_encode=gpu_encode, beat_workers=beat_workers,

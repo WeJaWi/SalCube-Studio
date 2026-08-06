@@ -915,6 +915,16 @@ def plan_spotify_windows(duration: float, *,
     return windows
 
 
+def resolve_popup_windows(duration: float,
+                          requested: Optional[List[Tuple[float, float]]],
+                          *, full_duration: bool = False
+                          ) -> List[Tuple[float, float]]:
+    """Resolve timed vs persistent popup coverage for one exported file."""
+    if full_duration:
+        return [(0.0, max(1.0, float(duration) + 1.0))]
+    return list(requested or [])
+
+
 def concat_with_music(clips: List[Path], music: Optional[Path], out: Path,
                       workdir: Path, music_volume: float = 0.15) -> None:
     """Stitch beat clips + optional music bed.
@@ -1054,6 +1064,7 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                  badge: Optional[Path] = None,
                  popup: Optional[Path] = None,
                  popup_windows: Optional[List[Tuple[float, float]]] = None,
+                 popup_full_duration: bool = False,
                  cut_after_beat: Optional[int] = None,
                  log=print,
                  gpu_encode: bool = False,
@@ -1068,9 +1079,10 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
     to part 1 for the default player (full free video). The paid half is
     only in ``final_part2.mp4``.
 
-    ``popup`` is **not** burned into every beat (that made it permanent).
-    After stitch, it is overlaid only during ``popup_windows`` time ranges
-    (Spotify: 10s at start + 10s random in first 10 minutes).
+    ``popup`` is burned after stitching. Standard Spotify cards use
+    ``popup_windows`` (10s at start + 10s random in the first 10 minutes).
+    Branded cards can set ``popup_full_duration`` to cover every exported
+    frame, including both halves and the appended Patreon end clip.
 
     ``beat_workers`` &gt; 1 composites that many beats concurrently (each its
     own ffmpeg subprocess — CPU/hardware-encoder-bound, not memory-bound
@@ -1200,7 +1212,24 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
         for fut, i in futures.items():
             clips[i] = fut.result()  # re-raises on failure, aborting the render
 
-    def _stitch(clips_subset: List[Path], dest: Path, label: str) -> None:
+    def _burn_popup(dest: Path, label: str,
+                    windows: Optional[List[Tuple[float, float]]] = None) -> None:
+        if not popup or not popup.exists():
+            return
+        resolved = resolve_popup_windows(
+            probe_duration(dest), windows or popup_windows,
+            full_duration=popup_full_duration)
+        if not resolved:
+            return
+        timing = "full duration" if popup_full_duration else f"{len(resolved)} windows"
+        log(f"  {label}: burning Spotify popup ({timing})")
+        burn_timed_popup(dest, popup, dest, resolved,
+                         popup_width=popup_width,
+                         popup_margin=popup_margin,
+                         workdir=workdir, gpu=gpu_encode)
+
+    def _stitch(clips_subset: List[Path], dest: Path, label: str,
+                *, apply_popup: bool = True) -> None:
         if tr_on:
             log(f"  {label}: assembling with crossfades + music")
             crossfade_concat(clips_subset, music, dest, tr_sec, tr_types,
@@ -1208,13 +1237,8 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
         else:
             log(f"  {label}: concatenating + music")
             concat_with_music(clips_subset, music, dest, workdir)
-        if popup and popup.exists() and popup_windows:
-            log(f"  {label}: burning Spotify popup "
-                f"({len(popup_windows)} windows)")
-            burn_timed_popup(dest, popup, dest, popup_windows,
-                             popup_width=popup_width,
-                             popup_margin=popup_margin,
-                             workdir=workdir, gpu=gpu_encode)
+        if apply_popup:
+            _burn_popup(dest, label)
 
     # ── stitch ──────────────────────────────────────────────────────────
     # Patreon split: free half first, paid half second (two files).
@@ -1226,7 +1250,8 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
         n1, n2 = cut + 1, len(clips) - (cut + 1)
         log(f"  Patreon split: free half first "
             f"(beats 1–{n1} → {part1.name})")
-        _stitch(clips[: cut + 1], part1, "free half")
+        _stitch(clips[: cut + 1], part1, "free half",
+                apply_popup=not popup_full_duration)
         # End of free half: hard-cut Patreon CTA clip (branding/patreon-end.mp4)
         end_clip = default_patreon_end_clip()
         if end_clip is not None:
@@ -1240,6 +1265,8 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                     f"continuing without it")
         else:
             log("  free half: no branding/patreon-end.mp4 — skip end CTA")
+        if popup_full_duration:
+            _burn_popup(part1, "free half including Patreon end")
         log(f"  Patreon split: paid half next "
             f"(beats {n1 + 1}–{len(clips)} → {part2.name})")
         # Paid half has its own timeline → own 10s open + random-in-10min
@@ -1248,7 +1275,9 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                              workdir=workdir, log=log, gpu=gpu_encode)
         else:
             concat_with_music(clips[cut + 1 :], music, part2, workdir)
-        if popup and popup.exists():
+        if popup and popup.exists() and popup_full_duration:
+            _burn_popup(part2, "paid half")
+        elif popup and popup.exists():
             w2 = plan_spotify_windows(
                 probe_duration(part2),
                 seed=(hash(str(part2.name)) & 0xFFFFFFFF) or 1)

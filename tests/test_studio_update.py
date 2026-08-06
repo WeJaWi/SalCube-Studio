@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import app
-from pipeline import identity, llm, operations, orchestrator, script
+from pipeline import identity, llm, operations, orchestrator, render, script
 
 
 class IdentityTests(unittest.TestCase):
@@ -60,6 +60,16 @@ class SpotifyPopupTests(unittest.TestCase):
             "spotify_popup_style": "geistmeister",
         }, {})
         self.assertIn("GEISTMEISTER", cue)
+
+    def test_geistmeister_window_covers_complete_export(self):
+        self.assertEqual(render.resolve_popup_windows(
+            321.5, [(0.0, 10.0)], full_duration=True),
+            [(0.0, 322.5)])
+
+    def test_standard_window_remains_timed(self):
+        requested = [(0.0, 10.0), (120.0, 130.0)]
+        self.assertEqual(render.resolve_popup_windows(
+            321.5, requested, full_duration=False), requested)
 
 
 class OperationsTests(unittest.TestCase):
