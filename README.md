@@ -53,13 +53,14 @@ video needs only ~3 minutes of HeyGen credits, not 30.
 
 ```bash
 cd ~/health-studio
-./run.sh                 # venv + deps + server → http://127.0.0.1:5062
+./run.sh                 # venv + deps + server → http://127.0.0.1:5066
 ```
 
 On Windows, double-click `run.bat` (or `powershell -ExecutionPolicy Bypass -File run.ps1`).
 It does the same thing: venv, deps, Chromium, then starts the server.
 
-Port note: 5062 on purpose — Chrome refuses to connect to 5060/5061 (SIP).
+Port note: 5066 is used for the stable controller address; Chrome refuses to
+connect to 5060/5061 (SIP).
 
 ### Windows setup (render worker)
 
@@ -162,7 +163,7 @@ JSON, finished videos upload to an app-owned `videos` folder in Drive. The
 first time, after restarting the app, open:
 
 ```
-http://localhost:5062/api/drive/authorize
+http://localhost:5066/api/drive/authorize
 ```
 
 Approve the Google prompt. The refresh token is saved in the gitignored
@@ -176,7 +177,7 @@ If a render completed before authorization or an upload temporarily fails,
 the local video is retained. Retry it with:
 
 ```
-curl -X POST http://localhost:5062/api/drive/retry/JOB_ID
+curl -X POST http://localhost:5066/api/drive/retry/JOB_ID
 ```
 
 ## Render fleet (Mac main + Windows worker)
@@ -268,7 +269,7 @@ b-roll of the beats it replaces.
    ask North for the current key set (NEVER commit `.env`; it's
    git-ignored). All generation (voice, avatar, stock, LLM) bills to
    these keys, so coordinate before big renders.
-4. Open http://127.0.0.1:5062, pick the profile (matthias-richter for
+4. Open http://127.0.0.1:5066, pick the profile (matthias-richter for
    the German channel), enter a title, Generate. The gate pauses for
    your hook choice; the video lands in `output/<job>/final.mp4`
    (add `?download=1` to the video URL for a download).

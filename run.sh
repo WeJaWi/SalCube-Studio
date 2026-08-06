@@ -17,9 +17,10 @@ if [ ! -f .env ]; then
   cp .env.example .env
 fi
 
-# video-studio uses 5050; Dmiqwi defaults to 5062
+# video-studio uses 5050; Dmiqwi defaults to 5066 so fleet workers keep a
+# stable controller address across restarts.
 # (NOT 5060/5061 — Chrome blocks those as unsafe SIP ports).
-export PORT="${PORT:-5062}"
+export PORT="${PORT:-5066}"
 echo ""
 echo "  ▶  Dmiqwi  →  http://127.0.0.1:${PORT}   (keep this terminal open)"
 echo ""

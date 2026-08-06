@@ -36,7 +36,7 @@ if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
     Write-Warning "then open a NEW terminal so the updated PATH is picked up."
 }
 
-if (-not $env:PORT) { $env:PORT = "5062" }
+if (-not $env:PORT) { $env:PORT = "5066" }
 Write-Host ""
 Write-Host "  >  Dmiqwi  ->  http://127.0.0.1:$($env:PORT)   (keep this terminal open)"
 Write-Host ""

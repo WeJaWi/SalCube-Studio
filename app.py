@@ -2134,7 +2134,7 @@ if __name__ == "__main__":
         raise SystemExit("fleet main requires ACCESS_KEYS and FLEET_PAIRING_TOKEN")
     if config.FLEET_ROLE == "worker" and (not config.FLEET_MAIN_URL or not config.FLEET_PAIRING_TOKEN):
         raise SystemExit("fleet worker requires FLEET_MAIN_URL and FLEET_PAIRING_TOKEN")
-    port = int(os.environ.get("PORT", 5062))
+    port = int(os.environ.get("PORT", 5066))
     host = (os.environ.get("HOST") or "").strip() or (
         "0.0.0.0" if ACCESS else "127.0.0.1")
     _vt = "available" if config.gpu_encode_available() else "unavailable"
