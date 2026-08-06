@@ -350,8 +350,10 @@
     text-transform: lowercase;
   }
   .badge.running { background: rgba(94,200,216,0.1); color: var(--cyan); border: 1px solid rgba(94,200,216,0.22); }
+  .badge.researching { background: rgba(94,200,216,0.1); color: var(--cyan); border: 1px solid rgba(94,200,216,0.22); }
   .badge.queued { background: rgba(148,156,168,0.12); color: #a8aeb8; border: 1px solid rgba(148,156,168,0.22); }
   .badge.awaiting_approval,
+  .badge.awaiting_title,
   .badge.done { background: rgba(107,191,150,0.12); color: var(--ok); border: 1px solid rgba(107,191,150,0.25); }
   .badge.error { background: rgba(212,136,136,0.12); color: var(--err); border: 1px solid rgba(212,136,136,0.25); }
   .badge.cancelled { background: #2a2e35; color: var(--muted-2); }
@@ -732,6 +734,12 @@
     <div class="hint" style="margin:-7px 0 4px">Video ID: <span id="videoId" class="media-id"></span></div>
     <div id="descriptionState" class="hint" style="margin:0 0 14px">Description: waiting for your channel rules</div>
 
+    <div id="titleGate" class="approval-card hidden">
+      <h3>Choose the video title</h3>
+      <p id="titleGateStatus" class="hint">Terra is researching the theme…</p>
+      <div id="titleChoices"></div>
+    </div>
+
     <div id="gate" class="hidden" style="margin-bottom:16px">
       <h3 style="margin:0 0 4px;font-size:16px;letter-spacing:-0.02em">Pick a hook</h3>
       <p class="sub" style="font-size:13px;margin:0 0 12px">Click to select which line opens the video.</p>
@@ -1109,6 +1117,8 @@ function poll(jobId) {
 }
 
 function statusLabel(st) {
+  if (st === "researching") return "researching titles";
+  if (st === "awaiting_title") return "your turn (title)";
   if (st === "awaiting_approval") return "your turn (hook)";
   if (st === "retry_wait") return "retrying soon";
   if (st === "paused") return "stopped";
@@ -1215,7 +1225,7 @@ async function refreshQueue() {
 
     const qList = $("#queueList");
     const activeN = list.filter(j =>
-      ["queued","running","awaiting_approval"].includes(j.status)).length;
+      ["researching","awaiting_title","queued","running","awaiting_approval"].includes(j.status)).length;
     if (!list.length) {
       $("#queuePanel").classList.add("hidden");
       return;
@@ -1226,7 +1236,7 @@ async function refreshQueue() {
       : `${list.length} recent`;
     qList.innerHTML = list.map(j => {
       const pos = j.queue_pos ? `#${j.queue_pos} · ` : "";
-      const canCancel = j.status === "queued";
+      const canCancel = ["researching","awaiting_title","queued"].includes(j.status);
       const canRetry = j.status === "error";
       const canSendToWorker = j.status === "queued";
       const canStop = !!j.stoppable;
@@ -1323,7 +1333,7 @@ async function refreshQueue() {
     });
     if (!currentJob) {
       const active = list.find(j =>
-        ["running","awaiting_approval","queued"].includes(j.status));
+        ["researching","awaiting_title","running","awaiting_approval","queued"].includes(j.status));
       if (active) selectJob(active.job_id);
     }
   } catch (e) { /* server not ready */ }
@@ -1351,6 +1361,8 @@ function render(j, jobId) {
 
   if (j.status === "awaiting_approval" && j.awaiting) showGate(j.awaiting);
   else if (j.status !== "awaiting_approval") $("#gate").classList.add("hidden");
+
+  renderTitleGate(j.title_options || {}, j.status);
 
   renderThumbnailApproval(j.thumbnail || {}, jobId);
 
@@ -1396,6 +1408,50 @@ function render(j, jobId) {
 }
 
 let thumbnailFormFor = null;
+let titleGateFor = null;
+function renderTitleGate(options, status) {
+  const panel = $("#titleGate"), choices = $("#titleChoices");
+  if (!["researching", "awaiting_title"].includes(status)) {
+    panel.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+  if (status === "researching" || options.state === "generating") {
+    $("#titleGateStatus").textContent = "Terra is researching the theme and preparing exactly three titles…";
+    choices.innerHTML = "";
+    titleGateFor = null;
+    return;
+  }
+  $("#titleGateStatus").textContent = "Choose one title. Production starts immediately after your selection.";
+  if (titleGateFor === currentJob) return;
+  choices.innerHTML = "";
+  (options.candidates || []).forEach((title, index) => {
+    const div = document.createElement("div");
+    div.className = "hook";
+    div.innerHTML = `<span class="htype">Option ${index + 1}</span>`;
+    div.appendChild(document.createTextNode(title));
+    div.addEventListener("click", async () => {
+      choices.querySelectorAll(".hook").forEach(h => h.classList.remove("sel"));
+      div.classList.add("sel");
+      choices.style.pointerEvents = "none";
+      const response = await fetch(`/api/title/job/${currentJob}/approve`, {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({title})
+      });
+      const data = await response.json();
+      if (data.error) {
+        alert(data.error);
+        choices.style.pointerEvents = "";
+      } else {
+        titleGateFor = null;
+        refreshQueue();
+      }
+    });
+    choices.appendChild(div);
+  });
+  titleGateFor = currentJob;
+}
+
 function renderThumbnailApproval(t, jobId) {
   const panel = $("#thumbApproval"), wordsBox = $("#thumbWords");
   const imageBox = $("#thumbImage"), retry = $("#retryThumb");
@@ -1404,7 +1460,10 @@ function renderThumbnailApproval(t, jobId) {
   imageBox.classList.add("hidden");
   retry.classList.add("hidden");
   const state = t.state || "generating_words";
-  if (state === "generating_words") {
+  if (state === "waiting_for_title") {
+    $("#thumbStatus").textContent = "Thumbnail preparation starts after you choose a title.";
+    thumbnailFormFor = null;
+  } else if (state === "generating_words") {
     $("#thumbStatus").textContent = "Terra is preparing thumbnail words. Rendering continues independently.";
     thumbnailFormFor = null;
   } else if (state === "words_ready") {

@@ -28,12 +28,18 @@ def _authentication_failure(exc: Exception) -> bool:
 
 
 def build_prompt(main_text: str, red_word: str, yellow_word: str,
-                 name: str) -> str:
+                 name: str, *, no_character: bool = False) -> str:
     """The edit instruction sent to GPT Image 2 alongside the two images."""
+    character_instruction = (
+        "Remove every person and character from the composition. Replace the "
+        "portrait area with an elegant symbolic visual matching the topic."
+        if no_character else
+        "Change the character to the character shown in image 2."
+    )
     return (
         f'Keep the original quality, color scheme, font, and textures of '
-        f'image 1, but change the character to the character shown in '
-        f'image 2. Change the headline text to "{main_text}", put the '
+        f'image 1, but {character_instruction} '
+        f'Change the headline text to "{main_text}", put the '
         f'word "{red_word}" in the red box, and put the word '
         f'"{yellow_word}" in the yellowish font. The name at the bottom '
         f'will be "{name}" instead of the other one, in the same '
@@ -128,7 +134,32 @@ def _paste_character(canvas: Image.Image, character_path: Path) -> None:
     canvas.alpha_composite(portrait, (0, 0))
 
 
-def generate_local(template_path: Path, character_path: Path, dest: Path, *,
+def _draw_topic_symbol(canvas: Image.Image, name: str) -> None:
+    """Simple character-free mark for Reddit/Astrology profile thumbnails."""
+    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    lowered = name.lower()
+    if "astro" in lowered:
+        # Crescent + sparse star field; no fake zodiac claims or readable text.
+        draw.ellipse((125, 150, 420, 445), fill=(231, 181, 75, 230))
+        draw.ellipse((205, 105, 475, 405), fill=(24, 18, 28, 255))
+        for x, y, r in ((92, 110, 5), (340, 92, 7), (438, 210, 4),
+                        (105, 520, 6), (378, 535, 5), (250, 80, 3)):
+            draw.ellipse((x-r, y-r, x+r, y+r), fill=(248, 222, 151, 230))
+    else:
+        # Layered conversation cards evoke an online story without a logo.
+        for offset, alpha in ((38, 95), (19, 155), (0, 235)):
+            box = (82 + offset, 175 - offset, 426 + offset, 405 - offset)
+            draw.rounded_rectangle(box, radius=26,
+                                   fill=(242, 237, 225, alpha),
+                                   outline=(225, 173, 72, alpha), width=4)
+        for y, frac in ((230, .72), (276, .58), (322, .66)):
+            draw.rounded_rectangle((130, y, 130 + int(250 * frac), y + 15),
+                                   radius=7, fill=(77, 54, 46, 210))
+    canvas.alpha_composite(layer.filter(ImageFilter.GaussianBlur(0.4)))
+
+
+def generate_local(template_path: Path, character_path: Optional[Path], dest: Path, *,
                    main_text: str, red_word: str, yellow_word: str,
                    name: str) -> Path:
     """Create a deterministic thumbnail when no remote image model is usable.
@@ -150,7 +181,10 @@ def generate_local(template_path: Path, character_path: Path, dest: Path, *,
         alpha = int(118 + (x / 1279) * 105)
         shade_draw.line((x, 0, x, 719), fill=(12, 8, 7, alpha))
     canvas.alpha_composite(shade)
-    _paste_character(canvas, character_path)
+    if character_path is not None:
+        _paste_character(canvas, character_path)
+    else:
+        _draw_topic_symbol(canvas, name)
 
     # A dark glass text panel keeps every language readable over any template.
     panel = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
@@ -208,7 +242,7 @@ def generate_local(template_path: Path, character_path: Path, dest: Path, *,
     return dest
 
 
-def generate(template_path: Path, character_path: Path, dest: Path, *,
+def generate(template_path: Path, character_path: Optional[Path], dest: Path, *,
             main_text: str, red_word: str, yellow_word: str, name: str,
             aspect_ratio: str = "16:9", resolution: Optional[str] = None,
             model: Optional[str] = None, timeout_s: int = 300) -> Path:
@@ -231,8 +265,9 @@ def generate(template_path: Path, character_path: Path, dest: Path, *,
     try:
         template_url = clients.kie_upload(
             template_path, "thumbnails", api_key=upload_key)
-        character_url = clients.kie_upload(
+        character_url = (clients.kie_upload(
             character_path, "thumbnails", api_key=upload_key)
+            if character_path is not None else None)
     except Exception as exc:  # noqa: BLE001
         if _authentication_failure(exc):
             return generate_local(
@@ -241,8 +276,9 @@ def generate(template_path: Path, character_path: Path, dest: Path, *,
         raise
     primary_model = model or config.KIE_THUMBNAIL_MODEL
     payload = {
-        "prompt": build_prompt(main_text, red_word, yellow_word, name),
-        "input_urls": [template_url, character_url],
+        "prompt": build_prompt(main_text, red_word, yellow_word, name,
+                               no_character=character_path is None),
+        "input_urls": [url for url in (template_url, character_url) if url],
         "aspect_ratio": aspect_ratio,
         "resolution": resolution or config.KIE_THUMBNAIL_RESOLUTION,
     }
@@ -254,8 +290,9 @@ def generate(template_path: Path, character_path: Path, dest: Path, *,
     # GPT Image model is not enabled for either image key.
     if config.KIE_VIDEO_API_KEY:
         grok_payload = {
-            "prompt": build_prompt(main_text, red_word, yellow_word, name),
-            "image_urls": [template_url, character_url],
+            "prompt": build_prompt(main_text, red_word, yellow_word, name,
+                                   no_character=character_path is None),
+            "image_urls": [url for url in (template_url, character_url) if url],
         }
         candidate = ("grok-imagine/image-to-image",
                      config.KIE_VIDEO_API_KEY, grok_payload)

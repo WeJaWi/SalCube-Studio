@@ -179,6 +179,12 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
         "spotify_popup_style": (
             inputs.get("spotify_popup_style") or "standard").strip().lower(),
         "spotify_url": (inputs.get("spotify_url") or "").strip(),
+        "theme": (inputs.get("theme") or "").strip(),
+        "research_brief": (inputs.get("research_brief") or "").strip(),
+        "source_material": (inputs.get("source_material") or "").strip(),
+        "source_metadata": (inputs.get("source_metadata")
+                            if isinstance(inputs.get("source_metadata"), dict)
+                            else {}),
     }
     if inputs["smart_stock"] not in ("vision", "text", "off"):
         inputs["smart_stock"] = "text"

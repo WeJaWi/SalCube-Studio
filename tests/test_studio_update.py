@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import app
-from pipeline import (identity, llm, operations, orchestrator, render, script,
-                      thumbnail)
+from PIL import Image
+from docx import Document
+from pipeline import (delivery_doc, identity, llm, operations, orchestrator,
+                      render, research, script, storage, thumbnail)
 
 
 class IdentityTests(unittest.TestCase):
@@ -38,6 +42,129 @@ class VideoGroupTests(unittest.TestCase):
         }, "A title")
         self.assertTrue(inputs["spotify_popup"])
         self.assertEqual(inputs["spotify_popup_style"], "geistmeister")
+
+
+class ResearchProfileTests(unittest.TestCase):
+    def setUp(self):
+        self.old_access = app.ACCESS
+        app.ACCESS = []
+        app.JOBS.clear()
+        self.tmp = TemporaryDirectory()
+        self.out = Path(self.tmp.name)
+        self.output_patch = patch.object(app.config, "OUTPUT_DIR", self.out)
+        self.output_patch.start()
+        self.client = app.app.test_client()
+
+    def tearDown(self):
+        app.JOBS.clear()
+        app.ACCESS = self.old_access
+        self.output_patch.stop()
+        self.tmp.cleanup()
+
+    def test_reddit_enqueue_enforces_profile_range_and_waits_for_titles(self):
+        inputs = app._build_inputs({"video_group": "small"}, "family betrayal")
+        with patch.object(app.identity, "numeric_id",
+                          return_value="11111111111111111111"), \
+                patch.object(app, "_start_profile_research") as start, \
+                patch.object(app, "_persist_queue"):
+            job_id = app._enqueue_job(inputs, "reddit")
+        job = app.JOBS[job_id]
+        self.assertEqual(job["status"], "researching")
+        self.assertEqual(job["thumbnail"]["state"], "waiting_for_title")
+        self.assertEqual(job["inputs"]["language"], "English")
+        self.assertGreaterEqual(job["inputs"]["length_chars"], 40000)
+        self.assertLessEqual(job["inputs"]["length_chars"], 70000)
+        self.assertEqual(job["video_group"], "profile")
+        start.assert_called_once_with(job_id)
+
+    def test_title_approval_accepts_only_a_terra_candidate_and_queues_video(self):
+        job_id = "22222222222222222222"
+        job_dir = self.out / job_id
+        job_dir.mkdir()
+        candidates = ["Title One", "Title Two", "Title Three"]
+        app.JOBS[job_id] = {
+            "status": "awaiting_title", "step": "title", "title": "theme",
+            "profile": "astrology", "inputs": {"title": "theme"}, "log": [],
+            "title_options": {"state": "ready", "theme": "theme",
+                              "candidates": candidates},
+            "thumbnail": {"state": "waiting_for_title"},
+        }
+        with patch.object(app, "_persist_queue"), \
+                patch.object(app, "_start_thumbnail_words") as thumb, \
+                patch.object(app, "_kick_queue") as kick:
+            rejected = self.client.post(
+                f"/api/title/job/{job_id}/approve", json={"title": "Other"})
+            accepted = self.client.post(
+                f"/api/title/job/{job_id}/approve", json={"title": "Title Two"})
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(app.JOBS[job_id]["status"], "queued")
+        self.assertEqual(app.JOBS[job_id]["publication_title"], "Title Two")
+        self.assertEqual(app.JOBS[job_id]["thumbnail"]["state"],
+                         "generating_words")
+        saved = json.loads((job_dir / "inputs.json").read_text())
+        self.assertEqual(saved["title"], "Title Two")
+        thumb.assert_called_once_with(job_id)
+        kick.assert_called_once()
+
+    def test_research_profile_thumbnail_keeps_selected_title(self):
+        job_id = "33333333333333333333"
+        app.JOBS[job_id] = {
+            "status": "queued", "step": "queued", "title": "Chosen Title",
+            "publication_title": "Chosen Title", "profile": "reddit",
+            "inputs": {"language": "English"}, "log": [],
+            "thumbnail": {"state": "generating_words"},
+        }
+        package = {"localized_title": "Terra Changed It",
+                   "main_text": "THE TRUTH CAME OUT", "red_word": "TOO LATE",
+                   "yellow_word": "ONE DECISION", "name": "REDDIT STORIES"}
+        with patch.object(app.llm, "chat_json", return_value=package), \
+                patch.object(app, "_persist_queue"):
+            app._thumbnail_words_task(job_id)
+        self.assertEqual(app.JOBS[job_id]["thumbnail"]["localized_title"],
+                         "Chosen Title")
+
+    def test_reddit_html_parser_extracts_submission_not_sidebar(self):
+        page = ("<div class=\"usertext-body may-blank-within md-container\">"
+                "<div class=\"md\"><p>sidebar</p></div></div>"
+                "<div class=\"thing id-t3_post\">"
+                "<div class=\"usertext-body may-blank-within md-container\">"
+                "<div class=\"md\"><p>The actual story begins.</p>"
+                "<p>It has an update.</p></div></div></div>")
+        text = research._main_post_text(page)
+        self.assertIn("The actual story begins.", text)
+        self.assertIn("It has an update.", text)
+        self.assertNotIn("sidebar", text)
+
+
+class DeliveryDocumentTests(unittest.TestCase):
+    def test_docx_contains_title_and_embedded_thumbnail(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "thumb.png"
+            Image.new("RGB", (1280, 720), (35, 29, 48)).save(image_path)
+            out = delivery_doc.create(
+                "Three Signs Your Life Is Entering a New Cycle",
+                image_path, root / "package.docx")
+            doc = Document(out)
+            text = "\n".join(p.text for p in doc.paragraphs)
+            self.assertIn("Three Signs Your Life Is Entering a New Cycle", text)
+            self.assertEqual(len(doc.inline_shapes), 1)
+            self.assertGreater(out.stat().st_size, 1000)
+
+    def test_drive_session_uses_docx_content_type(self):
+        drive = storage.GoogleDriveStorage()
+        response = type("Response", (), {
+            "status_code": 200, "headers": {"Location": "https://session"},
+        })()
+        with patch.object(drive, "_request", return_value=response) as request_call:
+            session = drive._start_session(
+                "package.docx", 1234, "folder",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        self.assertEqual(session, "https://session")
+        headers = request_call.call_args.kwargs["headers"]
+        self.assertEqual(headers["X-Upload-Content-Type"],
+                         "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 
 class SpotifyPopupTests(unittest.TestCase):

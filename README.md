@@ -2,7 +2,7 @@
 
 Formerly *Senior Health Studio*. Channel profiles still include Grandma Hannah & Matthias Richter.
 
-Three channels, one tool — pick the profile in the UI:
+Five channel formats, one tool — pick the profile in the UI:
 - **classic** — English/German long-form philosopher narrations in
   the cited author's own voice (default Joseph Murphy — change per video via
   "cited thinker(s)"). Classic cheap format: NO on-camera avatar, pure voice-over
@@ -18,6 +18,14 @@ Three channels, one tool — pick the profile in the UI:
   self-introduction after the hook, verbatim e-book blocks, honest
   buried-secret framing (no fabricated studies, no conspiracies). His HeyGen
   character and ai33 voice ("Matthias") are wired into the profile.
+- **reddit** — ENGLISH, character-free long-form adaptation of one real public
+  Reddit post. Enter a theme; Terra builds the search query, judges the
+  retrieved posts, and presents exactly three truthful titles. The selected
+  post becomes the factual spine of an anonymized 40k–70k narration.
+- **astrology** — ENGLISH, character-free symbolic astrology. Enter a theme;
+  Terra prepares a bounded research brief and exactly three titles. Unverified
+  transit/date claims are never invented; without verified dates the treatment
+  remains evergreen, reflective, and non-deterministic.
 
 A local web app that turns a title into a complete Grandma Hannah
 senior-health video: Sonnet 5 writes an outline + 4 hooks, **you approve at
@@ -114,6 +122,10 @@ libx264 when no hardware encoder is present.
    only then is the image generated. Approve that image separately. The
    thumbnail gets its own 20-digit ID and remains visible/downloadable from
    the video job.
+   Reddit and Astrology add an earlier gate: Terra first researches the theme
+   and presents exactly three titles. The video enters the render queue only
+   after one title is selected, and that selected title remains locked through
+   thumbnail approval.
 6. When the Spotify CTA is enabled, choose either the standard localized
    card or the dedicated **GEISTMEISTER** card. The standard card uses timed
    windows; GEISTMEISTER stays visible for the entire video and also names
@@ -183,6 +195,11 @@ uploader streams 8 MB chunks, resumes a valid interrupted session, verifies
 the remote size/checksum, and only then deletes the local deliverable. Drive
 files are private—both free and Patreon parts are served through this app's
 normal authenticated video route, never an "anyone with the link" share.
+
+For `reddit` and `astrology`, approving the final thumbnail also creates a
+one-page `{video-id}-title-thumbnail.docx` containing only the approved title
+and embedded thumbnail. It uploads to the same Drive folder; the Reddit source
+link and private research metadata are deliberately excluded.
 
 If a render completed before authorization or an upload temporarily fails,
 the local video is retained. Retry it with:

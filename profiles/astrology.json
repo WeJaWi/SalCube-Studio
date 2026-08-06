@@ -1,0 +1,61 @@
+{
+  "name": "astrology",
+  "description": "English long-form symbolic astrology around one requested theme. Terra prepares a grounded research brief and exactly three titles before production. Pure voice-over B-roll; no host or character.",
+  "engine": "hannah",
+  "channel_context": "an English long-form astrology and spiritual-reflection YouTube channel. Each video explores one clearly bounded astrological theme through symbolism, tradition, self-reflection, and practical journaling prompts while clearly avoiding scientific, medical, financial, or guaranteed predictive claims",
+  "audience_line": "speaks to one spiritually curious viewer seeking meaning, timing, reflection, and a grounded way to think about change",
+  "research": {"enabled": true, "provider": "gpt-5.6-terra", "kind": "astrology_theme", "title_choices": 3},
+  "drive_package": {"docx": true},
+  "thumbnail": {"no_character": true, "display_name": "ASTROLOGY"},
+  "video": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "ken_burns": true,
+    "beat_seconds": 20,
+    "broll_mix": {"stock": 0.3, "stock_image": 0.28, "animation": 0.27, "ai_video": 0.15},
+    "max_template_repeats": 2,
+    "anim_themes_default": ["plum", "amber"],
+    "ai_video_resolution": "720p",
+    "overlay": {"enabled": true, "opacity": 0.3},
+    "transitions": {"enabled": true, "seconds": 0.55, "types": ["fade", "circleopen", "fade", "smoothleft", "fade"]},
+    "host_budget_seconds": 0
+  },
+  "defaults": {"language": "English", "length_chars": 55000, "length_chars_min": 40000, "length_chars_max": 70000},
+  "host": {
+    "enabled": false,
+    "persona": "A calm, thoughtful astrology narrator who explores symbols and cycles without claiming supernatural certainty. Never mention production or AI.",
+    "register": "Mysterious and emotionally resonant, yet careful, grounded, and lucid. Urgency may come from relevance, never fear or false certainty."
+  },
+  "ai_disclosure": "",
+  "style": {
+    "broll_style": "cinematic night skies, observatories, moonlit landscapes, celestial maps without readable labels, candles, reflective solitary figures, deep indigo and warm gold, elegant spiritual atmosphere, no identifiable faces",
+    "music_style": "slow celestial ambient score, glass harmonics, soft low strings and distant piano, mysterious but reassuring, no vocals"
+  },
+  "music": {"enabled": true, "tracks": "auto", "minutes_per_track": 18, "min_tracks": 2, "max_tracks": 6},
+  "voices": {"English": "elevenlabs_CwhRBWXzGAHq8TQ4Fs17"},
+  "writing_sections": [
+    {"name": "opening_window", "weight": 0.12, "hint": "Open with the theme's emotional relevance and a truthful curiosity gap. Never invent a rare date, transit, portal, or guaranteed event."},
+    {"name": "symbolic_foundation", "weight": 0.25, "hint": "Explain the relevant astrological symbols, archetypes, houses, signs, or planetary meanings from the supplied research brief. Distinguish tradition and interpretation from astronomy or science."},
+    {"name": "life_patterns", "weight": 0.27, "hint": "Explore how the theme may be used as a lens for relationships, work, identity, endings, beginnings, or inner change. Use possibilities and reflective questions, not deterministic predictions."},
+    {"name": "practical_reflection", "weight": 0.23, "hint": "Offer grounded journaling, observation, conversation, or decision-review practices. Never advise stopping treatment, making investments, or taking high-stakes action because of astrology."},
+    {"name": "close_block", "weight": 0.13, "hint": "Gather the theme into one memorable perspective, invite the viewer to share what resonated, and add a soft invitation to subscribe. {LIKE_SUBSCRIBE} End with calm possibility rather than guaranteed transformation."}
+  ],
+  "cta_lines": {"like_subscribe": "Invite the viewer to comment with the symbol or reflection that resonated, then softly ask them to subscribe if they want more grounded astrology."},
+  "north_star": "Create wonder without misinformation. Astrology is presented as a symbolic reflective tradition and entertainment, never as proven causation or guaranteed prediction.",
+  "rules": [
+    "English only.",
+    "Use the supplied Terra research brief as the factual and conceptual boundary.",
+    "Never invent current astronomical positions, transit dates, historical quotations, scientific studies, or rarity claims.",
+    "If a date or transit is not explicitly verified in the research brief, keep the treatment evergreen.",
+    "Use language such as may, can symbolize, astrologers traditionally associate, or consider reflecting on; never will definitely happen.",
+    "No medical, legal, financial, fertility, death, disaster, or relationship guarantees.",
+    "Body is pure continuous English prose: no headings, labels, bullets, or stage directions."
+  ],
+  "hook_types": {
+    "bold_statement": "State the theme's strongest symbolic implication as a possibility, not a guaranteed event.",
+    "question": "Ask a direct reflective question that makes the viewer examine a current pattern through the theme.",
+    "short_story": "Open with a brief archetypal or everyday scene that illustrates the theme without presenting fiction as a real case.",
+    "pattern_break": "Challenge a simplistic horoscope assumption and replace it with a deeper, more useful interpretation."
+  }
+}

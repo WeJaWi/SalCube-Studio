@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -127,7 +128,8 @@ class GoogleDriveStorage:
         self._save_token(token)
 
     def upload(self, source: Path, *, dest_name: Optional[str] = None,
-               state_file: Optional[Path] = None) -> dict:
+               state_file: Optional[Path] = None,
+               content_type: Optional[str] = None) -> dict:
         """Upload and verify one local file, returning only small metadata.
 
         ``state_file`` lets a retry continue a valid Drive session after a
@@ -141,6 +143,8 @@ class GoogleDriveStorage:
         if total <= 0:
             raise DriveError(f"refusing to upload empty file: {source.name}")
         dest_name = dest_name or source.name
+        content_type = (content_type or mimetypes.guess_type(dest_name)[0]
+                        or "application/octet-stream")
         state_file = state_file or source.with_name(f".{source.name}.gdrive-upload.json")
         state = self._load_upload_state(state_file, source, total)
         folder_id = state.get("folder_id") or self.ensure_folder()
@@ -156,7 +160,8 @@ class GoogleDriveStorage:
             except DriveUploadSessionExpired:
                 session_url = None  # expired sessions must be reopened
         if not session_url:
-            session_url = self._start_session(dest_name, total, folder_id)
+            session_url = self._start_session(dest_name, total, folder_id,
+                                              content_type)
             offset = -1
             state = {"source_name": source.name, "size": total,
                      "folder_id": folder_id, "session_url": session_url}
@@ -270,13 +275,14 @@ class GoogleDriveStorage:
             r = requests.request(method, url, headers=h, timeout=300, **kwargs)
         return r
 
-    def _start_session(self, dest_name: str, total: int, folder_id: str) -> str:
+    def _start_session(self, dest_name: str, total: int, folder_id: str,
+                       content_type: str) -> str:
         r = self._request("POST", f"{DRIVE_UPLOAD_API}/files", params={
             "uploadType": "resumable", "supportsAllDrives": "true",
             "fields": "id,name,size,md5Checksum,webViewLink",
         }, headers={
             "Content-Type": "application/json; charset=UTF-8",
-            "X-Upload-Content-Type": "video/mp4",
+            "X-Upload-Content-Type": content_type,
             "X-Upload-Content-Length": str(total),
         }, json={"name": dest_name, "parents": [folder_id]})
         self._require_ok(r, "starting Drive resumable upload")

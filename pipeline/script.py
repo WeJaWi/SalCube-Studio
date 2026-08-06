@@ -33,6 +33,14 @@ def _persona_context(inputs: Dict[str, Any], profile: Dict[str, Any]) -> str:
     cited = (inputs.get("cited_philosophers") or "").strip()
     cited_line = (f"Cited thinker(s) for THIS video — their authentic concepts "
                   f"and vocabulary carry the teaching: {cited}.\n" if cited else "")
+    research_brief = (inputs.get("research_brief") or "").strip()
+    source_material = (inputs.get("source_material") or "").strip()
+    research_context = (
+        (f"EDITORIAL RESEARCH BRIEF (factual/conceptual boundary):\n"
+         f"{research_brief}\n" if research_brief else "")
+        + (f"SOURCE MATERIAL FOR THIS VIDEO (do not exceed its factual claims):\n"
+           f"{source_material}\n" if source_material else "")
+    )
     return (
         f"You are writing for {channel}.\n"
         f"PERSONA / NARRATOR: {host.get('persona', '')}\n"
@@ -44,6 +52,7 @@ def _persona_context(inputs: Dict[str, Any], profile: Dict[str, Any]) -> str:
         f"walking back its promises. Teach the content honestly and let the "
         f"claims themselves carry the precision.\n"
         f"{cited_line}"
+        f"{research_context}"
         f"Target language of the finished script: {inputs['language']}.\n"
         f"HARD RULES:\n{rules}\n"
     )
