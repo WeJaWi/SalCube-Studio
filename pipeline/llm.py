@@ -40,6 +40,20 @@ def _payload(spec: Dict[str, str], content: str, max_tokens: int) -> dict:
             "reasoning": {"effort": "low"},
             "stream": False,
         }
+    if spec["format"] == "openai":
+        payload = {
+            "model": spec["model"],
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        if spec.get("reasoning"):
+            payload["reasoning"] = {
+                "enabled": True,
+                "max_tokens": int(spec.get("reasoning_max_tokens") or 256),
+                "exclude": True,
+            }
+        return payload
     return {  # anthropic
         "model": spec["model"],
         "messages": [{"role": "user", "content": content}],
@@ -57,6 +71,16 @@ def _parse(spec: Dict[str, str], data: dict) -> str:
                     if c.get("type") == "output_text":
                         parts.append(c.get("text", ""))
         return "".join(parts).strip()
+    if spec["format"] == "openai":
+        choices = data.get("choices") or []
+        content = ((choices[0].get("message") or {}).get("content")
+                   if choices else "")
+        if isinstance(content, list):
+            return "".join(
+                str(part.get("text") or "") for part in content
+                if isinstance(part, dict)
+            ).strip()
+        return str(content or "").strip()
     return "".join(
         b.get("text", "") for b in data.get("content", []) or []
         if b.get("type") == "text"
@@ -64,7 +88,8 @@ def _parse(spec: Dict[str, str], data: dict) -> str:
 
 
 def chat(user: str, model: str, system: Optional[str] = None,
-         max_tokens: int = 8000, timeout: int = 300, retries: int = 5) -> str:
+         max_tokens: int = 8000, timeout: int = 300, retries: int = 5,
+         allow_cli_fallback: bool = True) -> str:
     """Send one message to `model` (from resolve_model()), return its text.
 
     Transient 5xx/network/empty responses are retried with exponential
@@ -159,7 +184,7 @@ def chat(user: str, model: str, system: Optional[str] = None,
                   f"failed ({last_err}); retrying in {wait:.0f}s…", flush=True)
             cancel.sleep(wait)
 
-    if config.CLAUDE_CLI_FALLBACK:
+    if allow_cli_fallback and config.CLAUDE_CLI_FALLBACK:
         try:
             print(f"[llm] {model}: kie.ai retry budget exhausted "
                   f"({last_err}) — falling back to local Claude CLI "
@@ -221,7 +246,7 @@ def _claude_cli_chat(content_for_cli: str, system: Optional[str]) -> str:
 
 
 def chat_json(user: str, model: str, max_tokens: int = 8000, attempts: int = 3,
-              **kw) -> Dict[str, Any]:
+              allow_cli_fallback: bool = True, **kw) -> Dict[str, Any]:
     """chat() + extract_json() with self-healing: models sometimes preface
     the JSON with commentary or skip it entirely — re-ask firmly.
 
@@ -235,14 +260,16 @@ def chat_json(user: str, model: str, max_tokens: int = 8000, attempts: int = 3,
     last: Exception = RuntimeError("no attempt made")
     for a in range(attempts):
         try:
-            return extract_json(chat(prompt, model, max_tokens=max_tokens, **kw))
+            return extract_json(chat(
+                prompt, model, max_tokens=max_tokens,
+                allow_cli_fallback=allow_cli_fallback, **kw))
         except (json.JSONDecodeError, RuntimeError) as e:
             last = e
             prompt = (user + "\n\nIMPORTANT: your previous reply was not "
                       "valid JSON. Respond with ONLY the JSON object, "
                       "starting with '{' — no preamble, no commentary.")
 
-    if config.CLAUDE_CLI_FALLBACK:
+    if allow_cli_fallback and config.CLAUDE_CLI_FALLBACK:
         try:
             print(f"[llm] {model}: {attempts} JSON attempts all unparseable "
                   f"({last}) — trying local Claude CLI for strict JSON…",

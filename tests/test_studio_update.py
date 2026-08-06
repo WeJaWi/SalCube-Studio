@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import app
-from pipeline import identity, operations
+from pipeline import identity, llm, operations
 
 
 class IdentityTests(unittest.TestCase):
@@ -31,6 +31,25 @@ class VideoGroupTests(unittest.TestCase):
 
 
 class OperationsTests(unittest.TestCase):
+    def test_openrouter_monitor_payload_uses_qwen_reasoning(self):
+        spec = {
+            "format": "openai", "model": "qwen/qwen3.7-flash",
+            "reasoning": True, "reasoning_max_tokens": 256,
+        }
+        payload = llm._payload(spec, "inspect this", 650)
+        self.assertEqual(payload["model"], "qwen/qwen3.7-flash")
+        self.assertEqual(payload["reasoning"], {
+            "enabled": True, "max_tokens": 256, "exclude": True,
+        })
+        self.assertEqual(payload["messages"][0]["content"], "inspect this")
+
+    def test_openrouter_monitor_response_parser(self):
+        spec = {"format": "openai"}
+        result = llm._parse(spec, {
+            "choices": [{"message": {"content": "System healthy"}}],
+        })
+        self.assertEqual(result, "System healthy")
+
     def test_deterministic_health_escalates_stalled_work(self):
         result = operations.OperationsCenter._deterministic_health({
             "jobs": [{"status": "running", "stalled": True}],

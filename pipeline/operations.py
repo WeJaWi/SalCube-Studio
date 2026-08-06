@@ -16,7 +16,8 @@ from typing import Callable, Optional
 from . import config, identity, llm
 
 
-_MODEL = "gpt-5.6-terra"
+_MODEL = "openrouter-monitor"
+_DISPLAY_MODEL = config.OPENROUTER_MONITOR_MODEL
 _SYSTEM = (
     "You are Dmiqwi Operations, a read-only production observer. You inspect "
     "sanitized video-job, queue, storage, and worker health. Never claim you "
@@ -124,12 +125,13 @@ class OperationsCenter:
             )
             analysis = llm.chat_json(prompt, _MODEL, system=_SYSTEM,
                                      max_tokens=650, attempts=2, retries=1,
-                                     timeout=90)
+                                     timeout=90, allow_cli_fallback=False)
             severity = str(analysis.get("severity") or health["severity"])
             if severity not in ("ok", "warning", "critical"):
                 severity = health["severity"]
             entry = self._append({
-                "kind": "update", "model": _MODEL, "severity": severity,
+                "kind": "update", "model": _DISPLAY_MODEL,
+                "severity": severity,
                 "headline": str(analysis.get("headline") or "System update")[:160],
                 "message": str(analysis.get("message") or "Health snapshot completed.")[:1200],
                 "root_cause_risk": str(analysis.get("root_cause_risk") or "low"),
@@ -158,10 +160,10 @@ class OperationsCenter:
             snapshot = self._last_snapshot or {}
             health = self._deterministic_health(snapshot)
             return self._append({
-                "kind": "update", "model": _MODEL,
+                "kind": "update", "model": _DISPLAY_MODEL,
                 "severity": "warning" if health["severity"] == "ok" else health["severity"],
                 "headline": "AI monitor could not complete its review",
-                "message": f"Deterministic monitoring remains active. Terra review failed: {str(exc)[:500]}",
+                "message": f"Deterministic monitoring remains active. OpenRouter review failed: {str(exc)[:500]}",
                 "root_cause_risk": "medium", "report_recommended": False,
                 "evidence": health["issues"][:4],
             })
@@ -179,11 +181,12 @@ class OperationsCenter:
             "Any proposed change must be labeled 'Needs your approval'.\n\n"
             f"Question: {question}\n\nState: {json.dumps(snapshot, ensure_ascii=False)}"
             f"\n\nRecent monitor updates: {json.dumps(recent, ensure_ascii=False)}",
-            _MODEL, system=_SYSTEM, max_tokens=1400, retries=1, timeout=120)
+            _MODEL, system=_SYSTEM, max_tokens=1400, retries=1, timeout=120,
+            allow_cli_fallback=False)
         self._append({"kind": "chat", "severity": "info",
                       "headline": "Owner question", "message": question[:500],
                       "answer": answer[:8000]})
-        return {"answer": answer, "model": _MODEL}
+        return {"answer": answer, "model": _DISPLAY_MODEL}
 
     def create_report(self, reason: str, *, analysis: Optional[dict] = None,
                       snapshot: Optional[dict] = None, use_model: bool = True) -> dict:
@@ -196,7 +199,8 @@ class OperationsCenter:
                 "Impact, Safe checks, and Proposed changes requiring owner approval. "
                 "Do not claim any action was performed.\n\n"
                 f"Reason: {reason}\nSnapshot: {json.dumps(snapshot, ensure_ascii=False)}",
-                _MODEL, system=_SYSTEM, max_tokens=2400, retries=1, timeout=120)
+                _MODEL, system=_SYSTEM, max_tokens=2400, retries=1, timeout=120,
+                allow_cli_fallback=False)
         else:
             evidence = "\n".join(
                 f"- {x}" for x in ((analysis or {}).get("evidence") or ["See snapshot below."]))
@@ -211,7 +215,8 @@ class OperationsCenter:
         report_id = identity.numeric_id(
             taken=(p.stem for p in self.reports_dir.glob("*.md")))
         path = self.reports_dir / f"{report_id}.md"
-        header = f"<!-- report_id: {report_id}; created: {_now()}; model: {_MODEL} -->\n\n"
+        header = (f"<!-- report_id: {report_id}; created: {_now()}; "
+                  f"model: {_DISPLAY_MODEL} -->\n\n")
         path.write_text(header + body, encoding="utf-8")
         return {"report_id": report_id, "summary": reason[:240],
                 "url": f"/api/ops/report/{report_id}"}
@@ -227,7 +232,8 @@ class OperationsCenter:
                                 path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"),
                             "url": f"/api/ops/report/{path.stem}"})
         return {"running": self.running, "interval_seconds": self.interval,
-                "model": _MODEL, "entries": entries, "reports": reports}
+                "model": _DISPLAY_MODEL, "entries": entries,
+                "reports": reports}
 
 
 def disk_snapshot() -> dict:

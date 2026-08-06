@@ -781,14 +781,14 @@
   <div class="ops-head">
     <span class="dot" id="opsDot"></span>
     <strong>System observer</strong>
-    <span class="badge" id="opsModel">Terra</span>
+    <span class="badge" id="opsModel">Qwen 3.7 Flash</span>
   </div>
   <div class="ops-policy">Read-only · checks every minute · every proposed change needs your approval · reports are saved locally and never sent.</div>
   <div id="opsLog" class="ops-log"><div class="hint">Waiting for the first system update…</div></div>
   <div class="ops-chat">
     <textarea id="opsQuestion" placeholder="Ask about jobs, workers, failures, disk, Drive, or the app…"></textarea>
     <div class="ops-actions">
-      <button id="askOps">Ask Terra</button>
+      <button id="askOps">Ask monitor</button>
       <button id="makeOpsReport" class="secondary">Create report</button>
     </div>
     <div id="opsAnswer" class="ops-answer hidden"></div>
@@ -1469,7 +1469,7 @@ async function refreshOps() {
   try {
     const data = await (await fetch("/api/ops/status")).json();
     $("#opsDot").className = "dot " + (data.running ? "online" : "busy");
-    $("#opsModel").textContent = (data.model || "Terra").replace("gpt-5.6-", "");
+    $("#opsModel").textContent = data.model || "qwen/qwen3.7-flash";
     const entries = (data.entries || []).slice().reverse();
     $("#opsLog").innerHTML = entries.length ? entries.map(e => `
       <div class="ops-entry ${escapeHtml(e.severity || "info")}">
@@ -1488,7 +1488,7 @@ $("#askOps").addEventListener("click", async () => {
   if (!q) return;
   $("#askOps").disabled = true;
   $("#opsAnswer").classList.remove("hidden");
-  $("#opsAnswer").textContent = "Terra is reviewing the current system snapshot…";
+  $("#opsAnswer").textContent = "Qwen is reviewing the current system snapshot…";
   try {
     const data = await (await fetch("/api/ops/chat", {method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify({question:q})})).json();

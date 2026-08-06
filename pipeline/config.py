@@ -310,6 +310,13 @@ LLM_MODEL = get("LLM_MODEL", "claude-sonnet-5")
 # ── GPT 5.6 via kie (alternative script model) ──────────────────
 LLM_GPT_API_KEY = get("LLM_GPT_API_KEY")
 
+# ── OpenRouter (read-only operations observer) ──────────────────────
+OPENROUTER_API_KEY = get("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = get(
+    "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+OPENROUTER_MONITOR_MODEL = get(
+    "OPENROUTER_MONITOR_MODEL", "qwen/qwen3.7-flash")
+
 # ── Grok 4.5 via kie (alternative script model) ──────────────────
 # Own key so this model's spend is tracked apart from the others; falls
 # back to the main kie key if not set separately.
@@ -414,6 +421,12 @@ SCRIPT_MODELS = {
     "grok-4-5": {"format": "responses", "base": KIE_BASE_URL,
                 "path": "/grok/v1/responses", "model": "grok-4-5",
                 "key": LLM_GROK_API_KEY},
+    "openrouter-monitor": {
+        "format": "openai", "base": OPENROUTER_BASE_URL,
+        "path": "/chat/completions", "model": OPENROUTER_MONITOR_MODEL,
+        "key": OPENROUTER_API_KEY, "reasoning": True,
+        "reasoning_max_tokens": 256,
+    },
 }
 
 
