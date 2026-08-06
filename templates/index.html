@@ -50,7 +50,7 @@
     border-bottom: 1px solid var(--border-soft);
   }
   .topbar-inner {
-    max-width: 920px; margin: 0 auto;
+    max-width: 1320px; margin: 0 auto;
     padding: 14px 20px;
     display: flex; align-items: center; gap: 14px;
   }
@@ -92,7 +92,53 @@
   }
   .top-toggle.on { color: var(--cyan); border-color: rgba(94,200,216,0.3); }
 
-  .wrap { max-width: 920px; margin: 0 auto; padding: 28px 20px 100px; }
+  .studio-shell { max-width: 1320px; margin: 0 auto; display: grid;
+    grid-template-columns: minmax(0, 920px) 360px; gap: 20px; padding: 0 20px; }
+  .wrap { min-width: 0; padding: 28px 0 100px; }
+  .ops-panel { position: sticky; top: 76px; align-self: start; margin-top: 28px;
+    height: calc(100vh - 94px); min-height: 520px; padding: 16px;
+    display: flex; flex-direction: column; overflow: hidden; }
+  .ops-head { display:flex; align-items:center; gap:9px; margin-bottom:10px; }
+  .ops-head strong { font-size:14px; }
+  .ops-head .badge { margin-left:auto; }
+  .ops-policy { color:var(--muted-2); font-size:11px; line-height:1.45;
+    padding:9px 10px; border:1px solid var(--border-soft); border-radius:10px;
+    background:rgba(0,0,0,.12); margin-bottom:10px; }
+  .ops-log { flex:1; min-height:170px; overflow:auto; border:1px solid var(--border-soft);
+    background:#1a1c1f; border-radius:var(--radius-sm); padding:8px; }
+  .ops-entry { padding:9px 7px; border-bottom:1px solid var(--border-soft); }
+  .ops-entry:last-child { border-bottom:0; }
+  .ops-entry-head { display:flex; gap:8px; align-items:center; color:var(--muted-2);
+    font-family:var(--mono); font-size:10px; margin-bottom:4px; }
+  .ops-entry strong { display:block; font-size:12px; margin-bottom:3px; }
+  .ops-entry p { margin:0; color:var(--muted); font-size:11.5px; line-height:1.45; }
+  .ops-entry.warning strong { color:var(--warn); }
+  .ops-entry.critical strong { color:var(--err); }
+  .ops-entry.ok strong { color:var(--ok); }
+  .ops-chat { margin-top:10px; }
+  .ops-chat textarea { min-height:62px; font-size:12px; padding:10px; }
+  .ops-actions { display:flex; gap:8px; margin-top:8px; }
+  .ops-actions button { margin:0; padding:8px 12px; font-size:11px; }
+  .ops-answer { max-height:120px; overflow:auto; white-space:pre-wrap; color:var(--fg);
+    font-size:11.5px; line-height:1.45; margin-top:8px; padding:8px 10px;
+    border-left:2px solid var(--cyan-dim); background:rgba(94,200,216,.05); }
+  .approval-card { margin:12px 0 16px; padding:16px; border:1px solid var(--border);
+    border-radius:var(--radius-sm); background:rgba(0,0,0,.14); }
+  .approval-card h3 { margin:0 0 5px; font-size:15px; }
+  .approval-card .approval-grid { display:grid; grid-template-columns:2fr 1fr 1fr 1.2fr;
+    gap:8px; margin-top:10px; }
+  .approval-card input { padding:9px 10px; font-size:12px; }
+  .thumb-preview { width:100%; aspect-ratio:16/9; object-fit:cover; border-radius:10px;
+    border:1px solid var(--border); background:#111; margin-top:10px; }
+  .media-id { font-family:var(--mono); color:var(--cyan); font-size:12px; }
+  @media (max-width: 1120px) {
+    .studio-shell { grid-template-columns:1fr; }
+    .ops-panel { position:static; height:auto; min-height:0; margin:0 0 100px; }
+    .ops-log { max-height:360px; }
+  }
+  @media (max-width: 720px) {
+    .approval-card .approval-grid { grid-template-columns:1fr; }
+  }
 
   .hero { margin-bottom: 28px; }
   .hero h1 {
@@ -508,6 +554,7 @@
   </div>
 </header>
 
+<div class="studio-shell">
 <div class="wrap">
   <div class="hero">
     <h1>Create videos with <em>Dmiqwi</em></h1>
@@ -537,8 +584,11 @@
         <input id="language" placeholder="English" />
       </div>
       <div>
-        <label>Length <span>(chars ≈ minutes×1000)</span></label>
-        <input id="length" type="number" placeholder="15000" />
+        <label>Video group</label>
+        <select id="video_group">
+          <option value="small" selected>Small · random 32k–47k chars</option>
+          <option value="big">Big · random 180k–210k chars</option>
+        </select>
       </div>
       <div>
         <label>Profile</label>
@@ -573,8 +623,8 @@
       <div>
         <label>Hook approval</label>
         <select id="auto_hook">
-          <option value="" selected>Approval gate — I pick the hook</option>
-          <option value="bold_statement">Auto: bold statement hook</option>
+          <option value="">Approval gate — I pick the hook</option>
+          <option value="bold_statement" selected>Auto: bold statement hook</option>
           <option value="question">Auto: question hook</option>
           <option value="story">Auto: story hook</option>
           <option value="comment">Auto: comment hook</option>
@@ -670,6 +720,8 @@
       <button id="copyTitle" class="icon-btn" title="Copy title">⧉</button>
       <span id="badge" class="badge" style="margin-left:auto">queued</span>
     </div>
+    <div class="hint" style="margin:-7px 0 4px">Video ID: <span id="videoId" class="media-id"></span></div>
+    <div id="descriptionState" class="hint" style="margin:0 0 14px">Description: waiting for your channel rules</div>
 
     <div id="gate" class="hidden" style="margin-bottom:16px">
       <h3 style="margin:0 0 4px;font-size:16px;letter-spacing:-0.02em">Pick a hook</h3>
@@ -679,6 +731,30 @@
       <p class="sub" style="font-size:13px;margin:0 0 8px">Edit freely — the script is written from this box.</p>
       <textarea id="outline"></textarea>
       <button id="approve">Approve & write the script</button>
+    </div>
+
+    <div id="thumbApproval" class="approval-card hidden">
+      <h3>Thumbnail approval</h3>
+      <p id="thumbStatus" class="hint">Terra is preparing the words…</p>
+      <div id="thumbWords" class="hidden">
+        <div class="approval-grid">
+          <input id="thumbMain" placeholder="Main text" />
+          <input id="thumbRed" placeholder="Red word" />
+          <input id="thumbYellow" placeholder="Yellow word" />
+          <input id="thumbName" placeholder="Name" />
+        </div>
+        <button id="approveThumbWords">Approve words & generate image</button>
+      </div>
+      <div id="thumbImage" class="hidden">
+        <img id="thumbPreview" class="thumb-preview" alt="Generated thumbnail" />
+        <div class="hint" style="margin-top:7px">Thumbnail ID: <span id="thumbnailId" class="media-id"></span></div>
+        <div class="btn-row" style="margin-top:10px">
+          <button id="approveThumbImage">Approve image</button>
+          <button id="regenerateThumbImage" class="secondary">Generate another</button>
+          <a id="downloadThumb" class="dl" download style="margin:0">↓ Download</a>
+        </div>
+      </div>
+      <button id="retryThumb" class="secondary hidden">Retry thumbnail step</button>
     </div>
 
     <div id="log" class="log"></div>
@@ -699,6 +775,25 @@
       </div>
     </div>
   </div>
+</div>
+
+<aside class="panel ops-panel">
+  <div class="ops-head">
+    <span class="dot" id="opsDot"></span>
+    <strong>System observer</strong>
+    <span class="badge" id="opsModel">Terra</span>
+  </div>
+  <div class="ops-policy">Read-only · checks every minute · every proposed change needs your approval · reports are saved locally and never sent.</div>
+  <div id="opsLog" class="ops-log"><div class="hint">Waiting for the first system update…</div></div>
+  <div class="ops-chat">
+    <textarea id="opsQuestion" placeholder="Ask about jobs, workers, failures, disk, Drive, or the app…"></textarea>
+    <div class="ops-actions">
+      <button id="askOps">Ask Terra</button>
+      <button id="makeOpsReport" class="secondary">Create report</button>
+    </div>
+    <div id="opsAnswer" class="ops-answer hidden"></div>
+  </div>
+</aside>
 </div>
 
 <script>
@@ -778,7 +873,7 @@ function buildPayload(title) {
   return {
     title,
     language: $("#language").value.trim(),
-    length_chars: parseInt($("#length").value) || null,
+    video_group: $("#video_group").value,
     profile: $("#profile").value,
     script_model: $("#script_model").value,
     auto_hook: $("#auto_hook").value,
@@ -825,9 +920,10 @@ $("#go").addEventListener("click", async () => {
     $("#title").value = "";
     const ids = data.job_ids || [data.job_id];
     const n = ids.length;
+    const made = data.jobs || [];
     $("#queueHint").textContent = n > 1
-      ? `Queued ${n} videos. They will run one after another.`
-      : `Queued. ${data.job_id} will start when the worker is free.`;
+      ? `Queued ${n} videos · IDs ${ids.join(", ")}`
+      : `Video ${data.job_id} · ${(made[0]||{}).length_chars || "?"} chars · queued.`;
     const follow = currentJob && ["running","awaiting_approval"]
       .includes((lastJobs.find(j => j.job_id === currentJob) || {}).status)
       ? currentJob : ids[0];
@@ -962,6 +1058,7 @@ function selectJob(jobId) {
   $("#gate").classList.add("hidden");
   $("#videoWrap").classList.add("hidden");
   $("#log").innerHTML = "";
+  $("#videoId").textContent = jobId;
   const meta = lastJobs.find(j => j.job_id === jobId);
   setJobTitle((meta && meta.title) || jobId);
   document.querySelectorAll("#queueList .qrow").forEach(el => {
@@ -1056,13 +1153,13 @@ function fmtChars(n) {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 }
 
-// Size is only badged once we know a length. Until the script stage runs
-// that's the requested target (est_chars); after it, the real narration
-// length — `chars` being set is what distinguishes the two.
+// The owner's Small/Big group stays the visible label even when the writer's
+// final character count lands across an older scheduler threshold.
 function sizeBadge(j) {
-  if (!j.size) return "";
+  const label = ["small","big"].includes(j.video_group) ? j.video_group : j.size;
+  if (!label) return "";
   const est = j.chars ? "" : "~";
-  return ` <span class="badge size-${j.size}" title="${j.chars ? "actual" : "estimated from requested length"}">${j.size} ${est}${fmtChars(j.chars || j.est_chars)}</span>`;
+  return ` <span class="badge size-${label}" title="${j.chars ? "actual" : "selected random target"}">${label} ${est}${fmtChars(j.chars || j.est_chars)}</span>`;
 }
 
 function jobMeta(j) {
@@ -1223,6 +1320,11 @@ function render(j, jobId) {
   badge.className = "badge " + j.status;
   badge.textContent = statusLabel(j.status);
   setJobTitle(j.title || jobId);
+  $("#videoId").textContent = jobId;
+  const descState = (j.description || {}).state || "waiting_for_rules";
+  $("#descriptionState").textContent = descState === "waiting_for_rules"
+    ? "Description: waiting for your channel rules"
+    : `Description: ${descState.replaceAll("_", " ")}`;
   const log = $("#log");
   log.innerHTML = (j.log || []).map(l =>
     `<div class="line"><span class="t">${l.t}</span>`
@@ -1232,6 +1334,8 @@ function render(j, jobId) {
 
   if (j.status === "awaiting_approval" && j.awaiting) showGate(j.awaiting);
   else if (j.status !== "awaiting_approval") $("#gate").classList.add("hidden");
+
+  renderThumbnailApproval(j.thumbnail || {}, jobId);
 
   if (j.status === "done") {
     $("#videoWrap").classList.remove("hidden");
@@ -1273,6 +1377,142 @@ function render(j, jobId) {
     $("#videoWrap").classList.add("hidden");
   }
 }
+
+let thumbnailFormFor = null;
+function renderThumbnailApproval(t, jobId) {
+  const panel = $("#thumbApproval"), wordsBox = $("#thumbWords");
+  const imageBox = $("#thumbImage"), retry = $("#retryThumb");
+  panel.classList.remove("hidden");
+  wordsBox.classList.add("hidden");
+  imageBox.classList.add("hidden");
+  retry.classList.add("hidden");
+  const state = t.state || "generating_words";
+  if (state === "generating_words") {
+    $("#thumbStatus").textContent = "Terra is preparing thumbnail words. Rendering continues independently.";
+    thumbnailFormFor = null;
+  } else if (state === "words_ready") {
+    $("#thumbStatus").textContent = "Edit the proposed words if needed, then approve image generation.";
+    wordsBox.classList.remove("hidden");
+    if (thumbnailFormFor !== jobId) {
+      const w = t.words || {};
+      $("#thumbMain").value = w.main_text || "";
+      $("#thumbRed").value = w.red_word || "";
+      $("#thumbYellow").value = w.yellow_word || "";
+      $("#thumbName").value = w.name || "";
+      thumbnailFormFor = jobId;
+    }
+  } else if (state === "generating_image") {
+    $("#thumbStatus").textContent = "Words approved. Generating the thumbnail image…";
+  } else if (state === "image_ready" || state === "approved") {
+    $("#thumbStatus").textContent = state === "approved"
+      ? "Thumbnail approved and ready."
+      : "Image ready — approve it or generate another version.";
+    imageBox.classList.remove("hidden");
+    const url = t.url || (t.thumbnail_id ? "/api/thumbnail/file/" + t.thumbnail_id : "");
+    if (url && $("#thumbPreview").dataset.id !== t.thumbnail_id) {
+      $("#thumbPreview").src = url + "?t=" + Date.now();
+      $("#thumbPreview").dataset.id = t.thumbnail_id || "";
+    }
+    $("#thumbnailId").textContent = t.thumbnail_id || "";
+    $("#downloadThumb").href = url;
+    $("#downloadThumb").download = (t.thumbnail_id || "thumbnail") + ".png";
+    $("#approveThumbImage").classList.toggle("hidden", state === "approved");
+    $("#regenerateThumbImage").classList.toggle("hidden", state === "approved");
+  } else if (state === "error") {
+    $("#thumbStatus").textContent = `Thumbnail ${t.stage || "step"} failed: ${t.error || "unknown error"}`;
+    retry.classList.remove("hidden");
+  }
+}
+
+$("#approveThumbWords").addEventListener("click", async () => {
+  if (!currentJob) return;
+  const body = {main_text: $("#thumbMain").value.trim(), red_word: $("#thumbRed").value.trim(),
+    yellow_word: $("#thumbYellow").value.trim(), name: $("#thumbName").value.trim()};
+  if (Object.values(body).some(v => !v)) { alert("Fill every thumbnail word field."); return; }
+  $("#approveThumbWords").disabled = true;
+  const r = await fetch(`/api/thumbnail/job/${currentJob}/words/approve`, {
+    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  const data = await r.json();
+  if (data.error) alert(data.error);
+  $("#approveThumbWords").disabled = false;
+});
+
+$("#approveThumbImage").addEventListener("click", async () => {
+  if (!currentJob) return;
+  const data = await (await fetch(`/api/thumbnail/job/${currentJob}/image/approve`,
+    {method:"POST"})).json();
+  if (data.error) alert(data.error);
+});
+
+$("#regenerateThumbImage").addEventListener("click", async () => {
+  if (!currentJob) return;
+  const data = await (await fetch(`/api/thumbnail/job/${currentJob}/image/regenerate`,
+    {method:"POST"})).json();
+  if (data.error) alert(data.error);
+});
+
+$("#retryThumb").addEventListener("click", async () => {
+  if (!currentJob) return;
+  const full = await (await fetch("/api/status/" + currentJob)).json();
+  const endpoint = (full.thumbnail || {}).stage === "image" ? "image/regenerate" : "words/retry";
+  const data = await (await fetch(`/api/thumbnail/job/${currentJob}/${endpoint}`,
+    {method:"POST"})).json();
+  if (data.error) alert(data.error);
+});
+
+function shortTime(iso) {
+  try { return new Date(iso).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}); }
+  catch (e) { return ""; }
+}
+
+async function refreshOps() {
+  try {
+    const data = await (await fetch("/api/ops/status")).json();
+    $("#opsDot").className = "dot " + (data.running ? "online" : "busy");
+    $("#opsModel").textContent = (data.model || "Terra").replace("gpt-5.6-", "");
+    const entries = (data.entries || []).slice().reverse();
+    $("#opsLog").innerHTML = entries.length ? entries.map(e => `
+      <div class="ops-entry ${escapeHtml(e.severity || "info")}">
+        <div class="ops-entry-head"><span>${shortTime(e.at)}</span><span>${escapeHtml(e.kind || "update")}</span></div>
+        <strong>${escapeHtml(e.headline || "System update")}</strong>
+        <p>${escapeHtml(e.message || "")}</p>
+        ${e.report_id ? `<a class="dl" style="font-size:11px;margin-top:5px" href="/api/ops/report/${e.report_id}">Download report ${e.report_id}</a>` : ""}
+      </div>`).join("") : '<div class="hint">Waiting for the first system update…</div>';
+  } catch (e) { $("#opsDot").className = "dot offline"; }
+}
+refreshOps();
+setInterval(refreshOps, 15000);
+
+$("#askOps").addEventListener("click", async () => {
+  const q = $("#opsQuestion").value.trim();
+  if (!q) return;
+  $("#askOps").disabled = true;
+  $("#opsAnswer").classList.remove("hidden");
+  $("#opsAnswer").textContent = "Terra is reviewing the current system snapshot…";
+  try {
+    const data = await (await fetch("/api/ops/chat", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({question:q})})).json();
+    $("#opsAnswer").textContent = data.error || data.answer;
+    if (!data.error) $("#opsQuestion").value = "";
+    refreshOps();
+  } catch (e) { $("#opsAnswer").textContent = "Could not reach the observer."; }
+  $("#askOps").disabled = false;
+});
+
+$("#makeOpsReport").addEventListener("click", async () => {
+  $("#makeOpsReport").disabled = true;
+  $("#opsAnswer").classList.remove("hidden");
+  $("#opsAnswer").textContent = "Preparing a report…";
+  try {
+    const data = await (await fetch("/api/ops/report", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({reason: $("#opsQuestion").value.trim() || "Owner-requested system review"})})).json();
+    $("#opsAnswer").innerHTML = data.error ? escapeHtml(data.error)
+      : `Report ready: <a class="dl" style="margin:0" href="${data.url}">${data.report_id}</a>`;
+    refreshOps();
+  } catch (e) { $("#opsAnswer").textContent = "Could not create the report."; }
+  $("#makeOpsReport").disabled = false;
+});
 
 function escapeHtml(s){return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
 </script>

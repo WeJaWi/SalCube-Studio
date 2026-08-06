@@ -35,6 +35,7 @@ Sibling project of `~/video-studio` (same kie/ai33/Pixabay keys).
 | Stage | Provider | Model / endpoint | Key (.env) |
 |-------|----------|------------------|------------|
 | Outline, hooks, script, beat plan | kie.ai (Claude Sonnet 5) | `POST /claude/v1/messages` | `LLM_API_KEY` |
+| Operations observer + thumbnail words | existing GPT provider | GPT-5.6 Terra (`/codex/v1/responses`) | `LLM_GPT_API_KEY` |
 | Host on camera | HeyGen (your avatar) | `POST /v2/video/generate`, audio-driven | `HEYGEN_API_KEY` + `HEYGEN_AVATAR_ID` |
 | Voice + subtitles | ai33.pro | `POST /v3/text-to-speech` (`with_transcript`) | `AI33_API_KEY` |
 | AI b-roll | kie.ai Grok Imagine (cheapest; swappable) | `grok-imagine/text-to-video`, exact 6-30s | `KIE_VIDEO_API_KEY` |
@@ -82,12 +83,14 @@ libx264 when no hardware encoder is present.
 
 ## The workflow (per the Grandma Hannah script profile)
 
-1. Enter a **title**, length, flags (e-book CTA only on flagged videos), and
-   which b-roll sources to allow. Click Generate.
-2. Sonnet 5 delivers a **detailed outline + exactly 4 hooks** (bold
-   statement, question, story, comment). The job pauses at the **approval
-   gate**: pick ONE hook, edit the outline if you like, approve.
-   (Or pick an "Auto" hook mode to skip the gate for hands-off runs.)
+1. Enter a **title**, choose **Small** (a one-time random target from
+   32,000–47,000 characters) or **Big** (180,000–210,000), set any optional
+   flags, and click Add to queue. Each video gets a collision-checked
+   20-digit ID. That ID is its job folder and its download/Drive filename.
+2. The writer delivers a **detailed outline + hooks**. The studio defaults
+   to an auto-selected bold-statement hook so a title can run unattended.
+   Switch Hook approval back to the manual gate when you want to pick the
+   hook and edit the outline yourself.
 3. The full script is written: chosen hook → promise → stakes → teaching
    (honesty tiers) → Hannah's world → midpoint comment prompt (+ e-book if
    flagged) → practical how-to (safety lines inline) → evidence recap →
@@ -101,9 +104,30 @@ libx264 when no hardware encoder is present.
    (intro + split-screens inside `host_budget_seconds`), everything
    generates in parallel, FFmpeg composites with burned subtitles and the
    music bed.
+5. In parallel, GPT-5.6 Terra proposes thumbnail words. Rendering does not
+   wait for thumbnail approval. Approve/edit the words first; only then is
+   the image generated. Approve that image separately. The thumbnail gets
+   its own 20-digit ID and remains visible/downloadable from the video job.
 
 Outline, hooks, and the final script are saved in the job folder
 (`output/<job>/outline.txt`, `hooks.json`, `script.txt`).
+
+## Read-only AI operations center
+
+The right side of the studio contains a GPT-5.6 Terra observer. Once per
+minute it receives a sanitized snapshot of queue states, recent job events,
+worker heartbeats/capacity, Drive readiness, encoder information, and free
+disk space. It writes a quiet update to `output/operations_log.jsonl`.
+
+The observer has no mutation tools or secret/environment access. It cannot
+stop/retry jobs, edit settings/files, restart workers, or send messages. Ask
+it questions in the side panel; every proposed change is labeled as needing
+owner approval. Broad/uncertain failures cause a local Markdown report to be
+prepared under `output/reports/`; reports are downloadable but never sent.
+
+Description generation is intentionally parked in `waiting_for_rules` until
+the channel-specific description template, links, CTA, disclosure, language,
+hashtags, and forbidden wording are supplied.
 
 ## HeyGen setup (configured)
 

@@ -8,15 +8,15 @@ import secrets
 import threading
 import time
 import traceback
-import uuid
 from datetime import datetime
 from pathlib import Path
 
 from flask import (Flask, Response, g, jsonify, make_response, redirect,
                    render_template, request, send_file, abort)
 
-from pipeline import (animation, cancel, config, fleet, jobs, orchestrator,
-                      scheduler, stats, storage, thumbnail)
+from pipeline import (animation, cancel, config, fleet, identity, jobs, llm,
+                      operations, orchestrator, scheduler, stats, storage,
+                      thumbnail)
 
 app = Flask(__name__)
 
@@ -52,6 +52,7 @@ _DRIVE_AUTH_LOCK = threading.Lock()
 FLEET_WORKERS: dict[str, dict] = {}
 _FLEET_LOCK = threading.Lock()
 FLEET_WORKER: fleet.FleetWorker | None = None
+OPS: operations.OperationsCenter | None = None
 
 # Phase-weighted progress (0-100), keyed by the real `step` names emitted
 # from pipeline/orchestrator.py's emit() calls — each value is that phase's
@@ -236,6 +237,10 @@ def _persist_queue() -> None:
                 "dispatched_at": j.get("dispatched_at"),
                 "retries": j.get("retries", 0),
                 "priority_at": j.get("priority_at"),
+                "updated_at": j.get("updated_at"),
+                "video_group": j.get("video_group"),
+                "thumbnail": j.get("thumbnail"),
+                "description": j.get("description"),
                 # Keep a short log so the UI isn't empty after restart
                 "log": list(j.get("log") or [])[-40:],
             })
@@ -264,6 +269,7 @@ def _restore_queue() -> None:
     if not isinstance(rows, list):
         return
     restored_q = 0
+    thumbnail_resume: list[tuple[str, str]] = []
     with LOCK:
         for row in rows:
             if not isinstance(row, dict):
@@ -334,6 +340,13 @@ def _restore_queue() -> None:
                 step = row.get("step") or st
                 progress_pct = row.get("progress_pct", 0)
                 log = list(row.get("log") or [])
+            restored_thumbnail = (row.get("thumbnail")
+                                  if isinstance(row.get("thumbnail"), dict) else {})
+            # A background thumbnail thread dies on restart just like a
+            # render thread. Remember which independent approval task to
+            # resume after releasing LOCK.
+            if restored_thumbnail.get("state") in ("generating_words", "generating_image"):
+                thumbnail_resume.append((jid, restored_thumbnail["state"]))
             JOBS[jid] = {
                 "status": st,
                 "step": step,
@@ -355,6 +368,12 @@ def _restore_queue() -> None:
                 "size": row.get("size"),
                 "retries": row.get("retries", 0),
                 "priority_at": row.get("priority_at"),
+                "updated_at": row.get("updated_at") or row.get("created_at"),
+                "video_group": row.get("video_group") or inputs.get("video_group"),
+                "thumbnail": restored_thumbnail,
+                "description": (row.get("description")
+                                if isinstance(row.get("description"), dict)
+                                else {"state": "waiting_for_rules"}),
             }
         # queue_state.json is deliberately small and can be replaced during a
         # crash/deploy. Finished videos remain the source of truth on disk, so
@@ -381,12 +400,22 @@ def _restore_queue() -> None:
                     "created_at": datetime.fromtimestamp(job_dir.stat().st_mtime).isoformat(timespec="seconds"),
                     "result": str(final if final.exists() else part1),
                     "drive": {},
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                    "video_group": saved.get("video_group"),
+                    "thumbnail": {},
+                    "description": {"state": "waiting_for_rules"},
                 }
     if restored_q:
         print(f"[queue] restored {restored_q} incomplete job(s) from "
               f"{QUEUE_STATE_FILE.name}")
     _persist_queue()
     _kick_queue()
+    for jid, thumb_state in thumbnail_resume:
+        if thumb_state == "generating_image":
+            threading.Thread(target=_thumbnail_image_task, args=(jid,), daemon=True,
+                             name=f"dmiqwi-thumbnail-{jid}").start()
+        else:
+            _start_thumbnail_words(jid)
 
 
 def _schedule_retry(job_id: str) -> None:
@@ -562,6 +591,7 @@ def _append_job_log(job_id: str, step: str, message: str) -> None:
             "t": datetime.now().strftime("%H:%M:%S"),
             "step": step, "message": message,
         })
+        job["updated_at"] = datetime.now().isoformat(timespec="seconds")
 
 
 def _drive_deliverables(job_dir: Path) -> list[tuple[str, Path]]:
@@ -608,7 +638,10 @@ def _upload_job_deliverables(job_id: str, job_dir: Path) -> None:
         for role, path in _drive_deliverables(job_dir):
             if role in files and not path.exists():
                 continue
-            result = DRIVE.upload(path, state_file=job_dir / f".gdrive-{role}.json")
+            suffix = "" if role == "final" else f"-{role}"
+            result = DRIVE.upload(
+                path, dest_name=f"{job_id}{suffix}.mp4",
+                state_file=job_dir / f".gdrive-{role}.json")
             files[role] = result
             with LOCK:
                 job = JOBS.get(job_id)
@@ -692,6 +725,7 @@ def _run_job(job_id: str, inputs: dict, profile: str, *,
         with LOCK:
             job = JOBS[job_id]
             job["step"] = step
+            job["updated_at"] = datetime.now().isoformat(timespec="seconds")
             if pct is not None:
                 # Monotonic: a stray out-of-order emit() must never regress
                 # the bar (matters most once render's beat-progress has
@@ -900,10 +934,19 @@ def _build_inputs(data: dict, title: str) -> dict:
     broll = [k for k in ("stock", "stock_image", "ai_video", "animation")
              if data.get(f"broll_{k}")]
     anim_templates = data.get("anim_templates")
+    video_group = (data.get("video_group") or "").strip().lower()
+    if video_group == "small":
+        length_chars = 32000 + secrets.randbelow(47000 - 32000 + 1)
+    elif video_group == "big":
+        length_chars = 180000 + secrets.randbelow(210000 - 180000 + 1)
+    else:
+        video_group = "custom"
+        length_chars = data.get("length_chars")
     return {
         "title": title,
         "language": (data.get("language") or "").strip(),
-        "length_chars": data.get("length_chars"),
+        "length_chars": length_chars,
+        "video_group": video_group,
         "comment_cta": bool(data.get("comment_cta", True)),
         "patreon_split": bool(data.get("patreon_split", False)),
         "patreon_cut_from": data.get("patreon_cut_from"),
@@ -932,7 +975,10 @@ def _build_inputs(data: dict, title: str) -> dict:
 
 def _enqueue_job(inputs: dict, profile: str, *, resume: str = "") -> str:
     """Create a job dir + registry entry with status=queued. Does not start it."""
-    job_id = resume or uuid.uuid4().hex[:12]
+    with LOCK:
+        taken = tuple(JOBS)
+    job_id = resume or identity.numeric_id(
+        taken=taken, directories=[config.OUTPUT_DIR])
     job_dir = config.OUTPUT_DIR / job_id
     inputs_file = job_dir / "inputs.json"
     title = (inputs.get("title") or "").strip()
@@ -959,7 +1005,9 @@ def _enqueue_job(inputs: dict, profile: str, *, resume: str = "") -> str:
         defaults = {}
     est_chars = int(inputs.get("length_chars") or defaults.get("length_chars", 15000))
 
+    created_at = datetime.now().isoformat(timespec="seconds")
     with LOCK:
+        existing_thumb = (JOBS.get(job_id) or {}).get("thumbnail") if resume else None
         JOBS[job_id] = {
             "status": "queued",
             "step": "queued",
@@ -968,12 +1016,20 @@ def _enqueue_job(inputs: dict, profile: str, *, resume: str = "") -> str:
             "title": title,
             "profile": profile,
             "inputs": inputs,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "created_at": created_at,
+            "updated_at": created_at,
             "est_chars": est_chars,
             "chars": None,
             "est_beats": None,
+            "video_group": inputs.get("video_group"),
+            "thumbnail": (existing_thumb if isinstance(existing_thumb, dict)
+                          else {"state": "generating_words"}),
+            # Deliberately inactive until the owner supplies channel rules.
+            "description": {"state": "waiting_for_rules"},
         }
     _persist_queue()
+    if not resume:
+        _start_thumbnail_words(job_id)
     return job_id
 
 
@@ -1061,10 +1117,16 @@ def start_render():
             _preempt_for(job_ids[0])
 
     _kick_queue()
+    with LOCK:
+        created = [{"video_id": jid,
+                    "length_chars": JOBS[jid].get("est_chars"),
+                    "video_group": JOBS[jid].get("video_group")}
+                   for jid in job_ids]
     return jsonify({
         "job_id": job_ids[0],
         "job_ids": job_ids,
         "queued": len(job_ids),
+        "jobs": created,
     })
 
 
@@ -1144,6 +1206,7 @@ def fleet_heartbeat():
                 continue
             job["status"] = state
             job["step"] = str(report.get("step") or state)
+            job["updated_at"] = now.isoformat(timespec="seconds")
             job["progress_pct"] = max(job.get("progress_pct", 0), int(report.get("progress_pct") or 0))
             if state == "awaiting_approval" and isinstance(report.get("awaiting"), dict):
                 job["awaiting"] = report["awaiting"]
@@ -1311,6 +1374,9 @@ def api_jobs():
                           or bool(j.get("dispatched_to")
                                   and j.get("status") in ("running", "dispatched"))),
             "prioritized": bool(j.get("priority_at")),
+            "video_group": j.get("video_group"),
+            "thumbnail": j.get("thumbnail") or {},
+            "description": j.get("description") or {},
         }
 
     # Show: active first, then queued (FIFO), then recent finished
@@ -1540,10 +1606,8 @@ def video(job_id: str):
         f = job_dir / "inputs.json"
         if f.exists():
             title = (json.loads(f.read_text()).get("title") or "").strip()
-    title = title or job_id
-    safe = "".join(c if c.isalnum() or c in " -_" else "" for c in title)[:80]
     return send_file(path, mimetype="video/mp4", as_attachment=download,
-                     download_name=f"{safe or job_id}{suffix}.mp4")
+                     download_name=f"{job_id}{suffix}.mp4")
 
 
 def _drive_redirect_uri() -> str:
@@ -1645,7 +1709,125 @@ def api_settings():
     })
 
 
-# ── Thumbnail tool — standalone, no relation to the video pipeline/queue ──
+# ── Read-only AI operations center ──────────────────────────────
+def _ops_snapshot() -> dict:
+    """Small, secret-free snapshot suitable for a remote language model."""
+    now = datetime.now()
+    stale_after = float(config.queue_setting("stage_stale_after_minutes") or 90)
+    with LOCK:
+        jobs_copy = [(jid, dict(job)) for jid, job in JOBS.items()]
+    job_rows = []
+    for jid, job in jobs_copy:
+        updated = job.get("updated_at") or job.get("created_at")
+        age_minutes = None
+        if updated:
+            try:
+                age_minutes = max(0.0, (now - datetime.fromisoformat(updated)).total_seconds() / 60)
+            except (TypeError, ValueError):
+                pass
+        status_now = job.get("status") or "unknown"
+        job_rows.append({
+            "video_id": jid,
+            "title": str(job.get("title") or "")[:240],
+            "profile": job.get("profile"),
+            "status": status_now,
+            "step": job.get("step"),
+            "progress_pct": job.get("progress_pct", 0),
+            "worker": job.get("dispatched_to") or "main",
+            "age_since_update_minutes": round(age_minutes, 1) if age_minutes is not None else None,
+            "stalled": bool(status_now == "running" and age_minutes is not None
+                            and age_minutes >= stale_after),
+            "error": str(job.get("error") or "")[-1500:],
+            "thumbnail_state": (job.get("thumbnail") or {}).get("state"),
+            "recent_events": [
+                {"step": str(x.get("step") or "")[:80],
+                 "message": str(x.get("message") or "")[:500]}
+                for x in (job.get("log") or [])[-3:] if isinstance(x, dict)
+            ],
+        })
+    with _FLEET_LOCK:
+        worker_copy = [dict(w) for w in FLEET_WORKERS.values()]
+    workers = []
+    for worker in worker_copy:
+        try:
+            age = max(0.0, (now - datetime.fromisoformat(worker["last_seen"])).total_seconds())
+        except (KeyError, TypeError, ValueError):
+            age = config.FLEET_STALE_SECONDS + 1
+        workers.append({
+            "worker_id": worker.get("worker_id"), "name": worker.get("name"),
+            "age_seconds": round(age), "stale": age > config.FLEET_STALE_SECONDS,
+            "hardware": worker.get("hardware") or {},
+            "capacity": worker.get("capacity") or {},
+        })
+    counts: dict[str, int] = {}
+    for row in job_rows:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+    # Keep every non-terminal/error job plus only a small recent-completion
+    # sample. Counts still cover the whole library; this keeps a once/minute
+    # observer from repeatedly paying to reread dozens of healthy old jobs.
+    important = [r for r in job_rows if r["status"] not in ("done", "cancelled")]
+    recent_done = [r for r in reversed(job_rows) if r["status"] == "done"][:5]
+    monitored_jobs = (important[:30] + recent_done)[:35]
+    return {
+        "captured_at": now.isoformat(timespec="seconds"),
+        "fleet_role": config.FLEET_ROLE,
+        "queue_paused": bool(config.queue_setting("queue_paused")),
+        "job_counts": counts,
+        "jobs": monitored_jobs,
+        "workers": workers,
+        "main_hardware": {"cpu_cores": config._detect_cpu_count(),
+                          "ram_gb": round(config._detect_ram_gb(), 1),
+                          "h264_encoder": config.gpu_encoder() or "libx264"},
+        "disk": operations.disk_snapshot(),
+        "drive": {"configured": DRIVE.configured, "authorized": DRIVE.authorized},
+    }
+
+
+def _ops_center() -> operations.OperationsCenter:
+    global OPS
+    if OPS is None:
+        OPS = operations.OperationsCenter(_ops_snapshot, interval=60)
+    return OPS
+
+
+@app.route("/api/ops/status")
+def ops_status():
+    return jsonify(_ops_center().status())
+
+
+@app.route("/api/ops/chat", methods=["POST"])
+def ops_chat():
+    question = str((request.get_json(silent=True) or {}).get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "question is required"}), 400
+    try:
+        return jsonify(_ops_center().chat(question))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/ops/report", methods=["POST"])
+def ops_report():
+    reason = str((request.get_json(silent=True) or {}).get("reason")
+                 or "Owner-requested system review").strip()
+    try:
+        return jsonify(_ops_center().create_report(reason))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/ops/report/<report_id>")
+def ops_report_file(report_id: str):
+    if not identity.is_numeric_id(report_id):
+        abort(404)
+    path = config.OUTPUT_DIR / "reports" / f"{report_id}.md"
+    if not path.exists():
+        abort(404)
+    return send_file(path, mimetype="text/markdown", as_attachment=True,
+                     download_name=f"dmiqwi-report-{report_id}.md")
+
+
+# ── Thumbnail engine — used by video approvals and the standalone page ──
 THUMB_DIR = config.ROOT / "thumbnails"
 THUMB_TEMPLATES_DIR = THUMB_DIR / "templates"
 THUMB_OUT_DIR = THUMB_DIR / "generated"
@@ -1655,6 +1837,204 @@ for _d in (THUMB_TEMPLATES_DIR, THUMB_OUT_DIR, THUMB_UPLOADS_DIR):
 
 _IMG_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
            "image/webp": ".webp"}
+
+
+def _thumbnail_character(profile_name: str, inputs: dict) -> tuple[Path | None, str]:
+    """Resolve a profile/cited-author character without asking for an upload."""
+    try:
+        profile = orchestrator.load_profile(profile_name)
+    except Exception:  # noqa: BLE001
+        profile = {}
+    cited = (inputs.get("cited_philosophers") or "").split(",", 1)[0].strip()
+    lowered = cited.lower()
+    author_map = {
+        "murphy": (config.ROOT / "figures/murphy.png", "Joseph Murphy"),
+        "jung": (config.ROOT / "figures/jung.png", "Carl Gustav Jung"),
+        "freud": (config.ROOT / "figures/freud.png", "Sigmund Freud"),
+    }
+    for token, pair in author_map.items():
+        if token in lowered:
+            return pair
+    fig = ((profile.get("video") or {}).get("figure") or {}).get("image")
+    if fig:
+        path = config.ROOT / fig
+        if path.exists():
+            stem = path.stem.lower()
+            name = {"murphy": "Joseph Murphy", "jung": "Carl Gustav Jung",
+                    "freud": "Sigmund Freud"}.get(stem, cited or path.stem.title())
+            return path, name
+    host = profile.get("host") or {}
+    if host.get("image"):
+        path = config.ROOT / str(host["image"])
+        if path.exists():
+            return path, cited or profile_name.replace("-", " ").title()
+    path = config.HOSTS_DIR / f"{profile_name}.png"
+    if path.exists():
+        names = {"grandma-hannah": "Grandma Hannah",
+                 "matthias-richter": "Matthias Richter"}
+        return path, names.get(profile_name, cited or profile_name.replace("-", " ").title())
+    # Philosophy profiles without a corner figure still get a safe default.
+    fallback = config.ROOT / "figures/murphy.png"
+    return (fallback if fallback.exists() else None), (cited or "Joseph Murphy")
+
+
+def _thumbnail_words_task(job_id: str) -> None:
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return
+        title, profile_name = job["title"], job["profile"]
+        inputs = dict(job.get("inputs") or {})
+    _, character_name = _thumbnail_character(profile_name, inputs)
+    try:
+        words = llm.chat_json(
+            "Create high-click YouTube thumbnail wording for the supplied title. "
+            "Do not invent a different video topic. Return ONLY JSON with: "
+            "main_text (3-8 punchy words), red_word (1-2 words), yellow_word "
+            "(1-2 words), and name. Avoid quotation marks, fake certainty, and "
+            "misleading claims. The owner will edit/approve these words before "
+            "any image is generated.\n\n"
+            f"Video title: {title}\nProfile: {profile_name}\nDisplayed person: {character_name}",
+            "gpt-5.6-terra", max_tokens=500, attempts=2, retries=1, timeout=90)
+        clean = {
+            "main_text": str(words.get("main_text") or "").strip()[:120],
+            "red_word": str(words.get("red_word") or "").strip()[:50],
+            "yellow_word": str(words.get("yellow_word") or "").strip()[:50],
+            "name": str(words.get("name") or character_name).strip()[:80],
+        }
+        if not all(clean.values()):
+            raise RuntimeError("Terra returned incomplete thumbnail words")
+        with LOCK:
+            job = JOBS.get(job_id)
+            if job:
+                job["thumbnail"] = {"state": "words_ready", "words": clean}
+                job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    except Exception as exc:  # noqa: BLE001
+        with LOCK:
+            job = JOBS.get(job_id)
+            if job:
+                job["thumbnail"] = {"state": "error", "stage": "words",
+                                    "error": str(exc)}
+    _persist_queue()
+
+
+def _start_thumbnail_words(job_id: str) -> None:
+    threading.Thread(target=_thumbnail_words_task, args=(job_id,), daemon=True,
+                     name=f"dmiqwi-thumb-words-{job_id}").start()
+
+
+def _thumbnail_image_task(job_id: str) -> None:
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return
+        profile_name = job["profile"]
+        inputs = dict(job.get("inputs") or {})
+        thumb_state = dict(job.get("thumbnail") or {})
+        words = dict(thumb_state.get("words") or {})
+    character_path, default_name = _thumbnail_character(profile_name, inputs)
+    template_path = next(iter(THUMB_TEMPLATES_DIR.glob("default.*")), None)
+    try:
+        if not template_path:
+            raise RuntimeError("save a default thumbnail template on the Thumbnails page")
+        if not character_path or not character_path.exists():
+            raise RuntimeError(f"no thumbnail character image is configured for {profile_name}")
+        thumbnail_id = identity.numeric_id(
+            taken=(p.stem for p in THUMB_OUT_DIR.glob("*.png")))
+        dest = THUMB_OUT_DIR / f"{thumbnail_id}.png"
+        thumbnail.generate(
+            template_path, character_path, dest,
+            main_text=words["main_text"], red_word=words["red_word"],
+            yellow_word=words["yellow_word"],
+            name=words.get("name") or default_name)
+        with LOCK:
+            job = JOBS.get(job_id)
+            if job:
+                job["thumbnail"] = {
+                    "state": "image_ready", "words": words,
+                    "thumbnail_id": thumbnail_id,
+                    "url": f"/api/thumbnail/file/{thumbnail_id}",
+                }
+                job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()
+        with LOCK:
+            job = JOBS.get(job_id)
+            if job:
+                job["thumbnail"] = {"state": "error", "stage": "image",
+                                    "words": words, "error": str(exc)}
+    _persist_queue()
+
+
+@app.route("/api/thumbnail/job/<job_id>/words/approve", methods=["POST"])
+def approve_thumbnail_words(job_id: str):
+    if not _allowed_profile(_job_profile(job_id) or ""):
+        abort(403)
+    data = request.get_json(force=True) or {}
+    words = {k: str(data.get(k) or "").strip() for k in
+             ("main_text", "red_word", "yellow_word", "name")}
+    if not all(words.values()):
+        return jsonify({"error": "all thumbnail word fields are required"}), 400
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "unknown job"}), 404
+        job["thumbnail"] = {"state": "generating_image", "words": words,
+                            "words_approved_at": datetime.now().isoformat(timespec="seconds")}
+    _persist_queue()
+    threading.Thread(target=_thumbnail_image_task, args=(job_id,), daemon=True,
+                     name=f"dmiqwi-thumbnail-{job_id}").start()
+    return jsonify({"ok": True, "job_id": job_id})
+
+
+@app.route("/api/thumbnail/job/<job_id>/words/retry", methods=["POST"])
+def retry_thumbnail_words(job_id: str):
+    if not _allowed_profile(_job_profile(job_id) or ""):
+        abort(403)
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "unknown job"}), 404
+        job["thumbnail"] = {"state": "generating_words"}
+    _persist_queue()
+    _start_thumbnail_words(job_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/thumbnail/job/<job_id>/image/approve", methods=["POST"])
+def approve_thumbnail_image(job_id: str):
+    if not _allowed_profile(_job_profile(job_id) or ""):
+        abort(403)
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "unknown job"}), 404
+        state = dict(job.get("thumbnail") or {})
+        if state.get("state") != "image_ready":
+            return jsonify({"error": "thumbnail image is not ready for approval"}), 409
+        state["state"] = "approved"
+        state["approved_at"] = datetime.now().isoformat(timespec="seconds")
+        job["thumbnail"] = state
+    _persist_queue()
+    return jsonify({"ok": True, "thumbnail_id": state.get("thumbnail_id")})
+
+
+@app.route("/api/thumbnail/job/<job_id>/image/regenerate", methods=["POST"])
+def regenerate_thumbnail_image(job_id: str):
+    if not _allowed_profile(_job_profile(job_id) or ""):
+        abort(403)
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "unknown job"}), 404
+        state = dict(job.get("thumbnail") or {})
+        if not state.get("words"):
+            return jsonify({"error": "approve thumbnail words first"}), 409
+        job["thumbnail"] = {"state": "generating_image", "words": state["words"]}
+    _persist_queue()
+    threading.Thread(target=_thumbnail_image_task, args=(job_id,), daemon=True,
+                     name=f"dmiqwi-thumbnail-{job_id}").start()
+    return jsonify({"ok": True})
 
 
 def _save_upload(file_storage, dest_dir: Path, stem: str) -> Path:
@@ -1699,7 +2079,8 @@ def api_thumbnail():
         return jsonify({
             "error": "a character reference image is required"}), 400
 
-    job_id = uuid.uuid4().hex[:12]
+    job_id = identity.numeric_id(
+        taken=(p.stem for p in THUMB_OUT_DIR.glob("*.png")))
     template_file = request.files.get("template")
     save_default = request.form.get("save_as_default") == "1"
 
@@ -1733,7 +2114,8 @@ def api_thumbnail():
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-    return jsonify({"job_id": job_id, "url": f"/api/thumbnail/file/{job_id}"})
+    return jsonify({"job_id": job_id, "thumbnail_id": job_id,
+                    "url": f"/api/thumbnail/file/{job_id}"})
 
 
 @app.route("/api/thumbnail/file/<job_id>")
@@ -1764,6 +2146,11 @@ if __name__ == "__main__":
     # Restore any queue that survived the previous process, then drain it.
     _restore_queue()
     atexit.register(_persist_queue)
+    if config.FLEET_ROLE != "worker":
+        OPS = _ops_center()
+        OPS.start()
+        atexit.register(OPS.stop)
+        print("[ops] read-only GPT-5.6 Terra monitor active (60-second updates)")
     if config.FLEET_ROLE == "worker":
         FLEET_WORKER = fleet.FleetWorker(_run_fleet_worker_job,
                                          aborter=_abort_local_job)
