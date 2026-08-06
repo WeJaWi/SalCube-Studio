@@ -75,6 +75,18 @@ def _host_still(profile: Dict[str, Any], profile_name: str) -> Optional[Path]:
     return p if p.exists() else None
 
 
+def _spotify_popup_asset(inputs: Dict[str, Any]) -> str:
+    """Resolve the built-in popup asset selected for this individual job."""
+    if (inputs.get("spotify_popup_style") or "").strip().lower() == "geistmeister":
+        return "branding/spotify-popup-geistmeister.png"
+    lang_l = (inputs.get("language") or "").strip().lower()
+    if lang_l.startswith(("german", "deutsch", "de")):
+        return "branding/spotify-popup-de.png"
+    if lang_l.startswith(("dutch", "nederlands", "nl", "flemish", "vlaams")):
+        return "branding/spotify-popup-nl.png"
+    return "branding/spotify-popup.png"
+
+
 def _broll_fallback(b: Dict[str, Any], i: int, assets: Path, width: int,
                     height: int, emit, skip_video: bool = False,
                     used: Optional[Dict[str, int]] = None, smart: str = "off",
@@ -164,6 +176,8 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                         or v.get("smart_stock") or "text").strip().lower(),
         "qr_badge": bool(inputs.get("qr_badge", False)),
         "spotify_popup": bool(inputs.get("spotify_popup", False)),
+        "spotify_popup_style": (
+            inputs.get("spotify_popup_style") or "standard").strip().lower(),
         "spotify_url": (inputs.get("spotify_url") or "").strip(),
     }
     if inputs["smart_stock"] not in ("vision", "text", "off"):
@@ -825,18 +839,16 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                            "video.corner_badge image — rendering without it")
 
     # Spotify popup: timed (10s open + 10s random in first 10 min), not
-    # permanent. Language picks DE / NL / EN card art.
+    # permanent. Standard mode picks DE / NL / EN; branded modes select a
+    # dedicated card regardless of narration language.
     popup = None
     popup_windows = None
     if inputs.get("spotify_popup"):
-        lang_l = (inputs.get("language") or "").strip().lower()
-        if lang_l.startswith(("german", "deutsch", "de")):
-            default_popup = "branding/spotify-popup-de.png"
-        elif lang_l.startswith(("dutch", "nederlands", "nl", "flemish", "vlaams")):
-            default_popup = "branding/spotify-popup-nl.png"
+        default_popup = _spotify_popup_asset(inputs)
+        if inputs.get("spotify_popup_style") == "geistmeister":
+            popup_rel = default_popup
         else:
-            default_popup = "branding/spotify-popup.png"
-        popup_rel = (v.get("spotify_popup") or default_popup).strip()
+            popup_rel = (v.get("spotify_popup") or default_popup).strip()
         # If profile forces a path but language has a better localized file
         # and profile path is the generic EN one, prefer localized.
         if popup_rel in ("branding/spotify-popup.png", "spotify-popup.png"):

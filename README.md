@@ -110,6 +110,9 @@ libx264 when no hardware encoder is present.
    wait for thumbnail approval. Approve/edit the words first; only then is
    the image generated. Approve that image separately. The thumbnail gets
    its own 20-digit ID and remains visible/downloadable from the video job.
+6. When the Spotify CTA is enabled, choose either the standard localized
+   card or the dedicated **GEISTMEISTER** card. Both use the same timed
+   windows; the GEISTMEISTER choice also names the artist in the script cue.
 
 Outline, hooks, and the final script are saved in the job folder
 (`output/<job>/outline.txt`, `hooks.json`, `script.txt`).

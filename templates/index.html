@@ -686,6 +686,10 @@
       <textarea id="ebook_text" placeholder="Optional: exact e-book CTA block" style="min-height:56px;margin:4px 0 8px"></textarea>
       <input type="number" id="ebook_cta_at" placeholder="Optional: CTA position in characters" style="margin:0 0 8px" />
       <label class="check"><input type="checkbox" id="spotify_popup" /> Spotify popup — 10s at start + 10s random in first 10 min (DE/NL/EN card)</label>
+      <select id="spotify_popup_style" style="margin:4px 0 8px">
+        <option value="standard">Standard localized popup</option>
+        <option value="geistmeister">GEISTMEISTER popup</option>
+      </select>
       <input id="spotify_url" placeholder="Optional: Spotify link (saved for description / script cue)" style="margin:4px 0 8px" />
       <label class="check"><input type="checkbox" id="cta_community" /> Community/support CTA</label>
       <label class="check"><input type="checkbox" id="patreon_split" /> Patreon split (cliffhanger cut)</label>
@@ -904,6 +908,7 @@ function buildPayload(title) {
     ebook_text: $("#ebook_text").value.trim(),
     ebook_cta_at: parseInt($("#ebook_cta_at").value) || null,
     spotify_popup: $("#spotify_popup").checked,
+    spotify_popup_style: $("#spotify_popup_style").value,
     spotify_url: $("#spotify_url").value.trim(),
     promote_community: $("#cta_community").checked,
     cited_philosophers: $("#philosophers").value.trim(),

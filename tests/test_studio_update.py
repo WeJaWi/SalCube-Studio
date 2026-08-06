@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import app
-from pipeline import identity, llm, operations
+from pipeline import identity, llm, operations, orchestrator, script
 
 
 class IdentityTests(unittest.TestCase):
@@ -27,7 +27,39 @@ class VideoGroupTests(unittest.TestCase):
             inputs = app._build_inputs({"video_group": "big"}, "A title")
             self.assertGreaterEqual(inputs["length_chars"], 180000)
             self.assertLessEqual(inputs["length_chars"], 210000)
-            self.assertEqual(inputs["video_group"], "big")
+        self.assertEqual(inputs["video_group"], "big")
+
+    def test_geistmeister_spotify_style_is_persisted(self):
+        inputs = app._build_inputs({
+            "video_group": "small", "spotify_popup": True,
+            "spotify_popup_style": "geistmeister",
+        }, "A title")
+        self.assertTrue(inputs["spotify_popup"])
+        self.assertEqual(inputs["spotify_popup_style"], "geistmeister")
+
+
+class SpotifyPopupTests(unittest.TestCase):
+    def test_geistmeister_selects_dedicated_asset(self):
+        asset = orchestrator._spotify_popup_asset({
+            "spotify_popup_style": "geistmeister", "language": "German",
+        })
+        self.assertEqual(asset, "branding/spotify-popup-geistmeister.png")
+        self.assertTrue((orchestrator.config.ROOT / asset).is_file())
+
+    def test_standard_popup_remains_language_specific(self):
+        self.assertEqual(orchestrator._spotify_popup_asset({
+            "spotify_popup_style": "standard", "language": "German",
+        }), "branding/spotify-popup-de.png")
+        self.assertEqual(orchestrator._spotify_popup_asset({
+            "spotify_popup_style": "standard", "language": "Dutch",
+        }), "branding/spotify-popup-nl.png")
+
+    def test_geistmeister_script_cue_names_the_artist(self):
+        cue = script._spotify_line({
+            "spotify_popup": True,
+            "spotify_popup_style": "geistmeister",
+        }, {})
+        self.assertIn("GEISTMEISTER", cue)
 
 
 class OperationsTests(unittest.TestCase):

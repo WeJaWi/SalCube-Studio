@@ -942,6 +942,10 @@ def _build_inputs(data: dict, title: str) -> dict:
     else:
         video_group = "custom"
         length_chars = data.get("length_chars")
+    spotify_popup_style = str(
+        data.get("spotify_popup_style") or "standard").strip().lower()
+    if spotify_popup_style not in ("standard", "geistmeister"):
+        spotify_popup_style = "standard"
     return {
         "title": title,
         "language": (data.get("language") or "").strip(),
@@ -969,6 +973,7 @@ def _build_inputs(data: dict, title: str) -> dict:
         "smart_stock": (data.get("smart_stock") or "").strip() or None,
         "qr_badge": bool(data.get("qr_badge", False)),
         "spotify_popup": bool(data.get("spotify_popup", False)),
+        "spotify_popup_style": spotify_popup_style,
         "spotify_url": (data.get("spotify_url") or "").strip(),
     }
 

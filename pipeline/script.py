@@ -77,9 +77,12 @@ def _spotify_line(inputs: Dict[str, Any], profile: Dict[str, Any]) -> str:
     if custom:
         base = custom
     else:
+        artist = ("GEISTMEISTER" if
+                  inputs.get("spotify_popup_style") == "geistmeister" else "")
         base = ("A Spotify card sits in the bottom-right corner of the video. "
                 "Add ONE natural half-sentence inviting the viewer to listen "
-                "on Spotify (or check the link in the description) — warm, "
+                + (f"to {artist} " if artist else "")
+                + "on Spotify (or check the link in the description) — warm, "
                 "optional, never salesy. Mention it only once.")
     if url:
         base += f" The Spotify link is: {url}."
