@@ -85,6 +85,34 @@ class OperationsTests(unittest.TestCase):
         })
         self.assertEqual(result, {"severity": "ok", "issues": []})
 
+    def test_healthy_disk_is_not_misclassified_by_percentage_alone(self):
+        result = operations.OperationsCenter._deterministic_health({
+            "jobs": [], "workers": [],
+            "disk": {"free_gb": 137.7, "free_percent": 27.8},
+        })
+        self.assertEqual(result, {"severity": "ok", "issues": []})
+
+    def test_drive_consent_is_warning_but_not_root_cause_report(self):
+        snapshot = {
+            "jobs": [], "workers": [],
+            "disk": {"free_gb": 137.7, "free_percent": 27.8},
+            "drive": {"configured": True, "authorized": False},
+        }
+        health = operations.OperationsCenter._deterministic_health(snapshot)
+        triggers = operations.OperationsCenter._automatic_report_triggers(snapshot)
+        self.assertEqual(health["severity"], "warning")
+        self.assertIn("authorization", health["issues"][0])
+        self.assertEqual(triggers, [])
+
+    def test_report_trigger_is_stable_for_real_job_error(self):
+        snapshot = {
+            "jobs": [{"job_id": "job-1", "status": "error"}],
+            "workers": [], "disk": {"free_gb": 100, "free_percent": 50},
+        }
+        self.assertEqual(
+            operations.OperationsCenter._automatic_report_triggers(snapshot),
+            ["job_errors:job-1"])
+
 
 class ThumbnailApprovalTests(unittest.TestCase):
     def setUp(self):

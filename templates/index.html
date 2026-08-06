@@ -104,6 +104,11 @@
   .ops-policy { color:var(--muted-2); font-size:11px; line-height:1.45;
     padding:9px 10px; border:1px solid var(--border-soft); border-radius:10px;
     background:rgba(0,0,0,.12); margin-bottom:10px; }
+  .ops-drive { display:flex; align-items:center; gap:7px; color:var(--muted);
+    font-size:11px; margin:-2px 0 10px; padding:0 2px; }
+  .ops-drive a { margin-left:auto; color:var(--cyan); text-decoration:none;
+    font-weight:650; }
+  .ops-drive a:hover { text-decoration:underline; }
   .ops-log { flex:1; min-height:170px; overflow:auto; border:1px solid var(--border-soft);
     background:#1a1c1f; border-radius:var(--radius-sm); padding:8px; }
   .ops-entry { padding:9px 7px; border-bottom:1px solid var(--border-soft); }
@@ -784,6 +789,11 @@
     <span class="badge" id="opsModel">Qwen → Terra fallback</span>
   </div>
   <div class="ops-policy">Read-only · checks every minute · every proposed change needs your approval · reports are saved locally and never sent.</div>
+  <div class="ops-drive">
+    <span class="dot" id="driveDot"></span>
+    <span id="driveState">Checking Google Drive…</span>
+    <a id="driveAuthorize" class="hidden" href="/api/drive/authorize" target="_blank" rel="noopener">Authorize</a>
+  </div>
   <div id="opsLog" class="ops-log"><div class="hint">Waiting for the first system update…</div></div>
   <div class="ops-chat">
     <textarea id="opsQuestion" placeholder="Ask about jobs, workers, failures, disk, Drive, or the app…"></textarea>
@@ -1482,6 +1492,22 @@ async function refreshOps() {
 }
 refreshOps();
 setInterval(refreshOps, 15000);
+
+async function refreshDrive() {
+  try {
+    const data = await (await fetch("/api/drive/status")).json();
+    const ready = !!data.authorized;
+    $("#driveDot").className = "dot " + (ready ? "online" : "busy");
+    $("#driveState").textContent = ready ? "Google Drive connected"
+      : (data.configured ? "Google Drive needs your approval" : "Google Drive not configured");
+    $("#driveAuthorize").classList.toggle("hidden", ready || !data.configured);
+  } catch (e) {
+    $("#driveDot").className = "dot offline";
+    $("#driveState").textContent = "Could not check Google Drive";
+  }
+}
+refreshDrive();
+setInterval(refreshDrive, 15000);
 
 $("#askOps").addEventListener("click", async () => {
   const q = $("#opsQuestion").value.trim();

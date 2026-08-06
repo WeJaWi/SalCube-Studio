@@ -139,22 +139,63 @@ class OperationsCenter:
             issues.append(f"{len(stalled)} running job(s) may be stalled")
         if disk.get("free_gb", 999) < 10 or disk.get("free_percent", 100) < 10:
             issues.append("main storage is low")
+        drive = snapshot.get("drive", {})
+        if drive.get("configured") and not drive.get("authorized"):
+            issues.append("Google Drive awaits one-time owner authorization")
         severity = "critical" if stalled or (errors and stale) else (
             "warning" if issues else "ok")
         return {"severity": severity, "issues": issues}
+
+    @staticmethod
+    def _automatic_report_triggers(snapshot: dict) -> list[str]:
+        """Stable, evidence-backed causes that may justify an automatic report.
+
+        Drive awaiting initial OAuth is a setup task, not a root-cause event.
+        Restored/done jobs are likewise healthy and never trigger reports.
+        """
+        triggers = []
+        jobs = snapshot.get("jobs", [])
+        error_ids = sorted(str(j.get("job_id") or j.get("id") or "unknown")
+                           for j in jobs if j.get("status") == "error")
+        stalled_ids = sorted(str(j.get("job_id") or j.get("id") or "unknown")
+                             for j in jobs if j.get("stalled"))
+        stale_workers = sorted(str(w.get("name") or w.get("worker_id")
+                                   or w.get("id") or "unknown")
+                               for w in snapshot.get("workers", [])
+                               if w.get("stale"))
+        if error_ids:
+            triggers.append("job_errors:" + ",".join(error_ids))
+        if stalled_ids:
+            triggers.append("stalled_jobs:" + ",".join(stalled_ids))
+        if stale_workers:
+            triggers.append("stale_workers:" + ",".join(stale_workers))
+        disk = snapshot.get("disk", {})
+        if disk.get("free_gb", 999) < 10 or disk.get("free_percent", 100) < 10:
+            triggers.append("low_main_storage")
+        return triggers
 
     def tick(self) -> dict:
         try:
             snapshot = self.snapshot_provider()
             self._last_snapshot = snapshot
             health = self._deterministic_health(snapshot)
+            report_triggers = self._automatic_report_triggers(snapshot)
             prompt = (
                 "Return ONLY JSON with keys severity (ok|warning|critical), "
                 "headline, message (maximum 70 words), root_cause_risk "
                 "(low|medium|high), report_recommended (boolean), and evidence "
                 "(array of at most 4 short strings). Do not suggest an action "
-                "unless it needs owner approval.\n\nDeterministic health:\n"
+                "unless it needs owner approval. Ground rules: `drive` means "
+                "Google Drive deliverable OAuth on the main controller, never "
+                "a worker or mounted external disk. `authorized: false` means "
+                "owner consent is pending, not a system failure. Storage is "
+                "healthy unless deterministic health explicitly says it is "
+                "low. Done/restored jobs are healthy. Recommend an automatic "
+                "root-cause report only when automatic_report_triggers is "
+                "non-empty.\n\nDeterministic health:\n"
                 + json.dumps(health, ensure_ascii=False)
+                + "\n\nAutomatic report triggers:\n"
+                + json.dumps(report_triggers, ensure_ascii=False)
                 + "\n\nSanitized system snapshot:\n"
                 + json.dumps(snapshot, ensure_ascii=False)
             )
@@ -164,22 +205,26 @@ class OperationsCenter:
             severity = str(analysis.get("severity") or health["severity"])
             if severity not in ("ok", "warning", "critical"):
                 severity = health["severity"]
+            severity_rank = {"ok": 0, "warning": 1, "critical": 2}
+            if severity_rank[severity] < severity_rank[health["severity"]]:
+                severity = health["severity"]
+            report_recommended = (bool(analysis.get("report_recommended"))
+                                  and bool(report_triggers))
             entry = self._append({
                 "kind": "update", "model": used_model,
                 "severity": severity,
                 "headline": str(analysis.get("headline") or "System update")[:160],
                 "message": str(analysis.get("message") or "Health snapshot completed.")[:1200],
                 "root_cause_risk": str(analysis.get("root_cause_risk") or "low"),
-                "report_recommended": bool(analysis.get("report_recommended")),
+                "report_recommended": report_recommended,
                 "evidence": [str(x)[:300] for x in (analysis.get("evidence") or [])[:4]],
             })
-            if (entry["severity"] == "critical"
+            if (report_triggers and (entry["severity"] == "critical"
                     or entry["root_cause_risk"] == "high"
-                    or entry["report_recommended"]):
-                fingerprint = hashlib.sha256(json.dumps({
-                    "severity": entry["severity"], "headline": entry["headline"],
-                    "evidence": entry["evidence"],
-                }, sort_keys=True).encode()).hexdigest()[:20]
+                    or entry["report_recommended"])):
+                fingerprint = hashlib.sha256(
+                    json.dumps(report_triggers, sort_keys=True).encode()
+                ).hexdigest()[:20]
                 if fingerprint not in self._reported_fingerprints:
                     report = self.create_report(
                         "Automatic report: possible broad root cause", analysis=entry,
