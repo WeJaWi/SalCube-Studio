@@ -163,10 +163,17 @@ def kie_poll(task_id: str, timeout_s: int = 600, interval: float = 4.0,
             cancel.sleep(interval)  # transient — keep polling
             continue
         try:
-            data = r.json().get("data") or {}
+            body = r.json()
         except ValueError:  # 502/504 HTML page — transient, keep polling
             cancel.sleep(interval)
             continue
+        if (r.status_code >= 400
+                or (isinstance(body.get("code"), int)
+                    and body["code"] not in (0, 200))):
+            raise RuntimeError(
+                f"kie poll error {r.status_code}: "
+                f"{body.get('msg') or body.get('message') or r.text[:300]}")
+        data = body.get("data") or {}
         state = data.get("state")
         if state == "success":
             result = data.get("resultJson")

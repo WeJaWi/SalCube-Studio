@@ -6,6 +6,7 @@ urllib3<2
 python-dotenv>=1.0
 playwright>=1.40
 json-repair>=0.15
+Pillow>=10.0
 
-# Ports from Wexilo (core/jobs, captions, waveform)
-# No new hard dependencies — uses subprocess + existing ffmpeg / playwright.
+# Ports from Wexilo (core/jobs, captions, waveform). Pillow also powers the
+# guaranteed local thumbnail fallback when remote image credentials reject.

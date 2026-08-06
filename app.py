@@ -222,6 +222,7 @@ def _persist_queue() -> None:
                 "status": st,
                 "step": j.get("step", ""),
                 "title": j.get("title", ""),
+                "publication_title": j.get("publication_title"),
                 "profile": j.get("profile", ""),
                 "inputs": j.get("inputs") or {},
                 "created_at": j.get("created_at") or "",
@@ -353,6 +354,7 @@ def _restore_queue() -> None:
                 "progress_pct": progress_pct,
                 "log": log,
                 "title": title,
+                "publication_title": row.get("publication_title"),
                 "profile": profile,
                 "inputs": inputs,
                 "created_at": row.get("created_at") or datetime.now().isoformat(
@@ -997,7 +999,6 @@ def _enqueue_job(inputs: dict, profile: str, *, resume: str = "") -> str:
         title = inputs.get("title") or title
         profile = saved.get("_profile") or profile
     job_dir.mkdir(parents=True, exist_ok=True)
-    inputs_file.write_text(json.dumps({**inputs, "_profile": profile}, indent=1))
 
     # Known at enqueue time, before any LLM call: the user's requested
     # target length (or that profile's own default if left blank) — same
@@ -1008,6 +1009,12 @@ def _enqueue_job(inputs: dict, profile: str, *, resume: str = "") -> str:
         defaults = orchestrator.load_profile(profile).get("defaults", {})
     except Exception:  # noqa: BLE001
         defaults = {}
+    # The UI language field is an override. When it is blank, persist the
+    # profile language so every parallel subsystem (script, title, thumbnail,
+    # metadata) sees the same explicit value instead of independently guessing.
+    inputs["language"] = ((inputs.get("language") or "").strip()
+                          or str(defaults.get("language") or "English").strip())
+    inputs_file.write_text(json.dumps({**inputs, "_profile": profile}, indent=1))
     est_chars = int(inputs.get("length_chars") or defaults.get("length_chars", 15000))
 
     created_at = datetime.now().isoformat(timespec="seconds")
@@ -1355,7 +1362,9 @@ def api_jobs():
         return {
             "job_id": jid,
             "status": j["status"],
-            "title": j.get("title", ""),
+            "title": j.get("publication_title") or j.get("title", ""),
+            "source_title": j.get("title", ""),
+            "publication_title": j.get("publication_title"),
             "profile": profile,
             "step": j.get("step", ""),
             "created_at": j.get("created_at", ""),
@@ -1883,6 +1892,34 @@ def _thumbnail_character(profile_name: str, inputs: dict) -> tuple[Path | None, 
     return (fallback if fallback.exists() else None), (cited or "Joseph Murphy")
 
 
+def _thumbnail_language(profile_name: str, inputs: dict) -> str:
+    explicit = str(inputs.get("language") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        defaults = orchestrator.load_profile(profile_name).get("defaults", {})
+        return str(defaults.get("language") or "English").strip()
+    except Exception:  # noqa: BLE001
+        return "English"
+
+
+_TITLE_THUMBNAIL_GUIDE = """
+TITLE + THUMBNAIL PACKAGING RULES:
+- The emotional trigger is: "this can change my life; I need to watch now."
+- Promise a truthful improvement such as money, health, luck, sleep, peace,
+  success, or inner change. Bold, exciting clickbait is welcome; lying is not.
+- The title and thumbnail are a team and MUST use different wording. The title
+  gives one compelling idea; the thumbnail supplies a second reward, secret,
+  or curiosity gap. Never merely shorten or repeat the title on the thumbnail.
+- Keep both short, clear, and readable immediately. A number, mystery, or
+  secret feeling can help when truthful. Add the famous teacher's name at the
+  end of the title with a dash when it fits.
+- Thumbnail main text uses very few words and may use one exclamation mark.
+- Final check: life-change trigger, complementary wording, fast readability,
+  exciting but supported by the video's actual topic.
+""".strip()
+
+
 def _thumbnail_words_task(job_id: str) -> None:
     with LOCK:
         job = JOBS.get(job_id)
@@ -1891,28 +1928,41 @@ def _thumbnail_words_task(job_id: str) -> None:
         title, profile_name = job["title"], job["profile"]
         inputs = dict(job.get("inputs") or {})
     _, character_name = _thumbnail_character(profile_name, inputs)
+    language = _thumbnail_language(profile_name, inputs)
     try:
         words = llm.chat_json(
-            "Create high-click YouTube thumbnail wording for the supplied title. "
-            "Do not invent a different video topic. Return ONLY JSON with: "
-            "main_text (3-8 punchy words), red_word (1-2 words), yellow_word "
-            "(1-2 words), and name. Avoid quotation marks, fake certainty, and "
-            "misleading claims. The owner will edit/approve these words before "
-            "any image is generated.\n\n"
-            f"Video title: {title}\nProfile: {profile_name}\nDisplayed person: {character_name}",
+            "Create one publication title and complementary YouTube thumbnail "
+            "wording for the supplied source title. Translate/rewrite every "
+            f"audience-facing word into {language}; proper names stay correct. "
+            "Do not change the actual topic or promise something the source "
+            "cannot support. Return ONLY JSON with: localized_title (short, "
+            "high-click title in the target language), main_text (3-8 punchy "
+            "thumbnail words that DO NOT repeat the title), red_word (1-2 "
+            "target-language words), yellow_word (1-2 target-language words), "
+            "and name. The name is the displayed person/teacher, not translated. "
+            "Avoid quotation marks and fake certainty. The owner approves these "
+            "before image generation.\n\n"
+            f"{_TITLE_THUMBNAIL_GUIDE}\n\n"
+            f"Source title: {title}\nTarget language: {language}\n"
+            f"Profile: {profile_name}\nDisplayed person: {character_name}",
             "gpt-5.6-terra", max_tokens=500, attempts=2, retries=1, timeout=90)
+        localized_title = str(words.get("localized_title") or "").strip()[:220]
         clean = {
             "main_text": str(words.get("main_text") or "").strip()[:120],
             "red_word": str(words.get("red_word") or "").strip()[:50],
             "yellow_word": str(words.get("yellow_word") or "").strip()[:50],
             "name": str(words.get("name") or character_name).strip()[:80],
         }
-        if not all(clean.values()):
-            raise RuntimeError("Terra returned incomplete thumbnail words")
+        if not localized_title or not all(clean.values()):
+            raise RuntimeError("Terra returned an incomplete localized title/thumbnail package")
         with LOCK:
             job = JOBS.get(job_id)
             if job:
-                job["thumbnail"] = {"state": "words_ready", "words": clean}
+                job["thumbnail"] = {
+                    "state": "words_ready", "words": clean,
+                    "localized_title": localized_title,
+                    "language": language,
+                }
                 job["updated_at"] = datetime.now().isoformat(timespec="seconds")
     except Exception as exc:  # noqa: BLE001
         with LOCK:
@@ -1937,6 +1987,9 @@ def _thumbnail_image_task(job_id: str) -> None:
         inputs = dict(job.get("inputs") or {})
         thumb_state = dict(job.get("thumbnail") or {})
         words = dict(thumb_state.get("words") or {})
+        localized_title = str(thumb_state.get("localized_title") or "").strip()
+        language = str(thumb_state.get("language") or
+                       _thumbnail_language(profile_name, inputs)).strip()
     character_path, default_name = _thumbnail_character(profile_name, inputs)
     template_path = next(iter(THUMB_TEMPLATES_DIR.glob("default.*")), None)
     try:
@@ -1957,6 +2010,8 @@ def _thumbnail_image_task(job_id: str) -> None:
             if job:
                 job["thumbnail"] = {
                     "state": "image_ready", "words": words,
+                    "localized_title": localized_title,
+                    "language": language,
                     "thumbnail_id": thumbnail_id,
                     "url": f"/api/thumbnail/file/{thumbnail_id}",
                 }
@@ -1967,7 +2022,10 @@ def _thumbnail_image_task(job_id: str) -> None:
             job = JOBS.get(job_id)
             if job:
                 job["thumbnail"] = {"state": "error", "stage": "image",
-                                    "words": words, "error": str(exc)}
+                                    "words": words,
+                                    "localized_title": localized_title,
+                                    "language": language,
+                                    "error": str(exc)}
     _persist_queue()
 
 
@@ -1978,14 +2036,20 @@ def approve_thumbnail_words(job_id: str):
     data = request.get_json(force=True) or {}
     words = {k: str(data.get(k) or "").strip() for k in
              ("main_text", "red_word", "yellow_word", "name")}
-    if not all(words.values()):
-        return jsonify({"error": "all thumbnail word fields are required"}), 400
+    localized_title = str(data.get("localized_title") or "").strip()
+    if not localized_title or not all(words.values()):
+        return jsonify({"error": "the localized title and all thumbnail word fields are required"}), 400
     with LOCK:
         job = JOBS.get(job_id)
         if not job:
             return jsonify({"error": "unknown job"}), 404
-        job["thumbnail"] = {"state": "generating_image", "words": words,
-                            "words_approved_at": datetime.now().isoformat(timespec="seconds")}
+        language = _thumbnail_language(job["profile"], job.get("inputs") or {})
+        job["publication_title"] = localized_title[:220]
+        job["thumbnail"] = {
+            "state": "generating_image", "words": words,
+            "localized_title": localized_title[:220], "language": language,
+            "words_approved_at": datetime.now().isoformat(timespec="seconds"),
+        }
     _persist_queue()
     threading.Thread(target=_thumbnail_image_task, args=(job_id,), daemon=True,
                      name=f"dmiqwi-thumbnail-{job_id}").start()
@@ -2035,7 +2099,13 @@ def regenerate_thumbnail_image(job_id: str):
         state = dict(job.get("thumbnail") or {})
         if not state.get("words"):
             return jsonify({"error": "approve thumbnail words first"}), 409
-        job["thumbnail"] = {"state": "generating_image", "words": state["words"]}
+        job["thumbnail"] = {
+            "state": "generating_image", "words": state["words"],
+            "localized_title": state.get("localized_title") or
+                               job.get("publication_title") or job.get("title"),
+            "language": state.get("language") or
+                        _thumbnail_language(job["profile"], job.get("inputs") or {}),
+        }
     _persist_queue()
     threading.Thread(target=_thumbnail_image_task, args=(job_id,), daemon=True,
                      name=f"dmiqwi-thumbnail-{job_id}").start()

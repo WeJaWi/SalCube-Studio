@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import app
-from pipeline import identity, llm, operations, orchestrator, render, script
+from pipeline import (identity, llm, operations, orchestrator, render, script,
+                      thumbnail)
 
 
 class IdentityTests(unittest.TestCase):
@@ -177,12 +179,36 @@ class ThumbnailApprovalTests(unittest.TestCase):
         with patch.object(app, "_persist_queue"), patch.object(app.threading, "Thread"):
             response = self.client.post(
                 f"/api/thumbnail/job/{self.job_id}/words/approve",
-                json={"main_text": "Change Your Mind", "red_word": "Change",
+                json={"localized_title": "Change This Habit Tonight",
+                      "main_text": "Change Your Mind", "red_word": "Change",
                       "yellow_word": "Mind", "name": "Joseph Murphy"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(app.JOBS[self.job_id]["status"], "done")
+        self.assertEqual(app.JOBS[self.job_id]["publication_title"],
+                         "Change This Habit Tonight")
         self.assertEqual(app.JOBS[self.job_id]["thumbnail"]["state"],
                          "generating_image")
+
+    def test_word_package_uses_profile_language_and_trigger_guide(self):
+        app.JOBS[self.job_id].update(
+            profile="matthias-richter", inputs={},
+            title="Say this before sleep - Joseph Murphy",
+            thumbnail={"state": "generating_words"})
+        package = {
+            "localized_title": "Sagen Sie dies vor dem Schlafen – Joseph Murphy",
+            "main_text": "Ihr Leben ändert sich",
+            "red_word": "HEUTE NACHT", "yellow_word": "NEU BEGINNEN",
+            "name": "Joseph Murphy",
+        }
+        with patch.object(app.llm, "chat_json", return_value=package) as mocked, \
+                patch.object(app, "_persist_queue"):
+            app._thumbnail_words_task(self.job_id)
+        prompt = mocked.call_args.args[0]
+        self.assertIn("Target language: German", prompt)
+        self.assertIn("MUST use different wording", prompt)
+        state = app.JOBS[self.job_id]["thumbnail"]
+        self.assertEqual(state["language"], "German")
+        self.assertEqual(state["localized_title"], package["localized_title"])
 
     def test_image_approval_does_not_change_render_status(self):
         app.JOBS[self.job_id]["thumbnail"] = {
@@ -194,6 +220,70 @@ class ThumbnailApprovalTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(app.JOBS[self.job_id]["status"], "done")
         self.assertEqual(app.JOBS[self.job_id]["thumbnail"]["state"], "approved")
+
+
+class ThumbnailProviderTests(unittest.TestCase):
+    def test_thumbnail_task_falls_back_to_main_key_on_auth_failure(self):
+        with patch.object(thumbnail.config, "KIE_THUMBNAIL_API_KEY", "bad-key"), \
+                patch.object(thumbnail.config, "KIE_API_KEY", "main-key"), \
+                patch.object(thumbnail.clients, "kie_upload",
+                             side_effect=["https://one", "https://two"]), \
+                patch.object(thumbnail.clients, "kie_create_task",
+                             side_effect=[RuntimeError("Unauthorized"), "task-2"]) as create, \
+                patch.object(thumbnail.clients, "kie_poll",
+                             return_value=["https://result"]), \
+                patch.object(thumbnail.clients, "download",
+                             return_value=Path("out.png")):
+            result = thumbnail.generate(
+                Path("template.png"), Path("person.png"), Path("out.png"),
+                main_text="Main", red_word="Red", yellow_word="Gold",
+                name="Name")
+        self.assertEqual(result, Path("out.png"))
+        self.assertEqual(create.call_args_list[0].kwargs["api_key"], "bad-key")
+        self.assertEqual(create.call_args_list[1].kwargs["api_key"], "main-key")
+
+    def test_thumbnail_uses_authorized_grok_image_fallback(self):
+        with patch.object(thumbnail.config, "KIE_THUMBNAIL_API_KEY", "bad-key"), \
+                patch.object(thumbnail.config, "KIE_API_KEY", "main-key"), \
+                patch.object(thumbnail.config, "KIE_VIDEO_API_KEY", "video-key"), \
+                patch.object(thumbnail.clients, "kie_upload",
+                             side_effect=["https://one", "https://two"]), \
+                patch.object(thumbnail.clients, "kie_create_task",
+                             side_effect=[RuntimeError("Unauthorized"),
+                                          RuntimeError("not authorized"),
+                                          "task-3"]) as create, \
+                patch.object(thumbnail.clients, "kie_poll",
+                             return_value=["https://result"]), \
+                patch.object(thumbnail.clients, "download",
+                             return_value=Path("out.png")):
+            thumbnail.generate(
+                Path("template.png"), Path("person.png"), Path("out.png"),
+                main_text="Main", red_word="Red", yellow_word="Gold",
+                name="Name")
+        third = create.call_args_list[2]
+        self.assertEqual(third.args[0], "grok-imagine/image-to-image")
+        self.assertEqual(third.kwargs["api_key"], "video-key")
+        self.assertEqual(third.args[1]["image_urls"],
+                         ["https://one", "https://two"])
+
+    def test_thumbnail_uses_local_fallback_when_all_remote_keys_fail(self):
+        with patch.object(thumbnail.config, "KIE_THUMBNAIL_API_KEY", "bad-key"), \
+                patch.object(thumbnail.config, "KIE_API_KEY", "main-key"), \
+                patch.object(thumbnail.config, "KIE_VIDEO_API_KEY", "video-key"), \
+                patch.object(thumbnail.clients, "kie_upload",
+                             side_effect=["https://one", "https://two"]), \
+                patch.object(thumbnail.clients, "kie_create_task",
+                             side_effect=RuntimeError("not authorized")) as create, \
+                patch.object(thumbnail, "generate_local",
+                             return_value=Path("out.png")) as local:
+            result = thumbnail.generate(
+                Path("template.png"), Path("person.png"), Path("out.png"),
+                main_text="Ein Geheimnis verändert alles",
+                red_word="Heute Nacht", yellow_word="Neues Leben",
+                name="Joseph Murphy")
+        self.assertEqual(result, Path("out.png"))
+        self.assertEqual(create.call_count, 3)
+        local.assert_called_once()
 
 
 if __name__ == "__main__":

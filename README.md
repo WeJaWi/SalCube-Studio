@@ -107,9 +107,13 @@ libx264 when no hardware encoder is present.
    generates in parallel, FFmpeg composites with burned subtitles and the
    music bed.
 5. In parallel, GPT-5.6 Terra proposes thumbnail words. Rendering does not
-   wait for thumbnail approval. Approve/edit the words first; only then is
-   the image generated. Approve that image separately. The thumbnail gets
-   its own 20-digit ID and remains visible/downloadable from the video job.
+   wait for thumbnail approval. It resolves the script language from the UI
+   override or profile, rewrites/translates the publication title into that
+   language, and proposes different (non-repeating) thumbnail text using the
+   truthful life-change trigger rules. Approve/edit the title and words first;
+   only then is the image generated. Approve that image separately. The
+   thumbnail gets its own 20-digit ID and remains visible/downloadable from
+   the video job.
 6. When the Spotify CTA is enabled, choose either the standard localized
    card or the dedicated **GEISTMEISTER** card. The standard card uses timed
    windows; GEISTMEISTER stays visible for the entire video and also names

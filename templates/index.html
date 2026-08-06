@@ -746,6 +746,8 @@
       <h3>Thumbnail approval</h3>
       <p id="thumbStatus" class="hint">Terra is preparing the words…</p>
       <div id="thumbWords" class="hidden">
+        <label for="thumbTitle" style="margin-top:8px">Localized publication title</label>
+        <input id="thumbTitle" placeholder="Translated high-click video title" />
         <div class="approval-grid">
           <input id="thumbMain" placeholder="Main text" />
           <input id="thumbRed" placeholder="Red word" />
@@ -1334,7 +1336,7 @@ function render(j, jobId) {
   const badge = $("#badge");
   badge.className = "badge " + j.status;
   badge.textContent = statusLabel(j.status);
-  setJobTitle(j.title || jobId);
+  setJobTitle(j.publication_title || j.title || jobId);
   $("#videoId").textContent = jobId;
   const descState = (j.description || {}).state || "waiting_for_rules";
   $("#descriptionState").textContent = descState === "waiting_for_rules"
@@ -1406,10 +1408,13 @@ function renderThumbnailApproval(t, jobId) {
     $("#thumbStatus").textContent = "Terra is preparing thumbnail words. Rendering continues independently.";
     thumbnailFormFor = null;
   } else if (state === "words_ready") {
-    $("#thumbStatus").textContent = "Edit the proposed words if needed, then approve image generation.";
+    $("#thumbStatus").textContent = `Edit the ${t.language || "target-language"} title and complementary thumbnail words, then approve image generation.`;
     wordsBox.classList.remove("hidden");
+    retry.classList.remove("hidden");
+    retry.textContent = "Regenerate title & words";
     if (thumbnailFormFor !== jobId) {
       const w = t.words || {};
+      $("#thumbTitle").value = t.localized_title || "";
       $("#thumbMain").value = w.main_text || "";
       $("#thumbRed").value = w.red_word || "";
       $("#thumbYellow").value = w.yellow_word || "";
@@ -1436,14 +1441,16 @@ function renderThumbnailApproval(t, jobId) {
   } else if (state === "error") {
     $("#thumbStatus").textContent = `Thumbnail ${t.stage || "step"} failed: ${t.error || "unknown error"}`;
     retry.classList.remove("hidden");
+    retry.textContent = `Retry thumbnail ${t.stage || "step"}`;
   }
 }
 
 $("#approveThumbWords").addEventListener("click", async () => {
   if (!currentJob) return;
-  const body = {main_text: $("#thumbMain").value.trim(), red_word: $("#thumbRed").value.trim(),
+  const body = {localized_title: $("#thumbTitle").value.trim(),
+    main_text: $("#thumbMain").value.trim(), red_word: $("#thumbRed").value.trim(),
     yellow_word: $("#thumbYellow").value.trim(), name: $("#thumbName").value.trim()};
-  if (Object.values(body).some(v => !v)) { alert("Fill every thumbnail word field."); return; }
+  if (Object.values(body).some(v => !v)) { alert("Fill the localized title and every thumbnail word field."); return; }
   $("#approveThumbWords").disabled = true;
   const r = await fetch(`/api/thumbnail/job/${currentJob}/words/approve`, {
     method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
