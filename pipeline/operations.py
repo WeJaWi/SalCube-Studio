@@ -18,6 +18,9 @@ from . import config, identity, llm
 
 _MODEL = "openrouter-monitor"
 _DISPLAY_MODEL = config.OPENROUTER_MONITOR_MODEL
+_FALLBACK_MODEL = "gpt-5.6-terra"
+_FALLBACK_DISPLAY_MODEL = "gpt-5.6-terra"
+_MODEL_CHAIN = f"{_DISPLAY_MODEL} → {_FALLBACK_DISPLAY_MODEL} fallback"
 _SYSTEM = (
     "You are Dmiqwi Operations, a read-only production observer. You inspect "
     "sanitized video-job, queue, storage, and worker health. Never claim you "
@@ -29,6 +32,38 @@ _SYSTEM = (
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _chat_with_fallback(user: str, **kwargs) -> tuple[str, str]:
+    """Use OpenRouter Qwen first, then Terra; never cascade to Claude CLI."""
+    try:
+        return (llm.chat(user, _MODEL, allow_cli_fallback=False, **kwargs),
+                _DISPLAY_MODEL)
+    except Exception as primary_exc:  # noqa: BLE001
+        try:
+            return (llm.chat(user, _FALLBACK_MODEL,
+                             allow_cli_fallback=False, **kwargs),
+                    _FALLBACK_DISPLAY_MODEL)
+        except Exception as fallback_exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"OpenRouter Qwen failed: {primary_exc}; "
+                f"Terra fallback failed: {fallback_exc}") from fallback_exc
+
+
+def _chat_json_with_fallback(user: str, **kwargs) -> tuple[dict, str]:
+    """JSON equivalent of _chat_with_fallback with the same strict chain."""
+    try:
+        return (llm.chat_json(user, _MODEL, allow_cli_fallback=False, **kwargs),
+                _DISPLAY_MODEL)
+    except Exception as primary_exc:  # noqa: BLE001
+        try:
+            return (llm.chat_json(user, _FALLBACK_MODEL,
+                                  allow_cli_fallback=False, **kwargs),
+                    _FALLBACK_DISPLAY_MODEL)
+        except Exception as fallback_exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"OpenRouter Qwen failed: {primary_exc}; "
+                f"Terra fallback failed: {fallback_exc}") from fallback_exc
 
 
 class OperationsCenter:
@@ -123,14 +158,14 @@ class OperationsCenter:
                 + "\n\nSanitized system snapshot:\n"
                 + json.dumps(snapshot, ensure_ascii=False)
             )
-            analysis = llm.chat_json(prompt, _MODEL, system=_SYSTEM,
-                                     max_tokens=650, attempts=2, retries=1,
-                                     timeout=90, allow_cli_fallback=False)
+            analysis, used_model = _chat_json_with_fallback(
+                prompt, system=_SYSTEM, max_tokens=650, attempts=2,
+                retries=1, timeout=90)
             severity = str(analysis.get("severity") or health["severity"])
             if severity not in ("ok", "warning", "critical"):
                 severity = health["severity"]
             entry = self._append({
-                "kind": "update", "model": _DISPLAY_MODEL,
+                "kind": "update", "model": used_model,
                 "severity": severity,
                 "headline": str(analysis.get("headline") or "System update")[:160],
                 "message": str(analysis.get("message") or "Health snapshot completed.")[:1200],
@@ -163,7 +198,7 @@ class OperationsCenter:
                 "kind": "update", "model": _DISPLAY_MODEL,
                 "severity": "warning" if health["severity"] == "ok" else health["severity"],
                 "headline": "AI monitor could not complete its review",
-                "message": f"Deterministic monitoring remains active. OpenRouter review failed: {str(exc)[:500]}",
+                "message": f"Deterministic monitoring remains active. Qwen and Terra review failed: {str(exc)[:500]}",
                 "root_cause_risk": "medium", "report_recommended": False,
                 "evidence": health["issues"][:4],
             })
@@ -175,33 +210,32 @@ class OperationsCenter:
         snapshot = self.snapshot_provider()
         with self._lock:
             recent = list(self._entries)[-12:]
-        answer = llm.chat(
+        answer, used_model = _chat_with_fallback(
             "Answer the owner's question using only the supplied sanitized "
             "state. If the answer is not present, say what evidence is missing. "
             "Any proposed change must be labeled 'Needs your approval'.\n\n"
             f"Question: {question}\n\nState: {json.dumps(snapshot, ensure_ascii=False)}"
             f"\n\nRecent monitor updates: {json.dumps(recent, ensure_ascii=False)}",
-            _MODEL, system=_SYSTEM, max_tokens=1400, retries=1, timeout=120,
-            allow_cli_fallback=False)
+            system=_SYSTEM, max_tokens=1400, retries=1, timeout=120)
         self._append({"kind": "chat", "severity": "info",
                       "headline": "Owner question", "message": question[:500],
                       "answer": answer[:8000]})
-        return {"answer": answer, "model": _DISPLAY_MODEL}
+        return {"answer": answer, "model": used_model}
 
     def create_report(self, reason: str, *, analysis: Optional[dict] = None,
                       snapshot: Optional[dict] = None, use_model: bool = True) -> dict:
         snapshot = snapshot or self.snapshot_provider()
         reason = (reason or "System review").strip()
         if use_model:
-            body = llm.chat(
+            body, used_model = _chat_with_fallback(
                 "Prepare a compact Markdown root-cause report. Sections: "
                 "Summary, Evidence, Likely causes (clearly mark inference), "
                 "Impact, Safe checks, and Proposed changes requiring owner approval. "
                 "Do not claim any action was performed.\n\n"
                 f"Reason: {reason}\nSnapshot: {json.dumps(snapshot, ensure_ascii=False)}",
-                _MODEL, system=_SYSTEM, max_tokens=2400, retries=1, timeout=120,
-                allow_cli_fallback=False)
+                system=_SYSTEM, max_tokens=2400, retries=1, timeout=120)
         else:
+            used_model = str((analysis or {}).get("model") or "deterministic")
             evidence = "\n".join(
                 f"- {x}" for x in ((analysis or {}).get("evidence") or ["See snapshot below."]))
             body = (
@@ -216,7 +250,7 @@ class OperationsCenter:
             taken=(p.stem for p in self.reports_dir.glob("*.md")))
         path = self.reports_dir / f"{report_id}.md"
         header = (f"<!-- report_id: {report_id}; created: {_now()}; "
-                  f"model: {_DISPLAY_MODEL} -->\n\n")
+                  f"model: {used_model} -->\n\n")
         path.write_text(header + body, encoding="utf-8")
         return {"report_id": report_id, "summary": reason[:240],
                 "url": f"/api/ops/report/{report_id}"}
@@ -232,7 +266,7 @@ class OperationsCenter:
                                 path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"),
                             "url": f"/api/ops/report/{path.stem}"})
         return {"running": self.running, "interval_seconds": self.interval,
-                "model": _DISPLAY_MODEL, "entries": entries,
+                "model": _MODEL_CHAIN, "entries": entries,
                 "reports": reports}
 
 

@@ -31,6 +31,26 @@ class VideoGroupTests(unittest.TestCase):
 
 
 class OperationsTests(unittest.TestCase):
+    def test_monitor_falls_back_from_openrouter_to_terra(self):
+        with patch.object(operations.llm, "chat_json", side_effect=[
+                RuntimeError("openrouter unavailable"), {"severity": "ok"}]) as mocked:
+            result, model = operations._chat_json_with_fallback(
+                "inspect", max_tokens=650)
+        self.assertEqual(result, {"severity": "ok"})
+        self.assertEqual(model, "gpt-5.6-terra")
+        self.assertEqual(mocked.call_args_list[0].args[1], "openrouter-monitor")
+        self.assertEqual(mocked.call_args_list[1].args[1], "gpt-5.6-terra")
+        self.assertFalse(mocked.call_args_list[0].kwargs["allow_cli_fallback"])
+        self.assertFalse(mocked.call_args_list[1].kwargs["allow_cli_fallback"])
+
+    def test_monitor_uses_openrouter_without_calling_terra_when_healthy(self):
+        with patch.object(operations.llm, "chat",
+                          return_value="healthy") as mocked:
+            result, model = operations._chat_with_fallback("inspect")
+        self.assertEqual(result, "healthy")
+        self.assertEqual(model, "qwen/qwen3.7-flash")
+        mocked.assert_called_once()
+
     def test_openrouter_monitor_payload_uses_qwen_reasoning(self):
         spec = {
             "format": "openai", "model": "qwen/qwen3.7-flash",

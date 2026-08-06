@@ -116,7 +116,9 @@ Outline, hooks, and the final script are saved in the job folder
 
 ## Read-only AI operations center
 
-The right side of the studio contains a read-only Qwen 3.7 Flash observer via OpenRouter. Once per
+The right side of the studio contains a read-only Qwen 3.7 Flash observer via
+OpenRouter, with GPT-5.6 Terra as its explicit fallback. Neither provider can
+fall through to the local Claude CLI. Once per
 minute it receives a sanitized snapshot of queue states, recent job events,
 worker heartbeats/capacity, Drive readiness, encoder information, and free
 disk space. It writes a quiet update to `output/operations_log.jsonl`.

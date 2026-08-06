@@ -2151,7 +2151,7 @@ if __name__ == "__main__":
         OPS.start()
         atexit.register(OPS.stop)
         print(f"[ops] read-only {config.OPENROUTER_MONITOR_MODEL} monitor active "
-              "(60-second updates)")
+              "(GPT-5.6 Terra fallback, 60-second updates)")
     if config.FLEET_ROLE == "worker":
         FLEET_WORKER = fleet.FleetWorker(_run_fleet_worker_job,
                                          aborter=_abort_local_job)

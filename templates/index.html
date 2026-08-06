@@ -781,7 +781,7 @@
   <div class="ops-head">
     <span class="dot" id="opsDot"></span>
     <strong>System observer</strong>
-    <span class="badge" id="opsModel">Qwen 3.7 Flash</span>
+    <span class="badge" id="opsModel">Qwen → Terra fallback</span>
   </div>
   <div class="ops-policy">Read-only · checks every minute · every proposed change needs your approval · reports are saved locally and never sent.</div>
   <div id="opsLog" class="ops-log"><div class="hint">Waiting for the first system update…</div></div>
@@ -1469,7 +1469,7 @@ async function refreshOps() {
   try {
     const data = await (await fetch("/api/ops/status")).json();
     $("#opsDot").className = "dot " + (data.running ? "online" : "busy");
-    $("#opsModel").textContent = data.model || "qwen/qwen3.7-flash";
+    $("#opsModel").textContent = data.model || "Qwen → Terra fallback";
     const entries = (data.entries || []).slice().reverse();
     $("#opsLog").innerHTML = entries.length ? entries.map(e => `
       <div class="ops-entry ${escapeHtml(e.severity || "info")}">
