@@ -2191,6 +2191,16 @@ def _thumbnail_language(profile_name: str, inputs: dict) -> str:
         return "English"
 
 
+def _profile_locks_submitted_title(profile_name: str) -> bool:
+    """Whether thumbnail packaging must preserve the job's selected title."""
+    try:
+        profile = orchestrator.load_profile(profile_name)
+        return bool((profile.get("title") or {}).get("lock_submitted")
+                    or (profile.get("research") or {}).get("enabled"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 _TITLE_THUMBNAIL_GUIDE = """
 TITLE + THUMBNAIL PACKAGING RULES:
 - The emotional trigger is: "this can change my life; I need to watch now."
@@ -2217,11 +2227,7 @@ def _thumbnail_words_task(job_id: str) -> None:
         inputs = dict(job.get("inputs") or {})
     _, character_name = _thumbnail_character(profile_name, inputs)
     language = _thumbnail_language(profile_name, inputs)
-    try:
-        lock_title = bool((orchestrator.load_profile(profile_name).get(
-            "research") or {}).get("enabled"))
-    except Exception:  # noqa: BLE001
-        lock_title = False
+    lock_title = _profile_locks_submitted_title(profile_name)
     try:
         words = llm.chat_json(
             f"Act as a senior native-{language} YouTube packaging editor. "
@@ -2348,12 +2354,7 @@ def approve_thumbnail_words(job_id: str):
         if not job:
             return jsonify({"error": "unknown job"}), 404
         language = _thumbnail_language(job["profile"], job.get("inputs") or {})
-        try:
-            research_locked = bool((orchestrator.load_profile(job["profile"]).get(
-                "research") or {}).get("enabled"))
-        except Exception:  # noqa: BLE001
-            research_locked = False
-        if research_locked:
+        if _profile_locks_submitted_title(job["profile"]):
             localized_title = str(job.get("title") or localized_title).strip()
         job["publication_title"] = localized_title[:220]
         job["thumbnail"] = {

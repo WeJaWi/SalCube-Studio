@@ -251,6 +251,6 @@ def astrology_package(theme: str) -> dict:
 def build_package(profile_name: str, theme: str) -> dict:
     if profile_name == "reddit":
         return reddit_package(theme)
-    if profile_name == "astrology":
+    if profile_name == "astrology-search":
         return astrology_package(theme)
     raise RuntimeError(f"profile {profile_name} does not support research")

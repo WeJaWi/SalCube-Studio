@@ -2,7 +2,7 @@
 
 Formerly *Senior Health Studio*. Channel profiles still include Grandma Hannah & Matthias Richter.
 
-Five channel formats, one tool — pick the profile in the UI:
+Six channel formats, one tool — pick the profile in the UI:
 - **classic** — English/German long-form philosopher narrations in
   the cited author's own voice (default Joseph Murphy — change per video via
   "cited thinker(s)"). Classic cheap format: NO on-camera avatar, pure voice-over
@@ -22,10 +22,13 @@ Five channel formats, one tool — pick the profile in the UI:
   Reddit post. Enter a theme; Terra builds the search query, judges the
   retrieved posts, and presents exactly three truthful titles. The selected
   post becomes the factual spine of an anonymized 40k–70k narration.
-- **astrology** — ENGLISH, character-free symbolic astrology. Enter a theme;
-  Terra prepares a bounded research brief and exactly three titles. Unverified
-  transit/date claims are never invented; without verified dates the treatment
-  remains evergreen, reflective, and non-deterministic.
+- **astrology** — ENGLISH, character-free symbolic astrology. Enter the final
+  title you want; it is locked exactly as submitted and production starts with
+  no research/title-selection gate.
+- **astrology-search** — the researched variant. Enter a theme; Terra prepares
+  a bounded research brief and exactly three titles. Unverified transit/date
+  claims are never invented; without verified dates the treatment remains
+  evergreen, reflective, and non-deterministic.
 
 A local web app that turns a title into a complete Grandma Hannah
 senior-health video: Sonnet 5 writes an outline + 4 hooks, **you approve at
@@ -122,10 +125,11 @@ libx264 when no hardware encoder is present.
    only then is the image generated. Approve that image separately. The
    thumbnail gets its own 20-digit ID and remains visible/downloadable from
    the video job.
-   Reddit and Astrology add an earlier gate: Terra first researches the theme
-   and presents exactly three titles. The video enters the render queue only
-   after one title is selected, and that selected title remains locked through
-   thumbnail approval.
+   Reddit and Astrology Search add an earlier gate: Terra first researches the
+   theme and presents exactly three titles. The video enters the render queue
+   only after one title is selected, and that selected title remains locked
+   through thumbnail approval. Regular Astrology skips this gate and locks the
+   title entered in the form.
 6. When the Spotify CTA is enabled, choose either the standard localized
    card or the dedicated **GEISTMEISTER** card. The standard card uses timed
    windows; GEISTMEISTER stays visible for the entire video and also names
@@ -196,7 +200,7 @@ the remote size/checksum, and only then deletes the local deliverable. Drive
 files are private—both free and Patreon parts are served through this app's
 normal authenticated video route, never an "anyone with the link" share.
 
-For `reddit` and `astrology`, approving the final thumbnail also creates a
+For `reddit`, `astrology`, and `astrology-search`, approving the final thumbnail creates a
 one-page `{video-id}-title-thumbnail.docx` containing only the approved title
 and embedded thumbnail. It uploads to the same Drive folder; the Reddit source
 link and private research metadata are deliberately excluded.

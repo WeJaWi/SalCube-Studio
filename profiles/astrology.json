@@ -1,10 +1,11 @@
 {
   "name": "astrology",
-  "description": "English long-form symbolic astrology around one requested theme. Terra prepares a grounded research brief and exactly three titles before production. Pure voice-over B-roll; no host or character.",
+  "description": "English long-form symbolic astrology using the exact title you submit. No research or title-selection gate. Pure voice-over B-roll; no host or character.",
   "engine": "hannah",
   "channel_context": "an English long-form astrology and spiritual-reflection YouTube channel. Each video explores one clearly bounded astrological theme through symbolism, tradition, self-reflection, and practical journaling prompts while clearly avoiding scientific, medical, financial, or guaranteed predictive claims",
   "audience_line": "speaks to one spiritually curious viewer seeking meaning, timing, reflection, and a grounded way to think about change",
-  "research": {"enabled": true, "provider": "gpt-5.6-terra", "kind": "astrology_theme", "title_choices": 3},
+  "research": {"enabled": false, "kind": "direct_title"},
+  "title": {"lock_submitted": true},
   "drive_package": {"docx": true},
   "thumbnail": {"no_character": true, "display_name": "ASTROLOGY"},
   "video": {
@@ -36,7 +37,7 @@
   "voices": {"English": "elevenlabs_CwhRBWXzGAHq8TQ4Fs17"},
   "writing_sections": [
     {"name": "opening_window", "weight": 0.12, "hint": "Open with the theme's emotional relevance and a truthful curiosity gap. Never invent a rare date, transit, portal, or guaranteed event."},
-    {"name": "symbolic_foundation", "weight": 0.25, "hint": "Explain the relevant astrological symbols, archetypes, houses, signs, or planetary meanings from the supplied research brief. Distinguish tradition and interpretation from astronomy or science."},
+    {"name": "symbolic_foundation", "weight": 0.25, "hint": "Explain only the astrological symbols, archetypes, houses, signs, or planetary meanings directly relevant to the submitted title. Distinguish tradition and interpretation from astronomy or science."},
     {"name": "life_patterns", "weight": 0.27, "hint": "Explore how the theme may be used as a lens for relationships, work, identity, endings, beginnings, or inner change. Use possibilities and reflective questions, not deterministic predictions."},
     {"name": "practical_reflection", "weight": 0.23, "hint": "Offer grounded journaling, observation, conversation, or decision-review practices. Never advise stopping treatment, making investments, or taking high-stakes action because of astrology."},
     {"name": "close_block", "weight": 0.13, "hint": "Gather the theme into one memorable perspective, invite the viewer to share what resonated, and add a soft invitation to subscribe. {LIKE_SUBSCRIBE} End with calm possibility rather than guaranteed transformation."}
@@ -45,9 +46,9 @@
   "north_star": "Create wonder without misinformation. Astrology is presented as a symbolic reflective tradition and entertainment, never as proven causation or guaranteed prediction.",
   "rules": [
     "English only.",
-    "Use the supplied Terra research brief as the factual and conceptual boundary.",
+    "Use the exact submitted title as the topic boundary; do not silently replace it with a different premise.",
     "Never invent current astronomical positions, transit dates, historical quotations, scientific studies, or rarity claims.",
-    "If a date or transit is not explicitly verified in the research brief, keep the treatment evergreen.",
+    "If a date or transit is not explicitly supplied and independently known to be accurate, keep the treatment evergreen.",
     "Use language such as may, can symbolize, astrologers traditionally associate, or consider reflecting on; never will definitely happen.",
     "No medical, legal, financial, fertility, death, disaster, or relationship guarantees.",
     "Body is pure continuous English prose: no headings, labels, bullets, or stage directions."

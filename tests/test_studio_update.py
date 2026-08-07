@@ -77,6 +77,44 @@ class ResearchProfileTests(unittest.TestCase):
         self.assertEqual(job["video_group"], "profile")
         start.assert_called_once_with(job_id)
 
+    def test_direct_astrology_skips_research_and_keeps_submitted_title(self):
+        submitted = "The Three Zodiac Signs Entering a New Chapter"
+        inputs = app._build_inputs({"video_group": "small"}, submitted)
+        with patch.object(app.identity, "numeric_id",
+                          return_value="44444444444444444444"), \
+                patch.object(app, "_start_profile_research") as research_start, \
+                patch.object(app, "_start_thumbnail_words") as thumbnail_start, \
+                patch.object(app, "_persist_queue"):
+            job_id = app._enqueue_job(inputs, "astrology")
+        job = app.JOBS[job_id]
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["title"], submitted)
+        self.assertEqual(job["inputs"]["language"], "English")
+        self.assertGreaterEqual(job["inputs"]["length_chars"], 40000)
+        self.assertLessEqual(job["inputs"]["length_chars"], 70000)
+        research_start.assert_not_called()
+        thumbnail_start.assert_called_once_with(job_id)
+
+    def test_direct_astrology_thumbnail_cannot_rewrite_submitted_title(self):
+        job_id = "55555555555555555555"
+        submitted = "Your Moon Sign and the Patterns You Repeat"
+        app.JOBS[job_id] = {
+            "status": "queued", "step": "queued", "title": submitted,
+            "profile": "astrology", "inputs": {"language": "English"},
+            "log": [], "thumbnail": {"state": "generating_words"},
+        }
+        package = {
+            "localized_title": "Terra Tried to Replace the Title",
+            "main_text": "Notice the repeating pattern",
+            "red_word": "Moon Sign", "yellow_word": "Inner Cycle",
+            "name": "ASTROLOGY",
+        }
+        with patch.object(app.llm, "chat_json", return_value=package), \
+                patch.object(app, "_persist_queue"):
+            app._thumbnail_words_task(job_id)
+        self.assertEqual(
+            app.JOBS[job_id]["thumbnail"]["localized_title"], submitted)
+
     def test_title_approval_accepts_only_a_terra_candidate_and_queues_video(self):
         job_id = "22222222222222222222"
         job_dir = self.out / job_id
@@ -84,7 +122,7 @@ class ResearchProfileTests(unittest.TestCase):
         candidates = ["Title One", "Title Two", "Title Three"]
         app.JOBS[job_id] = {
             "status": "awaiting_title", "step": "title", "title": "theme",
-            "profile": "astrology", "inputs": {"title": "theme"}, "log": [],
+            "profile": "astrology-search", "inputs": {"title": "theme"}, "log": [],
             "title_options": {"state": "ready", "theme": "theme",
                               "candidates": candidates},
             "thumbnail": {"state": "waiting_for_title"},
