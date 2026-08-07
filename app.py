@@ -2178,7 +2178,12 @@ def _thumbnail_character(profile_name: str, inputs: dict) -> tuple[Path | None, 
 def _thumbnail_language(profile_name: str, inputs: dict) -> str:
     explicit = str(inputs.get("language") or "").strip()
     if explicit:
-        return explicit
+        aliases = {
+            "de": "German", "de-de": "German", "deutsch": "German",
+            "german": "German", "en": "English", "en-us": "English",
+            "en-gb": "English", "english": "English",
+        }
+        return aliases.get(explicit.casefold(), explicit)
     try:
         defaults = orchestrator.load_profile(profile_name).get("defaults", {})
         return str(defaults.get("language") or "English").strip()
@@ -2219,16 +2224,26 @@ def _thumbnail_words_task(job_id: str) -> None:
         lock_title = False
     try:
         words = llm.chat_json(
-            "Create one publication title and complementary YouTube thumbnail "
-            "wording for the supplied source title. Translate/rewrite every "
-            f"audience-facing word into {language}; proper names stay correct. "
-            "Do not change the actual topic or promise something the source "
-            "cannot support. Return ONLY JSON with: localized_title (short, "
-            "high-click title in the target language), main_text (3-8 punchy "
-            "thumbnail words that DO NOT repeat the title), red_word (1-2 "
-            "target-language words), yellow_word (1-2 target-language words), "
-            "and name. The name is the displayed person/teacher, not translated. "
-            "Avoid quotation marks and fake certainty. The owner approves these "
+            f"Act as a senior native-{language} YouTube packaging editor. "
+            "Silently draft at least six genuinely different title/thumbnail "
+            "packages, critique them for specificity, curiosity, readability, "
+            "and natural phrasing, then return only the strongest one. "
+            f"Every audience-facing word MUST be idiomatic {language}; English "
+            "is forbidden unless it is part of a proper person's name. Do not "
+            "translate word-for-word from the source. Write as a native editor. "
+            "The thumbnail must express a concrete second idea that complements "
+            "the title without repeating or paraphrasing it. Avoid generic filler "
+            "such as 'change your life', 'the power within', 'secret', or 'now' "
+            "unless the supplied topic specifically supports it. Never return "
+            "weak isolated modifiers such as 'old', 'new', or 'important' as a "
+            "box label. The main thumbnail line must be 3-6 words. Each colored "
+            "box must contain 1-3 meaningful words and the two boxes must add "
+            "useful context rather than splitting one ordinary phrase. Do not "
+            "change the topic or promise an outcome the source cannot support. "
+            "Return ONLY JSON with: localized_title (natural high-click title in "
+            f"{language}), main_text, red_word, yellow_word, and name. The name "
+            "is the displayed person/teacher and is not translated. Avoid "
+            "quotation marks and fake certainty. The owner approves the package "
             "before image generation.\n\n"
             f"{_TITLE_THUMBNAIL_GUIDE}\n\n"
             f"Source title: {title}\nTarget language: {language}\n"

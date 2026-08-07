@@ -318,7 +318,7 @@ class ThumbnailApprovalTests(unittest.TestCase):
 
     def test_word_package_uses_profile_language_and_trigger_guide(self):
         app.JOBS[self.job_id].update(
-            profile="matthias-richter", inputs={},
+            profile="matthias-richter", inputs={"language": "german"},
             title="Say this before sleep - Joseph Murphy",
             thumbnail={"state": "generating_words"})
         package = {
@@ -333,6 +333,8 @@ class ThumbnailApprovalTests(unittest.TestCase):
         prompt = mocked.call_args.args[0]
         self.assertIn("Target language: German", prompt)
         self.assertIn("MUST use different wording", prompt)
+        self.assertIn("Silently draft at least six", prompt)
+        self.assertIn("English is forbidden", prompt)
         state = app.JOBS[self.job_id]["thumbnail"]
         self.assertEqual(state["language"], "German")
         self.assertEqual(state["localized_title"], package["localized_title"])
