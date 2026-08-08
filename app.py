@@ -247,6 +247,7 @@ def _persist_queue() -> None:
                 "priority_at": j.get("priority_at"),
                 "updated_at": j.get("updated_at"),
                 "video_group": j.get("video_group"),
+                "local_only": bool(j.get("local_only")),
                 "research_attempt": j.get("research_attempt", 0),
                 "title_options": j.get("title_options"),
                 "package": j.get("package"),
@@ -409,6 +410,7 @@ def _restore_queue() -> None:
                 "priority_at": row.get("priority_at"),
                 "updated_at": row.get("updated_at") or row.get("created_at"),
                 "video_group": row.get("video_group") or inputs.get("video_group"),
+                "local_only": bool(row.get("local_only") or inputs.get("local_only")),
                 "research_attempt": int(row.get("research_attempt") or 0),
                 "title_options": (row.get("title_options")
                                   if isinstance(row.get("title_options"), dict)
@@ -622,7 +624,12 @@ def _fleet_dispatch_for(worker_id: str, free: int) -> list[dict]:
     with LOCK:
         if _active_slot_count() < config.max_concurrent_jobs():
             return []  # overflow policy: main keeps its own compute busy first
-        job_ids = _next_queued_ids(free)
+        # A same-ID retry may deliberately be pinned to main so an older
+        # terminal reporter on a worker cannot reclaim it and replay its
+        # stale error. Scan past pinned rows so they do not block dispatch of
+        # other eligible work.
+        job_ids = [jid for jid in _next_queued_ids(len(JOBS))
+                   if not JOBS[jid].get("local_only")][:free]
         dispatch = []
         for job_id in job_ids:
             job = JOBS[job_id]
@@ -1106,6 +1113,10 @@ def _build_inputs(data: dict, title: str) -> dict:
         "spotify_popup": bool(data.get("spotify_popup", False)),
         "spotify_popup_style": spotify_popup_style,
         "spotify_url": (data.get("spotify_url") or "").strip(),
+        # Operational retry hint, set by the controller rather than exposed
+        # as a normal creative parameter. Persisted so restarts keep the job
+        # on the machine that owns its cached assets.
+        "local_only": bool(data.get("local_only", False)),
     }
 
 
@@ -1174,6 +1185,7 @@ def _enqueue_job(inputs: dict, profile: str, *, resume: str = "") -> str:
             "chars": None,
             "est_beats": None,
             "video_group": inputs.get("video_group"),
+            "local_only": bool(inputs.get("local_only")),
             "research_attempt": 1 if needs_research else 0,
             "title_options": ({"state": "generating", "theme": title}
                               if needs_research else {}),
@@ -1614,7 +1626,8 @@ def dispatch_to_worker(job_id: str):
         except Exception as e:  # noqa: BLE001
             return jsonify({"error": f"profile snapshot failed: {e}"}), 500
         job.update(status="dispatched", step="fleet", dispatched_to=worker_id,
-                   dispatched_at=datetime.now().isoformat(timespec="seconds"))
+                   dispatched_at=datetime.now().isoformat(timespec="seconds"),
+                   local_only=False)
         spec = {"job_id": job_id, "inputs": job["inputs"],
                 "profile": job["profile"], "profile_data": profile_data}
     with _FLEET_LOCK:

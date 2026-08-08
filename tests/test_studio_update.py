@@ -340,6 +340,26 @@ class QueueRepairTests(unittest.TestCase):
         })
         self.assertEqual(app._active_slot_count(), 1)
 
+    def test_local_only_retry_is_not_claimed_by_fleet(self):
+        app.JOBS.update({
+            "local-retry": {
+                "status": "queued", "profile": "reddit", "inputs": {},
+                "local_only": True, "created_at": "2026-08-08T12:00:00",
+            },
+            "fleet-job": {
+                "status": "queued", "profile": "reddit", "inputs": {},
+                "created_at": "2026-08-08T12:01:00",
+            },
+            "local-running": {"status": "running"},
+            "local-running-2": {"status": "running"},
+        })
+        with patch.object(app.config, "FLEET_ROLE", "main"), \
+                patch.object(app.config, "max_concurrent_jobs", return_value=2), \
+                patch.object(app.orchestrator, "load_profile", return_value={}):
+            dispatch = app._fleet_dispatch_for("worker-one", 1)
+        self.assertEqual([row["job_id"] for row in dispatch], ["fleet-job"])
+        self.assertEqual(app.JOBS["local-retry"]["status"], "queued")
+
     def test_controller_restart_keeps_running_job_on_its_worker(self):
         with TemporaryDirectory() as tmp:
             state_file = Path(tmp) / "queue_state.json"

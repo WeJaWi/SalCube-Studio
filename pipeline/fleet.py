@@ -132,8 +132,16 @@ class FleetWorker:
             if not jid:
                 continue
             with self._lock:
-                if jid in self._jobs:  # idempotent retry from main
-                    continue
+                existing = self._jobs.get(jid)
+                if existing:
+                    # Repeated delivery while the job is still active is the
+                    # normal heartbeat acknowledgement path. A deliberate
+                    # same-ID retry after a terminal result is different: it
+                    # must get a fresh reporter/thread or the worker would
+                    # replay the old done/error snapshot forever.
+                    if existing.snapshot().get("status") in (
+                            "running", "awaiting_approval"):
+                        continue
                 reporter = FleetReporter(jid)
                 self._jobs[jid] = reporter
             threading.Thread(target=self._run, args=(spec, reporter), daemon=True,
