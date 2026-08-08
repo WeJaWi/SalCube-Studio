@@ -1393,7 +1393,8 @@ def start_render():
     if resume and job_ids:
         with LOCK:
             job = JOBS.get(job_ids[0])
-            if job is not None and job.get("status") == "queued":
+            needs_slot = job is not None and job.get("status") == "queued"
+            if needs_slot:
                 # "0:" ranks retries above preempted jobs ("1:"), which in
                 # turn rank above ordinary FIFO work.
                 job["priority_at"] = "0:" + datetime.now().isoformat(timespec="seconds")
@@ -1411,7 +1412,11 @@ def start_render():
                     continue
                 if age <= config.FLEET_STALE_SECONDS:
                     remote_free += max(0, int((w.get("capacity") or {}).get("free") or 0))
-        if free_now <= 0 and remote_free <= 0 and not config.queue_setting("queue_paused"):
+        # _enqueue_job() drains the queue before returning. If this retry is
+        # already running, it has its slot and must not preempt a different
+        # running retry merely because capacity is now full.
+        if (needs_slot and free_now <= 0 and remote_free <= 0
+                and not config.queue_setting("queue_paused")):
             _preempt_for(job_ids[0])
 
     _kick_queue()

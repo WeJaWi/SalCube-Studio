@@ -331,6 +331,30 @@ class QueueRepairTests(unittest.TestCase):
         self.assertEqual(app.JOBS["remote-job"]["progress_pct"], 72)
         kick.assert_called_once()
 
+    def test_started_manual_retry_does_not_preempt_another_job(self):
+        retry_id = "retry-job"
+        app.JOBS["other-job"] = {
+            "status": "running", "step": "script", "profile": "reddit",
+            "title": "Other", "inputs": {}, "log": [],
+        }
+
+        def start_retry(*_args, **_kwargs):
+            app.JOBS[retry_id] = {
+                "status": "running", "step": "outline", "profile": "reddit",
+                "title": "Retry", "inputs": {}, "log": [],
+                "est_chars": 50000, "video_group": "profile",
+            }
+            return retry_id
+
+        with patch.object(app, "_enqueue_job", side_effect=start_retry), \
+                patch.object(app, "_preempt_for") as preempt, \
+                patch.object(app.config, "max_concurrent_jobs", return_value=2):
+            response = self.client.post(
+                "/api/render", json={"resume_job": retry_id, "profile": "reddit"})
+        self.assertEqual(response.status_code, 200)
+        preempt.assert_not_called()
+        self.assertEqual(app.JOBS["other-job"]["status"], "running")
+
 
 class OperationsTests(unittest.TestCase):
     def test_monitor_falls_back_from_openrouter_to_terra(self):
