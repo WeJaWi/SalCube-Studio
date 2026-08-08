@@ -1,10 +1,11 @@
 {
   "name": "reddit",
-  "description": "English long-form adaptation of one real public Reddit post. Terra researches and selects the source, then offers exactly three titles before production. Pure voice-over B-roll; no host or character.",
+  "description": "English long-form original Reddit-style story using the exact title you submit. No search, research, or title-selection gate. Pure voice-over B-roll; no host or character.",
   "engine": "hannah",
-  "channel_context": "an English long-form human-story YouTube channel built around one anonymized public Reddit account per video. Each episode preserves the source story's real event order and outcome, then refines it into immersive, emotionally clear narration without inventing new facts",
+  "channel_context": "an English long-form human-story YouTube channel built around original first-person Reddit-style confessions. Each episode develops the exact submitted title into a coherent, immersive story with clear chronology, believable consequences, and an emotionally satisfying outcome",
   "audience_line": "speaks to one viewer who enjoys relationship conflict, family drama, moral dilemmas, consequences, and satisfying real-life turning points",
-  "research": {"enabled": true, "provider": "gpt-5.6-terra", "kind": "reddit_single_post", "title_choices": 3},
+  "research": {"enabled": false, "kind": "direct_title"},
+  "title": {"lock_submitted": true},
   "drive_package": {"docx": true},
   "thumbnail": {"no_character": true, "display_name": "REDDIT STORIES"},
   "video": {
@@ -23,7 +24,7 @@
   "defaults": {"language": "English", "length_chars": 55000, "length_chars_min": 40000, "length_chars_max": 70000},
   "host": {
     "enabled": false,
-    "persona": "A calm, observant storyteller who reconstructs one anonymized first-person account with empathy and narrative precision. Never impersonate the original poster and never mention production or AI.",
+    "persona": "A calm, observant storyteller who tells one original first-person account with empathy and narrative precision. Never claim the story was researched or verified, and never mention production or AI.",
     "register": "Conversational, emotionally intelligent, suspenseful without melodrama. Concrete scenes, clean chronology, restrained moral reflection."
   },
   "ai_disclosure": "",
@@ -34,27 +35,28 @@
   "music": {"enabled": true, "tracks": "auto", "minutes_per_track": 18, "min_tracks": 2, "max_tracks": 6},
   "voices": {"English": "elevenlabs_CwhRBWXzGAHq8TQ4Fs17"},
   "writing_sections": [
-    {"name": "story_open", "weight": 0.12, "hint": "Open inside the real conflict with a precise scene and immediate stakes. Establish the narrator's situation, relationships, and what changed. Do not add events absent from the supplied source."},
-    {"name": "story_build", "weight": 0.34, "hint": "Reconstruct the source chronology in immersive continuous prose. Deepen only safe connective tissue: setting, transitions, emotional processing, and why each documented choice mattered. Preserve all factual boundaries."},
-    {"name": "turning_point", "weight": 0.23, "hint": "Slow down around the source story's decisive discovery, confrontation, decision, or consequence. Make causality easy to follow. Never manufacture evidence, dialogue, crimes, or outcomes."},
-    {"name": "aftermath", "weight": 0.18, "hint": "Deliver the real outcome or latest known state, including uncertainty when the post leaves something unresolved. Reflect on consequences without diagnosing anyone or presenting speculation as fact."},
-    {"name": "close_block", "weight": 0.13, "hint": "Draw out the central human question and invite the viewer to say what they would have done. {LIKE_SUBSCRIBE} End with a concise emotional afterthought, not a fabricated sequel tease."}
+    {"name": "story_open", "weight": 0.12, "hint": "Open inside the title's central conflict with a precise scene and immediate stakes. Establish the narrator's situation, relationships, and the event that changed everything."},
+    {"name": "story_build", "weight": 0.34, "hint": "Develop a coherent chronology in immersive continuous prose. Add specific settings, decisions, emotional processing, and escalating consequences without padding or contradictions."},
+    {"name": "turning_point", "weight": 0.23, "hint": "Slow down around the decisive discovery, confrontation, decision, or consequence promised by the title. Make causality and character motivations easy to follow."},
+    {"name": "aftermath", "weight": 0.18, "hint": "Deliver a believable outcome and show the emotional and practical consequences. Avoid implausible punishment, diagnoses, or legal claims used only for shock value."},
+    {"name": "close_block", "weight": 0.13, "hint": "Draw out the central human question and invite the viewer to say what they would have done. {LIKE_SUBSCRIBE} End with a concise emotional afterthought."}
   ],
   "cta_lines": {"like_subscribe": "Ask for a comment on the central moral choice, then softly invite a like or subscription only if the story was worth hearing."},
-  "north_star": "One real post, faithfully transformed. Narrative polish may clarify and deepen the experience, but it may never create a more dramatic set of facts than the source contains.",
+  "north_star": "One exact submitted title, developed into one internally consistent original story. Earn attention through believable escalation and consequence rather than false claims of verification.",
   "rules": [
-    "Use only the supplied source story and research brief as the factual spine.",
-    "Anonymize usernames, exact locations, employers, schools, and other identifying details.",
-    "Never mention Reddit, upvotes, comments, usernames, sourcing, or the adaptation process in the spoken narration.",
-    "Never invent dialogue as a verbatim quotation. Paraphrase exchanges unless exact wording appears in the source.",
-    "Never add accusations, crimes, diagnoses, evidence, revenge, legal outcomes, reconciliation, or punishment absent from the source.",
+    "Use the exact submitted title as the premise and do not silently replace it with a different story.",
+    "Create fictional names, locations, employers, schools, and other identifying details; do not portray identifiable real private people.",
+    "Never mention Reddit, upvotes, comments, usernames, sourcing, research, or the writing process in the spoken narration.",
+    "Keep dialogue natural and limited; do not use long quotation-heavy scenes as padding.",
+    "Do not claim the story is verified, documented, or based on a specific real person.",
+    "Avoid unsupported medical diagnoses, graphic crimes, or implausible legal and revenge outcomes used only for shock value.",
     "Do not pad by repeating events. Reach the target through scene clarity, emotional reasoning, consequence analysis, and smooth chronology.",
     "Body is pure continuous English prose: no headings, labels, bullets, stage directions, or source links."
   ],
   "hook_types": {
-    "bold_statement": "Begin with the most consequential true fact or decision in the source, withholding only the immediate explanation.",
-    "question": "Ask the viewer the exact moral question at the center of this story, then enter the first real scene.",
-    "short_story": "Open on a concrete moment from the source immediately before everything changes.",
-    "pattern_break": "Start with the assumption most people would make, then reveal the true source detail that overturns it."
+    "bold_statement": "Begin with the most consequential decision in the story, withholding only the immediate explanation.",
+    "question": "Ask the viewer the exact moral question at the center of the submitted title, then enter the opening scene.",
+    "short_story": "Open on a concrete moment immediately before everything changes.",
+    "pattern_break": "Start with the assumption most people would make, then reveal the story detail that overturns it."
   }
 }

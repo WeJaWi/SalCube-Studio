@@ -61,21 +61,25 @@ class ResearchProfileTests(unittest.TestCase):
         self.output_patch.stop()
         self.tmp.cleanup()
 
-    def test_reddit_enqueue_enforces_profile_range_and_waits_for_titles(self):
-        inputs = app._build_inputs({"video_group": "small"}, "family betrayal")
+    def test_direct_reddit_skips_research_and_keeps_submitted_title(self):
+        submitted = "My Family Cut Me Off Over Money — Then I Learned Why"
+        inputs = app._build_inputs({"video_group": "small"}, submitted)
         with patch.object(app.identity, "numeric_id",
                           return_value="11111111111111111111"), \
-                patch.object(app, "_start_profile_research") as start, \
+                patch.object(app, "_start_profile_research") as research_start, \
+                patch.object(app, "_start_thumbnail_words") as thumbnail_start, \
                 patch.object(app, "_persist_queue"):
             job_id = app._enqueue_job(inputs, "reddit")
         job = app.JOBS[job_id]
-        self.assertEqual(job["status"], "researching")
-        self.assertEqual(job["thumbnail"]["state"], "waiting_for_title")
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["title"], submitted)
+        self.assertEqual(job["thumbnail"]["state"], "generating_words")
         self.assertEqual(job["inputs"]["language"], "English")
         self.assertGreaterEqual(job["inputs"]["length_chars"], 40000)
         self.assertLessEqual(job["inputs"]["length_chars"], 70000)
         self.assertEqual(job["video_group"], "profile")
-        start.assert_called_once_with(job_id)
+        research_start.assert_not_called()
+        thumbnail_start.assert_called_once_with(job_id)
 
     def test_direct_astrology_skips_research_and_keeps_submitted_title(self):
         submitted = "The Three Zodiac Signs Entering a New Chapter"
@@ -145,7 +149,7 @@ class ResearchProfileTests(unittest.TestCase):
         thumb.assert_called_once_with(job_id)
         kick.assert_called_once()
 
-    def test_research_profile_thumbnail_keeps_selected_title(self):
+    def test_direct_reddit_thumbnail_cannot_rewrite_submitted_title(self):
         job_id = "33333333333333333333"
         app.JOBS[job_id] = {
             "status": "queued", "step": "queued", "title": "Chosen Title",

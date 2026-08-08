@@ -18,10 +18,10 @@ Six channel formats, one tool — pick the profile in the UI:
   self-introduction after the hook, verbatim e-book blocks, honest
   buried-secret framing (no fabricated studies, no conspiracies). His HeyGen
   character and ai33 voice ("Matthias") are wired into the profile.
-- **reddit** — ENGLISH, character-free long-form adaptation of one real public
-  Reddit post. Enter a theme; Terra builds the search query, judges the
-  retrieved posts, and presents exactly three truthful titles. The selected
-  post becomes the factual spine of an anonymized 40k–70k narration.
+- **reddit** — ENGLISH, character-free original Reddit-style story. Enter the
+  final title you want; it is locked exactly as submitted and production starts
+  immediately with no web search, research, or title-selection gate. Stories
+  remain 40k–70k characters.
 - **astrology** — ENGLISH, character-free symbolic astrology. Enter the final
   title you want; it is locked exactly as submitted and production starts with
   no research/title-selection gate.
@@ -125,11 +125,10 @@ libx264 when no hardware encoder is present.
    only then is the image generated. Approve that image separately. The
    thumbnail gets its own 20-digit ID and remains visible/downloadable from
    the video job.
-   Reddit and Astrology Search add an earlier gate: Terra first researches the
-   theme and presents exactly three titles. The video enters the render queue
-   only after one title is selected, and that selected title remains locked
-   through thumbnail approval. Regular Astrology skips this gate and locks the
-   title entered in the form.
+   Astrology Search adds an earlier gate: Terra first researches the theme and
+   presents exactly three titles. The video enters the render queue only after
+   one title is selected. Regular Astrology and Reddit skip this gate and lock
+   the exact title entered in the form through thumbnail approval.
 6. When the Spotify CTA is enabled, choose either the standard localized
    card or the dedicated **GEISTMEISTER** card. The standard card uses timed
    windows; GEISTMEISTER stays visible for the entire video and also names
@@ -202,8 +201,8 @@ normal authenticated video route, never an "anyone with the link" share.
 
 For `reddit`, `astrology`, and `astrology-search`, approving the final thumbnail creates a
 one-page `{video-id}-title-thumbnail.docx` containing only the approved title
-and embedded thumbnail. It uploads to the same Drive folder; the Reddit source
-link and private research metadata are deliberately excluded.
+and embedded thumbnail. It uploads to the same Drive folder; no research or
+source metadata is included.
 
 If a render completed before authorization or an upload temporarily fails,
 the local video is retained. Retry it with:
