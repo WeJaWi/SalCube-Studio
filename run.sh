@@ -24,4 +24,10 @@ export PORT="${PORT:-5066}"
 echo ""
 echo "  ▶  Dmiqwi  →  http://127.0.0.1:${PORT}   (keep this terminal open)"
 echo ""
-python app.py
+if [ "$(uname -s)" = "Darwin" ] && command -v caffeinate >/dev/null 2>&1; then
+  # Multi-hour renders must not pause because the MacBook enters idle sleep.
+  # Keep the system and disks awake while the controller is alive without
+  # forcing the display to remain on.
+  exec caffeinate -im python app.py
+fi
+exec python app.py

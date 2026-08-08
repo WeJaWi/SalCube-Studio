@@ -243,6 +243,18 @@ class SpotifyPopupTests(unittest.TestCase):
             321.5, requested, full_duration=False), requested)
 
 
+class MacRenderOptimizationTests(unittest.TestCase):
+    def test_videotoolbox_uses_measured_m4_speed_hints(self):
+        with patch.object(render.config, "gpu_encoder",
+                          return_value="h264_videotoolbox"):
+            args = render._encode_args(crf=20, gpu=True)
+        self.assertEqual(args[0:2], ["-c:v", "h264_videotoolbox"])
+        self.assertIn("-realtime", args)
+        self.assertIn("-prio_speed", args)
+        self.assertIn("-power_efficient", args)
+        self.assertEqual(args[args.index("-q:v") + 1], "65")
+
+
 class OperationsTests(unittest.TestCase):
     def test_monitor_falls_back_from_openrouter_to_terra(self):
         with patch.object(operations.llm, "chat_json", side_effect=[

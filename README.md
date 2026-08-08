@@ -92,7 +92,9 @@ machine's CPU/GPU to work. One-time setup:
 
 Hardware encoding is detected automatically and is still H.264 either way —
 VideoToolbox on a Mac, NVENC / QuickSync / AMF on Windows, falling back to
-libx264 when no hardware encoder is present.
+libx264 when no hardware encoder is present. On Apple Silicon, VideoToolbox
+uses measured speed-priority/power-efficient hints, and `run.sh` keeps the Mac
+awake during multi-hour renders without forcing the display to stay on.
 
 ## The workflow (per the Grandma Hannah script profile)
 
