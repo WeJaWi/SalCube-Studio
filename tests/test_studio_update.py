@@ -425,6 +425,37 @@ class QueueRepairTests(unittest.TestCase):
         preempt.assert_not_called()
         self.assertEqual(app.JOBS["other-job"]["status"], "running")
 
+    def test_local_only_retry_preempts_even_when_fleet_has_space(self):
+        retry_id = "local-retry"
+        app.JOBS["other-job"] = {
+            "status": "running", "step": "broll", "profile": "reddit",
+            "title": "Other", "inputs": {}, "log": [],
+        }
+        app.FLEET_WORKERS["worker-one"] = {
+            "last_seen": "2099-01-01T00:00:00",
+            "capacity": {"free": 1}, "approvals": [], "dispatch": {},
+        }
+
+        def queue_retry(inputs, *_args, **_kwargs):
+            app.JOBS[retry_id] = {
+                "status": "queued", "step": "queued", "profile": "reddit",
+                "title": "Retry", "inputs": inputs, "log": [],
+                "local_only": True, "est_chars": 50000,
+                "video_group": "profile",
+            }
+            return retry_id
+
+        with patch.object(app, "_enqueue_job", side_effect=queue_retry), \
+                patch.object(app, "_preempt_for", return_value=True) as preempt, \
+                patch.object(app.config, "max_concurrent_jobs", return_value=1):
+            response = self.client.post(
+                "/api/render",
+                json={"resume_job": retry_id, "profile": "reddit",
+                      "local_only": True},
+            )
+        self.assertEqual(response.status_code, 200)
+        preempt.assert_called_once_with(retry_id)
+
 
 class OperationsTests(unittest.TestCase):
     def test_monitor_falls_back_from_openrouter_to_terra(self):

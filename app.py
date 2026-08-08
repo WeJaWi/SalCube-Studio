@@ -1411,6 +1411,7 @@ def start_render():
         with LOCK:
             job = JOBS.get(job_ids[0])
             needs_slot = job is not None and job.get("status") == "queued"
+            retry_is_local_only = bool(job and job.get("local_only"))
             if needs_slot:
                 # "0:" ranks retries above preempted jobs ("1:"), which in
                 # turn rank above ordinary FIFO work.
@@ -1432,7 +1433,8 @@ def start_render():
         # _enqueue_job() drains the queue before returning. If this retry is
         # already running, it has its slot and must not preempt a different
         # running retry merely because capacity is now full.
-        if (needs_slot and free_now <= 0 and remote_free <= 0
+        if (needs_slot and free_now <= 0
+                and (retry_is_local_only or remote_free <= 0)
                 and not config.queue_setting("queue_paused")):
             _preempt_for(job_ids[0])
 
