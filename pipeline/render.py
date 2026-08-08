@@ -122,6 +122,21 @@ def probe_duration(path: Path) -> float:
         return 0.0
 
 
+def is_valid_video(path: Path, min_duration: float = 1.0) -> bool:
+    """True only for a finalized, probeable video container.
+
+    FFmpeg creates its output path before writing the MP4 ``moov`` atom. If
+    a watchdog or power loss interrupts final assembly, ``Path.exists()`` is
+    therefore not evidence that a deliverable exists.  Centralize the check
+    so restart recovery and Drive upload never accept a partial container.
+    """
+    try:
+        return (path.is_file() and path.stat().st_size > 10_000
+                and probe_duration(path) >= float(min_duration))
+    except OSError:
+        return False
+
+
 def probe_video_size(path: Path) -> Tuple[int, int, float]:
     """Return (width, height, fps) for the first video stream."""
     try:
@@ -1036,34 +1051,63 @@ def crossfade_concat(clips: List[Path], music: Optional[Path], out: Path,
     the crossfade consumes padding — never narration. Long videos assemble
     hierarchically in groups of MAX_XFADE_INPUTS.
     """
+    if not clips:
+        raise ValueError("crossfade_concat requires at least one clip")
     if len(clips) <= MAX_XFADE_INPUTS:
         _xfade_chain(clips, music, out, trans_seconds, trans_types, music_volume,
-                    gpu=gpu)
+                     gpu=gpu)
         return
 
     workdir = workdir or out.parent
-    groups = [clips[i:i + MAX_XFADE_INPUTS]
-              for i in range(0, len(clips), MAX_XFADE_INPUTS)]
-    # a trailing single clip can't crossfade with itself — fold it back
-    if len(groups[-1]) == 1:
-        groups[-2].extend(groups.pop())
+    # Each tuple tracks the inclusive/exclusive range of original clips it
+    # represents. That lets every hierarchy level use the intended transition
+    # type at its real boundary rather than restarting/rotating the pattern.
+    segments: List[Tuple[Path, int, int]] = [
+        (clip, i, i + 1) for i, clip in enumerate(clips)
+    ]
+    intermediates: List[Path] = []
+    level = 0
+    while len(segments) > MAX_XFADE_INPUTS:
+        groups = [segments[i:i + MAX_XFADE_INPUTS]
+                  for i in range(0, len(segments), MAX_XFADE_INPUTS)]
+        reduced: List[Tuple[Path, int, int]] = []
+        for gi, group in enumerate(groups):
+            # Never fold a trailing singleton into a full group: that was the
+            # old path that silently created 11- or 16-input filter graphs.
+            if len(group) == 1:
+                reduced.append(group[0])
+                continue
+            log(f"  transition level {level + 1}, group {gi + 1}/{len(groups)} "
+                f"({len(group)} segments)")
+            # Keep first-level names compatible with existing cached jobs, so
+            # a failed final assembly can resume without rebuilding hours of
+            # already-completed transition groups.
+            inter = (workdir / f"xseg_{gi:02d}.mp4" if level == 0
+                     else workdir / f"xseg_l{level}_{gi:02d}.mp4")
+            exact_types = [
+                trans_types[(group[i][2] - 1) % len(trans_types)]
+                for i in range(len(group) - 1)
+            ]
+            if is_valid_video(inter):
+                log(f"  reusing cached {inter.name}")
+            else:
+                inter.unlink(missing_ok=True)
+                _xfade_chain([item[0] for item in group], None, inter,
+                             trans_seconds, exact_types, crf=18, gpu=gpu)
+            intermediates.append(inter)
+            reduced.append((inter, group[0][1], group[-1][2]))
+        segments = reduced
+        level += 1
 
-    inters: List[Path] = []
-    ti = 0
-    for gi, g in enumerate(groups):
-        log(f"  transition group {gi + 1}/{len(groups)} ({len(g)} clips)")
-        inter = workdir / f"xseg_{gi:02d}.mp4"
-        rotated = trans_types[ti % len(trans_types):] + trans_types[:ti % len(trans_types)]
-        # near-lossless intermediates: they get re-encoded once more below
-        _xfade_chain(g, None, inter, trans_seconds, rotated, crf=18, gpu=gpu)
-        ti += len(g) - 1
-        inters.append(inter)
-
-    log(f"  final assembly of {len(inters)} segments + music bed")
-    rotated = trans_types[ti % len(trans_types):] + trans_types[:ti % len(trans_types)]
-    _xfade_chain(inters, music, out, trans_seconds, rotated, music_volume, gpu=gpu)
-    for p in inters:
-        p.unlink(missing_ok=True)
+    log(f"  final assembly of {len(segments)} bounded segments + music bed")
+    final_types = [
+        trans_types[(segments[i][2] - 1) % len(trans_types)]
+        for i in range(len(segments) - 1)
+    ] or trans_types
+    _xfade_chain([item[0] for item in segments], music, out, trans_seconds,
+                 final_types, music_volume, gpu=gpu)
+    for path in intermediates:
+        path.unlink(missing_ok=True)
 
 
 def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],

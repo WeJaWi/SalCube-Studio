@@ -254,6 +254,34 @@ class MacRenderOptimizationTests(unittest.TestCase):
         self.assertIn("-power_efficient", args)
         self.assertEqual(args[args.index("-q:v") + 1], "65")
 
+    def test_partial_mp4_is_not_a_valid_deliverable(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "partial.mp4"
+            path.write_bytes(b"x" * 20_000)
+            with patch.object(render, "probe_duration", return_value=0):
+                self.assertFalse(render.is_valid_video(path))
+            with patch.object(render, "probe_duration", return_value=12.5):
+                self.assertTrue(render.is_valid_video(path))
+
+    def test_hierarchical_crossfade_never_exceeds_input_bound(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clips = [root / f"beat_{i:03d}.mp4" for i in range(156)]
+            calls = []
+
+            def record(group, _music, out, *_args, **_kwargs):
+                calls.append(len(group))
+                out.write_bytes(b"x" * 20_000)
+
+            with patch.object(render, "_xfade_chain", side_effect=record), \
+                    patch.object(render, "is_valid_video", return_value=False):
+                render.crossfade_concat(
+                    clips, None, root / "final.mp4", 0.5,
+                    ["fade", "smoothleft"], workdir=root)
+        self.assertTrue(calls)
+        self.assertLessEqual(max(calls), render.MAX_XFADE_INPUTS)
+        self.assertEqual(calls[-1], 2)
+
 
 class QueueRepairTests(unittest.TestCase):
     def setUp(self):
@@ -330,6 +358,28 @@ class QueueRepairTests(unittest.TestCase):
         self.assertEqual(app.JOBS["remote-job"]["dispatched_to"], "worker-one")
         self.assertEqual(app.JOBS["remote-job"]["progress_pct"], 72)
         kick.assert_called_once()
+
+    def test_controller_does_not_restore_corrupt_final_as_done(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job_dir = root / "broken-job"
+            job_dir.mkdir()
+            (job_dir / "final.mp4").write_bytes(b"partial container")
+            state_file = root / "queue_state.json"
+            state_file.write_text(json.dumps({"version": 1, "jobs": [{
+                "job_id": "broken-job", "status": "error", "step": "error",
+                "title": "Broken", "profile": "reddit", "inputs": {},
+                "created_at": "2026-08-08T12:00:00", "progress_pct": 93,
+                "error": "final assembly failed", "log": [],
+            }]}))
+            with patch.object(app, "QUEUE_STATE_FILE", state_file), \
+                    patch.object(app.config, "OUTPUT_DIR", root), \
+                    patch.object(app.video_render, "is_valid_video", return_value=False), \
+                    patch.object(app, "_persist_queue"), \
+                    patch.object(app, "_kick_queue"):
+                app._restore_queue()
+        self.assertEqual(app.JOBS["broken-job"]["status"], "error")
+        self.assertEqual(app.JOBS["broken-job"]["error"], "final assembly failed")
 
     def test_started_manual_retry_does_not_preempt_another_job(self):
         retry_id = "retry-job"

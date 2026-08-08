@@ -15,8 +15,8 @@ from flask import (Flask, Response, g, jsonify, make_response, redirect,
                    render_template, request, send_file, abort)
 
 from pipeline import (animation, cancel, config, delivery_doc, fleet, identity,
-                      jobs, llm, operations, orchestrator, research, scheduler,
-                      stats, storage, thumbnail)
+                      jobs, llm, operations, orchestrator, render as video_render,
+                      research, scheduler, stats, storage, thumbnail)
 
 app = Flask(__name__)
 
@@ -308,7 +308,8 @@ def _restore_queue() -> None:
             final = config.OUTPUT_DIR / jid / "final.mp4"
             part1 = config.OUTPUT_DIR / jid / "final_part1.mp4"
             drive = row.get("drive") if isinstance(row.get("drive"), dict) else {}
-            has_local_deliverable = final.exists() or part1.exists()
+            has_local_deliverable = (video_render.is_valid_video(final)
+                                     or video_render.is_valid_video(part1))
             drive_complete = drive.get("state") == "uploaded"
             # Threads die with the process — any in-flight job must re-queue
             # unless the final video is already on disk.
@@ -655,11 +656,12 @@ def _drive_deliverables(job_dir: Path) -> list[tuple[str, Path]]:
     """Return the real deliverables, never final.mp4's Patreon duplicate."""
     part1 = job_dir / "final_part1.mp4"
     part2 = job_dir / "final_part2.mp4"
-    if part1.exists() or part2.exists():
+    if (video_render.is_valid_video(part1)
+            or video_render.is_valid_video(part2)):
         return [(name, path) for name, path in (("part1", part1), ("part2", part2))
-                if path.exists()]
+                if video_render.is_valid_video(path)]
     final = job_dir / "final.mp4"
-    return [("final", final)] if final.exists() else []
+    return [("final", final)] if video_render.is_valid_video(final) else []
 
 
 def _profile_wants_docx(profile_name: str) -> bool:
@@ -954,6 +956,9 @@ def _run_job(job_id: str, inputs: dict, profile: str, *,
         out = orchestrator.run_pipeline(inputs, profile, job_dir, progress,
                                         gate, voice_gate, beat_progress,
                                         on_planned, profile_data)
+        if not video_render.is_valid_video(out):
+            raise RuntimeError(
+                f"render did not produce a valid playable video: {out.name}")
         with LOCK:
             JOBS[job_id]["status"] = "uploading"
             JOBS[job_id]["step"] = "drive"
@@ -1859,9 +1864,9 @@ def status(job_id: str):
     # Surface which final files exist (Patreon split → two halves)
     job_dir = config.OUTPUT_DIR / job_id
     payload["videos"] = {
-        "final": (job_dir / "final.mp4").exists(),
-        "part1": (job_dir / "final_part1.mp4").exists(),
-        "part2": (job_dir / "final_part2.mp4").exists(),
+        "final": video_render.is_valid_video(job_dir / "final.mp4"),
+        "part1": video_render.is_valid_video(job_dir / "final_part1.mp4"),
+        "part2": video_render.is_valid_video(job_dir / "final_part2.mp4"),
     }
     cut_meta = job_dir / "patreon_cut.json"
     if cut_meta.exists():
