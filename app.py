@@ -191,7 +191,12 @@ def _profile_theme_defaults() -> dict:
 
 
 def _active_slot_count() -> int:
-    return sum(1 for j in JOBS.values() if j.get("status") in _SLOT_STATUSES)
+    # A render running on a fleet worker consumes that worker's capacity,
+    # not one of this controller Mac's local slots. Counting remote work here
+    # left the Mac idle whenever Windows had MAX_CONCURRENT_JOBS jobs active.
+    return sum(1 for j in JOBS.values()
+               if j.get("status") in _SLOT_STATUSES
+               and not j.get("dispatched_to"))
 
 
 def _next_queued_ids(n: int) -> list[str]:
@@ -334,6 +339,21 @@ def _restore_queue() -> None:
                 step = "title"
                 progress_pct = 0
                 log = list(row.get("log") or [])
+            elif (row.get("dispatched_to")
+                  and st in ("running", "awaiting_approval", "dispatched")):
+                # The process is still alive on another machine when only
+                # the controller restarts. Keep ownership remote and wait
+                # for its next heartbeat instead of accidentally starting a
+                # duplicate render on this Mac.
+                st = "dispatched"
+                step = "fleet"
+                progress_pct = row.get("progress_pct", 0)
+                log = list(row.get("log") or [])
+                log.append({
+                    "t": datetime.now().strftime("%H:%M:%S"),
+                    "step": "fleet",
+                    "message": "Controller restarted — waiting for the assigned worker",
+                })
             elif st in ("running", "awaiting_approval", "queued", "retry_wait"):
                 # retry_wait's sleeping timer thread died with the process,
                 # so it would otherwise sit in that state forever — fold it
@@ -1486,6 +1506,12 @@ def fleet_heartbeat():
             job["step"] = str(report.get("step") or state)
             job["updated_at"] = now.isoformat(timespec="seconds")
             job["progress_pct"] = max(job.get("progress_pct", 0), int(report.get("progress_pct") or 0))
+            # A fleet job may recover after an earlier provider failure and
+            # continue from its cached assets.  Do not keep presenting that
+            # old failure (or feeding it to the monitor) once the worker has
+            # reported a healthy state again.
+            if state != "error":
+                job.pop("error", None)
             if state == "awaiting_approval" and isinstance(report.get("awaiting"), dict):
                 job["awaiting"] = report["awaiting"]
             if isinstance(report.get("drive"), dict):
@@ -1667,6 +1693,11 @@ def api_jobs():
         if not _allowed_profile(j.get("profile", "")):
             continue
         st = j.get("status")
+        # Removed jobs are deliberately excluded from persistence and from
+        # the live/recent library immediately; otherwise they reappear as
+        # misleading recent rows until the next restart.
+        if st == "cancelled":
+            continue
         row = _item(jid, j)
         if st in _ACTIVE:
             active.append(row)
@@ -1681,16 +1712,21 @@ def api_jobs():
 
 @app.route("/api/queue/<job_id>", methods=["DELETE"])
 def cancel_queued(job_id: str):
-    """Remove a job that has not entered video production yet."""
+    """Remove any job that is not actively running.
+
+    Cached files are retained on disk, so this is a recoverable library/queue
+    removal rather than destructive output deletion.
+    """
     if not _allowed_profile(_job_profile(job_id) or ""):
         abort(403)
     with LOCK:
         job = JOBS.get(job_id)
         if not job:
             return jsonify({"error": "unknown job"}), 404
-        if job.get("status") not in ("researching", "awaiting_title", "queued"):
+        if job.get("status") not in (
+                "researching", "awaiting_title", "queued", "paused", "error"):
             return jsonify({
-                "error": f"can only cancel pre-production jobs (status={job.get('status')})"
+                "error": f"can only remove inactive jobs (status={job.get('status')})"
             }), 409
         job["status"] = "cancelled"
         job["step"] = "cancelled"

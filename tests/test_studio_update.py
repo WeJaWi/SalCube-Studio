@@ -255,6 +255,83 @@ class MacRenderOptimizationTests(unittest.TestCase):
         self.assertEqual(args[args.index("-q:v") + 1], "65")
 
 
+class QueueRepairTests(unittest.TestCase):
+    def setUp(self):
+        self.old_access = app.ACCESS
+        app.ACCESS = []
+        app.JOBS.clear()
+        self.client = app.app.test_client()
+
+    def tearDown(self):
+        app.JOBS.clear()
+        app.FLEET_WORKERS.clear()
+        app.ACCESS = self.old_access
+
+    def test_removed_job_disappears_and_is_not_persisted(self):
+        job_id = "removed-job"
+        app.JOBS[job_id] = {
+            "status": "error", "step": "error", "title": "Old failure",
+            "profile": "reddit", "inputs": {}, "log": [],
+        }
+        with patch.object(app, "_persist_queue") as persist:
+            response = self.client.delete(f"/api/queue/{job_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(app.JOBS[job_id]["status"], "cancelled")
+        persist.assert_called_once()
+        rows = self.client.get("/api/jobs").get_json()
+        self.assertNotIn(job_id, {row["job_id"] for row in rows})
+
+    def test_healthy_fleet_report_clears_stale_job_error(self):
+        job_id = "recovered-job"
+        worker_id = "worker-one"
+        app.JOBS[job_id] = {
+            "status": "running", "step": "render", "progress_pct": 20,
+            "title": "Recovered", "profile": "classic", "inputs": {},
+            "log": [], "dispatched_to": worker_id, "error": "old error",
+        }
+        app.FLEET_WORKERS[worker_id] = {"approvals": [], "dispatch": {}}
+        with patch.object(app.config, "FLEET_ROLE", "main"), \
+                patch.object(app.config, "FLEET_PAIRING_TOKEN", "token"), \
+                patch.object(app, "_persist_queue"), \
+                patch.object(app, "_fleet_dispatch_for", return_value=[]):
+            response = self.client.post(
+                "/api/fleet/heartbeat",
+                headers={"Authorization": "Bearer token"},
+                json={"worker_id": worker_id, "capacity": {"free": 0},
+                      "jobs": [{"job_id": job_id, "status": "running",
+                                "step": "render", "progress_pct": 40}]},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("error", app.JOBS[job_id])
+        self.assertEqual(app.JOBS[job_id]["progress_pct"], 40)
+
+    def test_remote_render_does_not_consume_a_mac_slot(self):
+        app.JOBS.update({
+            "local": {"status": "running"},
+            "remote": {"status": "running", "dispatched_to": "worker-one"},
+        })
+        self.assertEqual(app._active_slot_count(), 1)
+
+    def test_controller_restart_keeps_running_job_on_its_worker(self):
+        with TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "queue_state.json"
+            state_file.write_text(json.dumps({"version": 1, "jobs": [{
+                "job_id": "remote-job", "status": "running", "step": "render",
+                "title": "Remote", "profile": "classic", "inputs": {},
+                "created_at": "2026-08-08T12:00:00", "progress_pct": 72,
+                "dispatched_to": "worker-one", "log": [],
+            }]}))
+            with patch.object(app, "QUEUE_STATE_FILE", state_file), \
+                    patch.object(app.config, "OUTPUT_DIR", Path(tmp)), \
+                    patch.object(app, "_persist_queue"), \
+                    patch.object(app, "_kick_queue") as kick:
+                app._restore_queue()
+        self.assertEqual(app.JOBS["remote-job"]["status"], "dispatched")
+        self.assertEqual(app.JOBS["remote-job"]["dispatched_to"], "worker-one")
+        self.assertEqual(app.JOBS["remote-job"]["progress_pct"], 72)
+        kick.assert_called_once()
+
+
 class OperationsTests(unittest.TestCase):
     def test_monitor_falls_back_from_openrouter_to_terra(self):
         with patch.object(operations.llm, "chat_json", side_effect=[

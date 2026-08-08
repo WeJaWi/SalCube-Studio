@@ -1236,7 +1236,7 @@ async function refreshQueue() {
       : `${list.length} recent`;
     qList.innerHTML = list.map(j => {
       const pos = j.queue_pos ? `#${j.queue_pos} · ` : "";
-      const canCancel = ["researching","awaiting_title","queued"].includes(j.status);
+      const canCancel = ["researching","awaiting_title","queued","paused","error"].includes(j.status);
       const canRetry = j.status === "error";
       const canSendToWorker = j.status === "queued";
       const canStop = !!j.stoppable;
