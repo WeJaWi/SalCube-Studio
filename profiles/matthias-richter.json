@@ -27,7 +27,7 @@
       "opacity": 0.32
     },
     "transitions": {
-      "enabled": true,
+      "enabled": false,
       "seconds": 0.5,
       "types": [
         "fade",

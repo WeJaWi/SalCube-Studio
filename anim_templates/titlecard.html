@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; }
+  body { background:#1F3A4D; color:#FAF6EF;
+         font-family:-apple-system,"Avenir Next","Segoe UI",Roboto,sans-serif; }
+  #glow { position:absolute; width:80vw; height:80vw; border-radius:50%;
+          left:50%; top:50%; transform:translate(-50%,-50%);
+          background:radial-gradient(circle,rgba(44,140,140,.32),transparent 62%); }
+  #stage { position:relative; width:100%; height:100%; display:flex;
+           flex-direction:column; align-items:center; justify-content:center;
+           text-align:center; padding:0 10vw; }
+  #brand { font-size:5.2vw; font-weight:800; letter-spacing:.22em;
+           text-transform:uppercase; opacity:0; white-space:nowrap; }
+  #line { width:0; height:.45vh; background:#2C8C8C; margin:3.4vh 0; border-radius:1vh; }
+  #title { font-size:2.6vw; font-weight:500; line-height:1.4;
+           font-family:Georgia,"Times New Roman",serif; opacity:0;
+           max-width:64vw; }
+</style>
+</head>
+<body>
+<div id="glow"></div>
+<div id="stage">
+  <div id="brand"></div>
+  <div id="line"></div>
+  <div id="title"></div>
+</div>
+<script>
+let D = 4;
+const clamp = (x,a,b)=>Math.min(b,Math.max(a,x));
+const prog = (t,s,l)=>clamp((t-s)/l,0,1);
+const easeOut = p=>1-Math.pow(1-p,3);
+
+function setup(params, duration) {
+  D = duration;
+  document.getElementById("brand").textContent = params.brand || "";
+  document.getElementById("title").textContent = params.title || "";
+  seek(0);
+}
+function seek(t) {
+  const b = easeOut(prog(t, .15, .7));
+  const brand = document.getElementById("brand");
+  brand.style.opacity = b;
+  brand.style.transform = `scale(${.82 + .18 * b})`;
+  document.getElementById("line").style.width =
+    `${easeOut(prog(t, .75, .6)) * 9}vw`;
+  const x = easeOut(prog(t, 1.05, .8));
+  const title = document.getElementById("title");
+  title.style.opacity = x;
+  title.style.transform = `translateY(${(1-x)*2}vh)`;
+  document.getElementById("glow").style.opacity = .65 + Math.sin(t*1.1)*.2;
+}
+</script>
+</body>
+</html>

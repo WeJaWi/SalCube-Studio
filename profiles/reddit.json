@@ -18,7 +18,8 @@
     "max_template_repeats": 2,
     "anim_themes_default": ["crimson", "amber"],
     "overlay": {"enabled": true, "opacity": 0.2},
-    "transitions": {"enabled": true, "seconds": 0.45, "types": ["fade", "smoothleft", "fade", "smoothright"]},
+    "transitions": {"enabled": false, "seconds": 0.45, "types": ["fade", "smoothleft", "fade", "smoothright"]},
+    "intro_card": {"enabled": true, "brand": "REDDIT STORIES"},
     "host_budget_seconds": 0
   },
   "defaults": {"language": "English", "length_chars": 55000, "length_chars_min": 40000, "length_chars_max": 70000},

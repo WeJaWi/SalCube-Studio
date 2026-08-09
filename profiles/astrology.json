@@ -19,7 +19,8 @@
     "anim_themes_default": ["plum", "amber"],
     "ai_video_resolution": "720p",
     "overlay": {"enabled": true, "opacity": 0.3},
-    "transitions": {"enabled": true, "seconds": 0.55, "types": ["fade", "circleopen", "fade", "smoothleft", "fade"]},
+    "transitions": {"enabled": false, "seconds": 0.55, "types": ["fade", "circleopen", "fade", "smoothleft", "fade"]},
+    "intro_card": {"enabled": true, "brand": "ASTROLOGY"},
     "host_budget_seconds": 0
   },
   "defaults": {"language": "English", "length_chars": 55000, "length_chars_min": 40000, "length_chars_max": 70000},

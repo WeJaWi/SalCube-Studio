@@ -24,7 +24,7 @@ from . import config
 
 TEMPLATES = ("checklist", "stat", "compare", "quote", "keyword", "barchart",
              "list", "warning", "timeline", "gauge", "didyouknow", "mythfact",
-             "definition", "trio", "photocard", "chapter")
+             "definition", "trio", "photocard", "chapter", "titlecard")
 
 # Color schemes: every template is authored in "classic" (cream + teal); other
 # themes swap the teal accent family by hex substitution at render time.

@@ -374,6 +374,28 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
             language=inputs["language"], log=lambda m: emit("plan", m))
         beats = script.mark_host_segments(beats, profile,
                                           log=lambda m: emit("plan", m))
+        intro_cfg = v.get("intro_card") or {}
+        if intro_cfg.get("enabled"):
+            brand = (intro_cfg.get("brand")
+                     or (profile.get("thumbnail") or {}).get("display_name")
+                     or profile.get("name", "")).upper()
+            intro_title = (inputs.get("publication_title") or inputs.get("title")
+                           or "").strip()
+            # Spoken text drives this beat's duration via the same TTS-timed
+            # slicing every other beat uses (see voiceover.group_beats_for_tts)
+            # — it must be long enough to speak that the title-card animation
+            # (~4s to fully reveal) isn't cut short, so read brand + title
+            # aloud rather than just a short brand name.
+            intro_speech = intro_cfg.get("text") or (
+                f"{brand.title()}. {intro_title}." if intro_title else brand.title())
+            beats.insert(0, {
+                "text": intro_speech,
+                "type": "animation",
+                "template": "titlecard",
+                "params": {"brand": brand, "title": intro_title},
+                "query": brand,
+            })
+            emit("plan", f"Opening title card: “{brand}”")
         if inputs["mindmap"]:
             emit("plan", "Building the mind-map slide…")
             mindmap = script.plan_mindmap(inputs, "", beats, model,
