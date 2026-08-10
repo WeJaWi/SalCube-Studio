@@ -606,8 +606,47 @@ class ThumbnailApprovalTests(unittest.TestCase):
         self.assertEqual(app.JOBS[self.job_id]["status"], "done")
         self.assertEqual(app.JOBS[self.job_id]["thumbnail"]["state"], "approved")
 
+    def test_astrology_word_package_forces_empty_bottom_name(self):
+        app.JOBS[self.job_id].update(
+            profile="astrology", inputs={"language": "English"},
+            title="A New Moon Pattern", thumbnail={"state": "generating_words"})
+        package = {
+            "localized_title": "Terra Tried Another Title",
+            "main_text": "Notice This Pattern", "red_word": "NEW MOON",
+            "yellow_word": "INNER CYCLE", "name": "ASTROLOGY",
+        }
+        with patch.object(app.llm, "chat_json", return_value=package) as mocked, \
+                patch.object(app, "_persist_queue"):
+            app._thumbnail_words_task(self.job_id)
+        state = app.JOBS[self.job_id]["thumbnail"]
+        self.assertEqual(state["state"], "words_ready")
+        self.assertEqual(state["words"]["name"], "")
+        self.assertIn("no bottom name label", mocked.call_args.args[0])
+
+    def test_astrology_approval_allows_empty_bottom_name(self):
+        app.JOBS[self.job_id].update(
+            profile="astrology", inputs={"language": "English"},
+            title="A New Moon Pattern")
+        with patch.object(app, "_persist_queue"), \
+                patch.object(app.threading, "Thread"):
+            response = self.client.post(
+                f"/api/thumbnail/job/{self.job_id}/words/approve",
+                json={"localized_title": "A New Moon Pattern",
+                      "main_text": "Notice This Pattern",
+                      "red_word": "NEW MOON", "yellow_word": "INNER CYCLE",
+                      "name": ""})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(app.JOBS[self.job_id]["thumbnail"]["words"]["name"], "")
+
 
 class ThumbnailProviderTests(unittest.TestCase):
+    def test_hidden_name_prompt_removes_bottom_label(self):
+        prompt = thumbnail.build_prompt(
+            "Main", "Red", "Gold", "ASTROLOGY",
+            no_character=True, show_name=False)
+        self.assertIn("Remove the name or label at the bottom completely", prompt)
+        self.assertNotIn('bottom will be "ASTROLOGY"', prompt)
+
     def test_thumbnail_task_falls_back_to_main_key_on_auth_failure(self):
         with patch.object(thumbnail.config, "KIE_THUMBNAIL_API_KEY", "bad-key"), \
                 patch.object(thumbnail.config, "KIE_API_KEY", "main-key"), \

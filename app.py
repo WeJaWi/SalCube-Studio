@@ -2252,6 +2252,15 @@ def _thumbnail_language(profile_name: str, inputs: dict) -> str:
         return "English"
 
 
+def _thumbnail_shows_name(profile_name: str) -> bool:
+    """Whether the thumbnail includes the bottom person/channel label."""
+    try:
+        thumb = orchestrator.load_profile(profile_name).get("thumbnail") or {}
+        return bool(thumb.get("show_name", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _profile_locks_submitted_title(profile_name: str) -> bool:
     """Whether thumbnail packaging must preserve the job's selected title."""
     try:
@@ -2288,6 +2297,7 @@ def _thumbnail_words_task(job_id: str) -> None:
         inputs = dict(job.get("inputs") or {})
     _, character_name = _thumbnail_character(profile_name, inputs)
     language = _thumbnail_language(profile_name, inputs)
+    show_name = _thumbnail_shows_name(profile_name)
     lock_title = _profile_locks_submitted_title(profile_name)
     try:
         words = llm.chat_json(
@@ -2314,7 +2324,10 @@ def _thumbnail_words_task(job_id: str) -> None:
             "before image generation.\n\n"
             f"{_TITLE_THUMBNAIL_GUIDE}\n\n"
             f"Source title: {title}\nTarget language: {language}\n"
-            f"Profile: {profile_name}\nDisplayed person: {character_name}",
+            f"Profile: {profile_name}\nDisplayed person: {character_name}\n"
+            + ("Keep the name field as the displayed person above."
+               if show_name else
+               "This profile has no bottom name label: return name as an empty string."),
             "gpt-5.6-terra", max_tokens=500, attempts=2, retries=1, timeout=90)
         localized_title = (title if lock_title else
                            str(words.get("localized_title") or "").strip())[:220]
@@ -2322,9 +2335,13 @@ def _thumbnail_words_task(job_id: str) -> None:
             "main_text": str(words.get("main_text") or "").strip()[:120],
             "red_word": str(words.get("red_word") or "").strip()[:50],
             "yellow_word": str(words.get("yellow_word") or "").strip()[:50],
-            "name": str(words.get("name") or character_name).strip()[:80],
+            "name": (str(words.get("name") or character_name).strip()[:80]
+                     if show_name else ""),
         }
-        if not localized_title or not all(clean.values()):
+        required_words = ("main_text", "red_word", "yellow_word")
+        if (not localized_title
+                or not all(clean[key] for key in required_words)
+                or (show_name and not clean["name"])):
             raise RuntimeError("Terra returned an incomplete localized title/thumbnail package")
         with LOCK:
             job = JOBS.get(job_id)
@@ -2362,6 +2379,7 @@ def _thumbnail_image_task(job_id: str) -> None:
         language = str(thumb_state.get("language") or
                        _thumbnail_language(profile_name, inputs)).strip()
     character_path, default_name = _thumbnail_character(profile_name, inputs)
+    show_name = _thumbnail_shows_name(profile_name)
     template_path = next(iter(THUMB_TEMPLATES_DIR.glob("default.*")), None)
     try:
         if not template_path:
@@ -2375,7 +2393,8 @@ def _thumbnail_image_task(job_id: str) -> None:
             template_path, character_path, dest,
             main_text=words["main_text"], red_word=words["red_word"],
             yellow_word=words["yellow_word"],
-            name=words.get("name") or default_name)
+            name=((words.get("name") or default_name) if show_name else ""),
+            show_name=show_name, topic_hint=default_name)
         with LOCK:
             job = JOBS.get(job_id)
             if job:
@@ -2408,8 +2427,15 @@ def approve_thumbnail_words(job_id: str):
     words = {k: str(data.get(k) or "").strip() for k in
              ("main_text", "red_word", "yellow_word", "name")}
     localized_title = str(data.get("localized_title") or "").strip()
-    if not localized_title or not all(words.values()):
-        return jsonify({"error": "the localized title and all thumbnail word fields are required"}), 400
+    with LOCK:
+        job = JOBS.get(job_id)
+        profile_name = job.get("profile", "") if job else ""
+    show_name = _thumbnail_shows_name(profile_name)
+    required_words = ("main_text", "red_word", "yellow_word")
+    if (not localized_title
+            or not all(words[key] for key in required_words)
+            or (show_name and not words["name"])):
+        return jsonify({"error": "the localized title and required thumbnail word fields are required"}), 400
     with LOCK:
         job = JOBS.get(job_id)
         if not job:

@@ -6,7 +6,7 @@
   "audience_line": "speaks to one spiritually curious viewer seeking meaning, timing, reflection, and a grounded way to think about change",
   "research": {"enabled": true, "provider": "gpt-5.6-terra", "kind": "astrology_theme", "title_choices": 3},
   "drive_package": {"docx": true},
-  "thumbnail": {"no_character": true, "display_name": "ASTROLOGY"},
+  "thumbnail": {"no_character": true, "display_name": "ASTROLOGY", "show_name": false},
   "video": {
     "width": 1920,
     "height": 1080,

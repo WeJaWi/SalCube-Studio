@@ -7,7 +7,7 @@
   "research": {"enabled": false, "kind": "direct_title"},
   "title": {"lock_submitted": true},
   "drive_package": {"docx": true},
-  "thumbnail": {"no_character": true, "display_name": "ASTROLOGY"},
+  "thumbnail": {"no_character": true, "display_name": "ASTROLOGY", "show_name": false},
   "video": {
     "width": 1920,
     "height": 1080,

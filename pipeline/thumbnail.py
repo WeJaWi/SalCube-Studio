@@ -28,7 +28,8 @@ def _authentication_failure(exc: Exception) -> bool:
 
 
 def build_prompt(main_text: str, red_word: str, yellow_word: str,
-                 name: str, *, no_character: bool = False) -> str:
+                 name: str, *, no_character: bool = False,
+                 show_name: bool = True) -> str:
     """The edit instruction sent to GPT Image 2 alongside the two images."""
     character_instruction = (
         "Remove every person and character from the composition. Replace the "
@@ -36,14 +37,19 @@ def build_prompt(main_text: str, red_word: str, yellow_word: str,
         if no_character else
         "Change the character to the character shown in image 2."
     )
+    name_instruction = (
+        f'The name at the bottom will be "{name}" instead of the other one, '
+        f'in the same yellowish/gold font as the original.'
+        if show_name else
+        'Remove the name or label at the bottom completely. Leave no word, '
+        'brand name, placeholder, or replacement text in that bottom area.'
+    )
     return (
         f'Keep the original quality, color scheme, font, and textures of '
         f'image 1, but {character_instruction} '
         f'Change the headline text to "{main_text}", put the '
         f'word "{red_word}" in the red box, and put the word '
-        f'"{yellow_word}" in the yellowish font. The name at the bottom '
-        f'will be "{name}" instead of the other one, in the same '
-        f'yellowish/gold font as the original.'
+        f'"{yellow_word}" in the yellowish font. {name_instruction}'
     )
 
 
@@ -161,7 +167,8 @@ def _draw_topic_symbol(canvas: Image.Image, name: str) -> None:
 
 def generate_local(template_path: Path, character_path: Optional[Path], dest: Path, *,
                    main_text: str, red_word: str, yellow_word: str,
-                   name: str) -> Path:
+                   name: str, show_name: bool = True,
+                   topic_hint: str = "") -> Path:
     """Create a deterministic thumbnail when no remote image model is usable.
 
     The template supplies the color/texture family while the compositor owns
@@ -184,7 +191,9 @@ def generate_local(template_path: Path, character_path: Optional[Path], dest: Pa
     if character_path is not None:
         _paste_character(canvas, character_path)
     else:
-        _draw_topic_symbol(canvas, name)
+        # The topic hint selects the character-free symbol independently of
+        # whether the visible bottom name label is enabled.
+        _draw_topic_symbol(canvas, topic_hint or name)
 
     # A dark glass text panel keeps every language readable over any template.
     panel = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
@@ -227,15 +236,16 @@ def generate_local(template_path: Path, character_path: Optional[Path], dest: Pa
                         fill=(238, 190, 83, 255), spacing=yellow_spacing,
                         stroke_width=2, stroke_fill=(36, 22, 10, 255))
 
-    name_font, name_lines, name_spacing = _fit_text(
-        draw, name, width, 52, largest=38, smallest=24, max_lines=1)
-    name_box = draw.multiline_textbbox((0, 0), name_lines, font=name_font,
-                                       spacing=name_spacing)
-    name_x = 1215 - (name_box[2] - name_box[0])
-    draw.line((left, 626, 1215, 626), fill=(219, 170, 76, 135), width=2)
-    draw.text((name_x, 642), name_lines, font=name_font,
-              fill=(224, 174, 76, 255), stroke_width=1,
-              stroke_fill=(30, 17, 8, 255))
+    if show_name and name.strip():
+        name_font, name_lines, name_spacing = _fit_text(
+            draw, name, width, 52, largest=38, smallest=24, max_lines=1)
+        name_box = draw.multiline_textbbox((0, 0), name_lines, font=name_font,
+                                           spacing=name_spacing)
+        name_x = 1215 - (name_box[2] - name_box[0])
+        draw.line((left, 626, 1215, 626), fill=(219, 170, 76, 135), width=2)
+        draw.text((name_x, 642), name_lines, font=name_font,
+                  fill=(224, 174, 76, 255), stroke_width=1,
+                  stroke_fill=(30, 17, 8, 255))
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     canvas.convert("RGB").save(dest, "PNG", optimize=True)
@@ -245,7 +255,8 @@ def generate_local(template_path: Path, character_path: Optional[Path], dest: Pa
 def generate(template_path: Path, character_path: Optional[Path], dest: Path, *,
             main_text: str, red_word: str, yellow_word: str, name: str,
             aspect_ratio: str = "16:9", resolution: Optional[str] = None,
-            model: Optional[str] = None, timeout_s: int = 300) -> Path:
+            model: Optional[str] = None, timeout_s: int = 300,
+            show_name: bool = True, topic_hint: str = "") -> Path:
     """Generate one thumbnail from a template image + a character reference.
 
     Both images are uploaded to kie's temp storage first — the model needs
@@ -256,7 +267,8 @@ def generate(template_path: Path, character_path: Optional[Path], dest: Path, *,
     if not config.KIE_THUMBNAIL_API_KEY:
         return generate_local(
             template_path, character_path, dest, main_text=main_text,
-            red_word=red_word, yellow_word=yellow_word, name=name)
+            red_word=red_word, yellow_word=yellow_word, name=name,
+            show_name=show_name, topic_hint=topic_hint)
     dedicated_key = config.KIE_THUMBNAIL_API_KEY
     # Kie's upload gateway can reject a model-scoped/dedicated key even when
     # that key is valid for createTask. The main Kie key is the verified
@@ -272,12 +284,14 @@ def generate(template_path: Path, character_path: Optional[Path], dest: Path, *,
         if _authentication_failure(exc):
             return generate_local(
                 template_path, character_path, dest, main_text=main_text,
-                red_word=red_word, yellow_word=yellow_word, name=name)
+                red_word=red_word, yellow_word=yellow_word, name=name,
+                show_name=show_name, topic_hint=topic_hint)
         raise
     primary_model = model or config.KIE_THUMBNAIL_MODEL
     payload = {
         "prompt": build_prompt(main_text, red_word, yellow_word, name,
-                               no_character=character_path is None),
+                               no_character=character_path is None,
+                               show_name=show_name),
         "input_urls": [url for url in (template_url, character_url) if url],
         "aspect_ratio": aspect_ratio,
         "resolution": resolution or config.KIE_THUMBNAIL_RESOLUTION,
@@ -291,7 +305,8 @@ def generate(template_path: Path, character_path: Optional[Path], dest: Path, *,
     if config.KIE_VIDEO_API_KEY:
         grok_payload = {
             "prompt": build_prompt(main_text, red_word, yellow_word, name,
-                                   no_character=character_path is None),
+                                   no_character=character_path is None,
+                                   show_name=show_name),
             "image_urls": [url for url in (template_url, character_url) if url],
         }
         candidate = ("grok-imagine/image-to-image",
@@ -317,5 +332,6 @@ def generate(template_path: Path, character_path: Optional[Path], dest: Path, *,
     if _authentication_failure(last_error):
         return generate_local(
             template_path, character_path, dest, main_text=main_text,
-            red_word=red_word, yellow_word=yellow_word, name=name)
+            red_word=red_word, yellow_word=yellow_word, name=name,
+            show_name=show_name, topic_hint=topic_hint)
     raise last_error
