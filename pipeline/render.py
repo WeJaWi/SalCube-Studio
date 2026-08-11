@@ -1198,15 +1198,43 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
         if on_beat_progress:
             on_beat_progress(done, n)
 
+    # Transition padding is added to a beat's own length, so the expected
+    # on-disk clip duration must include it. The classic layout takes no
+    # pad arguments at all, so it never has any.
+    def pad_head_for(i: int) -> float:
+        return tr_sec if (layout != "classic" and tr_on and i > 0) else 0.0
+
+    def pad_tail_for(i: int) -> float:
+        return tr_sec if (layout != "classic" and tr_on and i < n - 1) else 0.0
+
     def _composite_one(i: int) -> Path:
         b = beats[i]
         clip = workdir / f"beat_{i:03d}.mp4"
         # Resume: skip beats already on disk from a prior partial render.
         # (If Spotify/QR toggles change mid-resume, delete beat_*.mp4 first.)
-        if clip.exists() and clip.stat().st_size > 10_000:
-            log(f"  beat {i+1}/{n}: reusing existing composite")
-            _tick()
-            return clip
+        #
+        # The reuse test MUST probe the clip, not just its size. A Stop or a
+        # preempt SIGKILLs the in-flight ffmpeg, which leaves a multi-MB file
+        # with no moov atom — comfortably past any size threshold, yet
+        # unreadable. A size-only check silently readopted those, the concat
+        # dropped them, and the finished video came out a fraction of its
+        # true length (reproduced: a 71.2-min job preempted at 60% rendered
+        # 16.8 min, while two identical uninterrupted jobs were exact). Also
+        # compare the duration: a clip can be readable yet cut short if the
+        # kill landed after the moov was written.
+        want = (pad_head_for(i) + float(b.get("duration", 0) or 0)
+                + pad_tail_for(i))
+        if clip.exists():
+            got = probe_duration(clip) if is_valid_video(clip, 0.2) else 0.0
+            if got > 0 and (want <= 0 or abs(got - want) <= max(1.0, want * 0.05)):
+                log(f"  beat {i+1}/{n}: reusing existing composite")
+                _tick()
+                return clip
+            log(f"  beat {i+1}/{n}: discarding unusable cached composite "
+                f"({got:.1f}s on disk vs {want:.1f}s expected) — re-rendering")
+            clip.unlink(missing_ok=True)
+            (workdir / f"{clip.stem}_bgprecomp.mp4").unlink(missing_ok=True)
+            (workdir / f"{clip.stem}_waveprecomp.mp4").unlink(missing_ok=True)
         log(f"  beat {i+1}/{n} ({b.get('kind')}, {b.get('duration', 0):.1f}s)")
         # A beat composite can hit an intermittent ffmpeg filtergraph
         # scheduling issue (reproduced: identical inputs, identical code,

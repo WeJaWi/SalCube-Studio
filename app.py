@@ -1076,7 +1076,7 @@ def _build_inputs(data: dict, title: str) -> dict:
     if video_group == "small":
         length_chars = 32000 + secrets.randbelow(47000 - 32000 + 1)
     elif video_group == "big":
-        length_chars = 180000 + secrets.randbelow(210000 - 180000 + 1)
+        length_chars = 170000 + secrets.randbelow(195000 - 170000 + 1)
     else:
         video_group = "custom"
         length_chars = data.get("length_chars")

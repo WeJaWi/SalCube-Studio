@@ -31,8 +31,8 @@ class VideoGroupTests(unittest.TestCase):
     def test_big_group_is_inside_requested_range(self):
         for _ in range(100):
             inputs = app._build_inputs({"video_group": "big"}, "A title")
-            self.assertGreaterEqual(inputs["length_chars"], 180000)
-            self.assertLessEqual(inputs["length_chars"], 210000)
+            self.assertGreaterEqual(inputs["length_chars"], 170000)
+            self.assertLessEqual(inputs["length_chars"], 195000)
         self.assertEqual(inputs["video_group"], "big")
 
     def test_geistmeister_spotify_style_is_persisted(self):
