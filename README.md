@@ -117,8 +117,13 @@ awake during multi-hour renders without forcing the display to stay on.
    the spoken version back.)
 4. Beats are typed (stock / AI video / animation), the host is placed
    (intro + split-screens inside `host_budget_seconds`), everything
-   generates in parallel, FFmpeg composites with burned subtitles and the
-   music bed.
+   generates in parallel, and FFmpeg composites with burned subtitles and the
+   music bed. The stitched file then goes through VidForge's complete final
+   export pass: one continuous PCM audio master, a fresh constant-frame-rate
+   H.264 High/yuv420p encode, AAC-LC stereo at 192 kbps, zero-based track
+   timestamps, duration matching, and MP4 `faststart`. The delivered file is
+   validated against that contract before it can be marked complete, which
+   keeps it compatible with Spotify for Creators.
 5. In parallel, GPT-5.6 Terra proposes thumbnail words. Rendering does not
    wait for thumbnail approval. It resolves the script language from the UI
    override or profile, rewrites/translates the publication title into that

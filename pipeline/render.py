@@ -12,6 +12,7 @@ Beats are concatenated, then the music bed is mixed low underneath.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -396,43 +397,206 @@ def _encode_args(quality: Optional[str] = None, crf: Optional[int] = None,
     return [*args, *_SEGMENT_TIMING_ARGS]
 
 
-def lock_av_duration(path: Path, workdir: Path,
-                     log: Callable[[str], None] = lambda *_: None) -> Path:
-    """Make a final MP4's audio end exactly with its video stream.
+def _vidforge_final_encode_args(quality: str = "balanced",
+                                gpu: bool = False) -> List[str]:
+    """VidForge's complete final H.264 export presets.
 
-    AAC priming and concatenated source files can leave audio a fraction of a
-    second longer or shorter than the picture. Upload platforms may reject
-    that file, so copy the video losslessly and pad/trim only the audio when
-    the measured mismatch is material.
+    These intentionally differ from the speed-tuned intermediate beat codec.
+    In particular, VideoToolbox uses VidForge's 10 Mbps target rather than
+    Dmiqwi's quality-only mode, and every path keeps the no-B-frame/fixed
+    timescale contract that prevents an empty edit-list segment at time zero.
     """
-    video_dur = probe_stream_duration(path, "video")
-    audio_dur = probe_stream_duration(path, "audio")
-    if not (video_dur > 0 and audio_dur > 0):
-        log(f"  final A/V check skipped for {path.name} (missing stream duration)")
-        return path
-    if abs(video_dur - audio_dur) <= 0.05:
-        log(f"  final A/V matched: video {video_dur:.2f}s · "
-            f"audio {audio_dur:.2f}s")
-        return path
+    quality = quality if quality in ("high", "balanced", "fast720") \
+        else "balanced"
+    if quality == "high":
+        return ["-c:v", "libx264", "-preset", "slow", "-crf", "18",
+                *_SEGMENT_TIMING_ARGS]
 
-    log(f"  final A/V mismatch: video {video_dur:.2f}s · "
-        f"audio {audio_dur:.2f}s — locking audio to picture")
-    tmp = workdir / f"{path.stem}_avlock{path.suffix}"
-    tmp.unlink(missing_ok=True)
+    enc = config.gpu_encoder() if gpu else ""
+    if enc == "h264_videotoolbox":
+        return ["-c:v", enc, "-b:v", "10M", "-maxrate", "14M",
+                *_SEGMENT_TIMING_ARGS]
+    if enc == "h264_nvenc":
+        return ["-c:v", enc, "-preset", "p4", "-rc", "vbr", "-cq", "21",
+                "-b:v", "0", *_SEGMENT_TIMING_ARGS]
+    if enc == "h264_amf":
+        return ["-c:v", enc, "-usage", "transcoding", "-quality", "balanced",
+                "-b:v", "10M", "-maxrate", "14M", *_SEGMENT_TIMING_ARGS]
+    if enc == "h264_qsv":
+        return ["-c:v", enc, "-global_quality", "23", "-b:v", "10M",
+                *_SEGMENT_TIMING_ARGS]
+
+    if quality == "fast720":
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+                *_SEGMENT_TIMING_ARGS]
+    return ["-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            *_SEGMENT_TIMING_ARGS]
+
+
+def _rate_value(value: Any) -> float:
+    try:
+        raw = str(value or "0")
+        if "/" in raw:
+            num, den = raw.split("/", 1)
+            return float(num) / max(float(den), 1e-9)
+        return float(raw)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def _probe_export_contract(path: Path) -> Dict[str, Any]:
+    try:
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries",
+            "stream=index,codec_name,profile,codec_type,width,height,pix_fmt,"
+            "r_frame_rate,avg_frame_rate,start_time,duration,bit_rate,"
+            "sample_rate,channels:format=nb_streams,start_time,duration",
+            "-of", "json", str(path),
+        ], capture_output=True, text=True, timeout=60)
+        return json.loads(result.stdout or "{}") if result.returncode == 0 else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _validate_spotify_export(path: Path, fps: int) -> Dict[str, Any]:
+    """Validate the strict MP4 contract produced by the VidForge final pass."""
+    data = _probe_export_contract(path)
+    streams = data.get("streams") if isinstance(data, dict) else None
+    streams = streams if isinstance(streams, list) else []
+    videos = [s for s in streams if s.get("codec_type") == "video"]
+    audios = [s for s in streams if s.get("codec_type") == "audio"]
+    errors: List[str] = []
+    if len(streams) != 2 or len(videos) != 1 or len(audios) != 1:
+        errors.append("expected exactly one video track and one audio track")
+    if not videos or not audios:
+        raise RuntimeError("VidForge final export invalid: " + "; ".join(errors))
+
+    video, audio = videos[0], audios[0]
+    if video.get("codec_name") != "h264":
+        errors.append("video is not H.264")
+    if str(video.get("profile") or "").lower() != "high":
+        errors.append("H.264 profile is not High")
+    if video.get("pix_fmt") != "yuv420p":
+        errors.append(f"pixel format is {video.get('pix_fmt')}, not yuv420p")
+    width, height = int(video.get("width") or 0), int(video.get("height") or 0)
+    if not (width > 0 and height > 0 and abs(width / height - 16 / 9) < 0.02):
+        errors.append(f"video is not 16:9 ({width}x{height})")
+    for key in ("r_frame_rate", "avg_frame_rate"):
+        actual = _rate_value(video.get(key))
+        if abs(actual - fps) > 0.01:
+            errors.append(f"{key} is {actual:.3f}, not constant {fps} fps")
+    if abs(float(video.get("start_time") or 0)) > 0.05:
+        errors.append("first video PTS is more than 50 ms from zero")
+
+    if audio.get("codec_name") != "aac" or \
+            str(audio.get("profile") or "").lower() != "lc":
+        errors.append("audio is not AAC-LC")
+    if int(audio.get("sample_rate") or 0) != 44100:
+        errors.append("audio sample rate is not 44.1 kHz")
+    if int(audio.get("channels") or 0) != 2:
+        errors.append("audio is not stereo")
+    if abs(float(audio.get("start_time") or 0)) > 0.05:
+        errors.append("first audio PTS is more than 50 ms from zero")
+    video_dur = float(video.get("duration") or 0)
+    audio_dur = float(audio.get("duration") or 0)
+    if not (video_dur > 0 and audio_dur > 0):
+        errors.append("missing track duration")
+    elif abs(video_dur - audio_dur) > 0.05:
+        errors.append(
+            f"track durations differ ({video_dur:.3f}s vs {audio_dur:.3f}s)")
+    if errors:
+        raise RuntimeError("VidForge final export invalid: " + "; ".join(errors))
+    return {"video": video, "audio": audio, "format": data.get("format", {})}
+
+
+def encode_final_export(path: Path, workdir: Path, fps: int = 30,
+                        quality: str = "balanced", gpu: bool = False,
+                        log: Callable[[str], None] = lambda *_: None) -> Path:
+    """Run VidForge's full, Spotify-safe final encoding pass.
+
+    The stitched MP4 is an intermediate, never the deliverable. Its complete
+    mixed audio is decoded to one sample-exact PCM master, then the whole video
+    is normalized to CFR/SDR Rec.709/yuv420p and encoded again. Audio is encoded
+    to AAC-LC exactly once in this pass, both streams start at zero, and the
+    resulting file contains exactly one video and one audio track.
+    """
+    video_dur = probe_stream_duration(path, "video") or probe_duration(path)
+    if video_dur <= 0:
+        raise RuntimeError(f"cannot final-encode unprobeable video: {path}")
+    fps = max(1, int(fps))
+    quality = quality if quality in ("high", "balanced", "fast720") \
+        else "balanced"
+    audio_master = workdir / f"{path.stem}_voice_all.wav"
+    encoded = workdir / f"{path.stem}_vidforge_encoded.mp4"
+    audio_master.unlink(missing_ok=True)
+    encoded.unlink(missing_ok=True)
+
+    # A 10 Mbps VidForge video plus 44.1 kHz stereo PCM needs about 1.7 MB per
+    # second while both temporary files coexist. Refuse before starting rather
+    # than filling the volume late in a multi-hour export.
+    estimated_extra = int(video_dur * (12_000_000 / 8 + 44100 * 2 * 2))
+    free = shutil.disk_usage(workdir).free
+    if free < estimated_extra + 1_000_000_000:
+        need_gb, free_gb = (estimated_extra + 1_000_000_000) / 1e9, free / 1e9
+        raise RuntimeError(
+            f"VidForge final encode needs about {need_gb:.1f} GB free; "
+            f"only {free_gb:.1f} GB is available")
+
+    log(f"  VidForge final pass: rebuilding one continuous PCM audio master "
+        f"({video_dur:.2f}s)")
+    audio_filter = (f"aresample=44100:first_pts=0,"
+                    f"apad=whole_dur={video_dur + 0.5:.6f},"
+                    f"atrim=0:{video_dur:.6f},asetpts=N/SR/TB")
     try:
         _run([
-            "ffmpeg", "-y", "-i", str(path),
-            "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy",
-            "-af", (f"apad=whole_dur={video_dur + 0.5:.6f},"
-                    f"atrim=0:{video_dur:.6f}"),
+            "ffmpeg", "-y", "-i", str(path), "-map", "0:a:0", "-vn",
+            "-af", audio_filter, "-c:a", "pcm_s16le", "-ar", "44100",
+            "-ac", "2", str(audio_master),
+        ], wallclock_s=max(1200.0, video_dur * 0.25 + 300.0))
+    except RuntimeError:
+        # Spotify requires an audio track; preserve a structurally valid export
+        # even for a damaged/missing intermediate track by supplying silence.
+        _run([
+            "ffmpeg", "-y", "-f", "lavfi", "-i",
+            "anullsrc=r=44100:cl=stereo", "-t", f"{video_dur:.6f}",
+            "-c:a", "pcm_s16le", str(audio_master),
+        ], wallclock_s=max(1200.0, video_dur * 0.2 + 300.0))
+
+    scale = ",scale=1280:720:flags=lanczos" if quality == "fast720" else ""
+    video_filter = (
+        f"fps=fps={fps}:round=near:start_time=0,settb=AVTB,"
+        f"setpts=N/({fps}*TB){scale},"
+        "scale=iw:ih:out_color_matrix=bt709:out_range=tv:flags=bicubic,"
+        "format=yuv420p,setsar=1"
+    )
+    encoder = config.gpu_encoder() if gpu and quality != "high" else "libx264"
+    label = ("1080p high quality" if quality == "high" else
+             "720p fast" if quality == "fast720" else "1080p balanced")
+    log(f"  VidForge final encode: {label} · {encoder or 'libx264'} · "
+        "H.264 High + AAC-LC 192k")
+    try:
+        _run([
+            "ffmpeg", "-y", "-i", str(path), "-i", str(audio_master),
+            "-map", "0:v:0", "-map", "1:a:0", "-vf", video_filter,
+            "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
+            *_vidforge_final_encode_args(quality=quality, gpu=gpu),
+            "-profile:v", "high", "-r", str(fps), "-fps_mode", "cfr",
+            "-color_range", "tv", "-colorspace", "bt709",
+            "-color_primaries", "bt709", "-color_trc", "bt709",
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-            "-movflags", "+faststart", str(tmp),
-        ], wallclock_s=max(600.0, video_dur * 0.2 + 120.0))
-        if not is_valid_video(tmp, min_duration=max(0.2, video_dur - 1.0)):
-            raise RuntimeError("A/V duration lock produced an invalid MP4")
-        os.replace(tmp, path)
+            "-t", f"{video_dur:.6f}", "-movflags", "+faststart",
+            str(encoded),
+        ], wallclock_s=max(3600.0, min(43_200.0, video_dur * 2 + 1800.0)))
+        contract = _validate_spotify_export(encoded, fps)
+        video = contract["video"]
+        audio = contract["audio"]
+        log(f"  Spotify export verified: {video.get('width')}x{video.get('height')} "
+            f"{video.get('pix_fmt')} CFR {fps} · H.264 {video.get('profile')} · "
+            f"AAC-{audio.get('profile')} stereo · tracks duration-matched")
+        os.replace(encoded, path)
     finally:
-        tmp.unlink(missing_ok=True)
+        encoded.unlink(missing_ok=True)
+        audio_master.unlink(missing_ok=True)
     return path
 
 
@@ -1216,6 +1380,9 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
     v = profile.get("video", {})
     width, height = int(v.get("width", 1920)), int(v.get("height", 1080))
     fps = int(v.get("fps", 30))
+    export_quality = str(v.get("export_quality") or "balanced")
+    if export_quality not in ("high", "balanced", "fast720"):
+        export_quality = "balanced"
     ken_burns = bool(v.get("ken_burns", True))
     ov_cfg = v.get("overlay", {}) or {}
     ov_opacity = float(ov_cfg.get("opacity", 0.35))
@@ -1435,8 +1602,10 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                              popup_width=popup_width,
                              popup_margin=popup_margin,
                              workdir=workdir, gpu=gpu_encode)
-        lock_av_duration(part1, workdir, log=log)
-        lock_av_duration(part2, workdir, log=log)
+        encode_final_export(part1, workdir, fps=fps, quality=export_quality,
+                            gpu=gpu_encode, log=log)
+        encode_final_export(part2, workdir, fps=fps, quality=export_quality,
+                            gpu=gpu_encode, log=log)
         # Default player / download uses the free half (with Patreon end clip).
         # os.link, NOT Path.hardlink_to: the latter only exists on Python 3.10+
         # and this runs on 3.9, where it raised AttributeError straight into
@@ -1453,5 +1622,6 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
         return out_path
 
     _stitch(clips, out_path, "full video")
-    lock_av_duration(out_path, workdir, log=log)
+    encode_final_export(out_path, workdir, fps=fps, quality=export_quality,
+                        gpu=gpu_encode, log=log)
     return out_path

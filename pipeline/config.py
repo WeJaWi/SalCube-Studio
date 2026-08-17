@@ -258,20 +258,19 @@ def gpu_encoder() -> str:
         _gpu_encoder_cache = ""
         probe_args = {
             "h264_videotoolbox": [
-                "-c:v", "h264_videotoolbox", "-q:v", "65",
-                "-realtime", "1", "-prio_speed", "1",
-                "-power_efficient", "1", "-allow_sw", "0",
+                "-c:v", "h264_videotoolbox", "-b:v", "10M",
+                "-maxrate", "14M",
             ],
             "h264_nvenc": [
                 "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr",
                 "-cq", "23", "-b:v", "0",
             ],
             "h264_qsv": [
-                "-c:v", "h264_qsv", "-global_quality", "23",
+                "-c:v", "h264_qsv", "-global_quality", "23", "-b:v", "10M",
             ],
             "h264_amf": [
-                "-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp",
-                "-qp_i", "23", "-qp_p", "23",
+                "-c:v", "h264_amf", "-usage", "transcoding",
+                "-quality", "balanced", "-b:v", "10M", "-maxrate", "14M",
             ],
             "h264_vaapi": ["-c:v", "h264_vaapi", "-qp", "23"],
         }

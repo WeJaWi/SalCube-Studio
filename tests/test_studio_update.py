@@ -261,6 +261,17 @@ class MacRenderOptimizationTests(unittest.TestCase):
         self.assertEqual(
             args[args.index("-video_track_timescale") + 1], "15360")
 
+    def test_vidforge_final_preset_matches_accepted_videotoolbox_export(self):
+        with patch.object(render.config, "gpu_encoder",
+                          return_value="h264_videotoolbox"):
+            args = render._vidforge_final_encode_args(gpu=True)
+        self.assertEqual(args[:2], ["-c:v", "h264_videotoolbox"])
+        self.assertEqual(args[args.index("-b:v") + 1], "10M")
+        self.assertEqual(args[args.index("-maxrate") + 1], "14M")
+        self.assertEqual(args[args.index("-bf") + 1], "0")
+        self.assertEqual(
+            args[args.index("-video_track_timescale") + 1], "15360")
+
     def test_hardware_probe_skips_a_compiled_but_broken_encoder(self):
         calls = []
 
@@ -277,25 +288,62 @@ class MacRenderOptimizationTests(unittest.TestCase):
         self.assertIn("h264_amf", calls[1])
         self.assertIn("h264_qsv", calls[2])
 
-    def test_final_av_lock_reencodes_only_audio_when_streams_drift(self):
+    def test_full_final_pass_rebuilds_pcm_and_normalizes_spotify_mp4(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             video = root / "final.mp4"
-            video.write_bytes(b"original")
+            video.write_bytes(b"stitched")
             commands = []
 
             def fake_ffmpeg(cmd, **_kwargs):
                 commands.append(cmd)
-                Path(cmd[-1]).write_bytes(b"locked")
+                Path(cmd[-1]).write_bytes(b"encoded")
 
+            contract = {
+                "video": {"width": 1920, "height": 1080,
+                          "pix_fmt": "yuv420p", "profile": "High"},
+                "audio": {"profile": "LC"},
+            }
             with patch.object(render, "probe_stream_duration",
-                              side_effect=[10.0, 10.3]), \
+                              return_value=10.0), \
                     patch.object(render, "_run", side_effect=fake_ffmpeg), \
-                    patch.object(render, "is_valid_video", return_value=True):
-                render.lock_av_duration(video, root)
-            self.assertEqual(video.read_bytes(), b"locked")
-            self.assertIn("copy", commands[0])
-            self.assertIn("atrim=0:10.000000", " ".join(commands[0]))
+                    patch.object(render, "_validate_spotify_export",
+                                 return_value=contract), \
+                    patch.object(render.config, "gpu_encoder",
+                                 return_value="h264_videotoolbox"):
+                render.encode_final_export(video, root, fps=30, gpu=True)
+
+            self.assertEqual(video.read_bytes(), b"encoded")
+            self.assertEqual(len(commands), 2)
+            self.assertIn("pcm_s16le", commands[0])
+            final = commands[1]
+            joined = " ".join(final)
+            self.assertIn("fps=fps=30", joined)
+            self.assertIn("format=yuv420p", joined)
+            self.assertIn("setpts=N/(30*TB)", joined)
+            self.assertIn("-profile:v high", joined)
+            self.assertIn("-b:v 10M", joined)
+            self.assertIn("-c:a aac -b:a 192k", joined)
+            self.assertIn("-movflags +faststart", joined)
+
+    def test_spotify_validation_rejects_the_old_nonzero_video_start(self):
+        old_contract = {
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264",
+                 "profile": "High", "pix_fmt": "yuv420p",
+                 "width": 1920, "height": 1080,
+                 "r_frame_rate": "30/1", "avg_frame_rate": "30/1",
+                 "start_time": "0.085", "duration": "120.000"},
+                {"codec_type": "audio", "codec_name": "aac",
+                 "profile": "LC", "sample_rate": "44100", "channels": 2,
+                 "start_time": "0.000", "duration": "120.000"},
+            ],
+            "format": {"nb_streams": 2, "duration": "120.000"},
+        }
+        with patch.object(render, "_probe_export_contract",
+                          return_value=old_contract):
+            with self.assertRaisesRegex(RuntimeError, "first video PTS"):
+                render._validate_spotify_export(Path("old.mp4"), 30)
 
     def test_partial_mp4_is_not_a_valid_deliverable(self):
         with TemporaryDirectory() as tmp:
