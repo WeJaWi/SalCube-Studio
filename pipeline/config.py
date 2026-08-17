@@ -236,7 +236,7 @@ _gpu_encoder_cache: Optional[str] = None
 # the only axis that changes here.
 _HW_ENCODERS = {
     "darwin": ["h264_videotoolbox"],
-    "win32": ["h264_nvenc", "h264_qsv", "h264_amf"],
+    "win32": ["h264_nvenc", "h264_amf", "h264_qsv"],
     "linux": ["h264_nvenc", "h264_qsv", "h264_vaapi"],
 }
 
@@ -245,8 +245,10 @@ def gpu_encoder() -> str:
     """The hardware H.264 encoder ffmpeg on THIS machine actually has, e.g.
     "h264_videotoolbox" / "h264_nvenc" / "h264_qsv" — or "" for none.
 
-    Real capability, not just "is ffmpeg installed". Cached: encoder support
-    can't change mid-process, and this shells out to ffmpeg to check.
+    Real capability, not just "is the encoder name compiled into ffmpeg".
+    A listed NVENC/QSV/AMF encoder can still be unusable when its driver or
+    hardware is missing, so probe each candidate with a tiny real encode.
+    Cached: encoder support can't change mid-process.
     Returning the name (rather than a bool) is what lets a fleet worker
     report what it has, since a Windows worker's encoder differs from a
     Mac's and the right ffmpeg flags differ with it.
@@ -254,15 +256,41 @@ def gpu_encoder() -> str:
     global _gpu_encoder_cache
     if _gpu_encoder_cache is None:
         _gpu_encoder_cache = ""
-        try:
-            out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
-                                 capture_output=True, text=True, timeout=10)
-            for name in _HW_ENCODERS.get(sys.platform, ["h264_nvenc"]):
-                if name in out.stdout:
+        probe_args = {
+            "h264_videotoolbox": [
+                "-c:v", "h264_videotoolbox", "-q:v", "65",
+                "-realtime", "1", "-prio_speed", "1",
+                "-power_efficient", "1", "-allow_sw", "0",
+            ],
+            "h264_nvenc": [
+                "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr",
+                "-cq", "23", "-b:v", "0",
+            ],
+            "h264_qsv": [
+                "-c:v", "h264_qsv", "-global_quality", "23",
+            ],
+            "h264_amf": [
+                "-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp",
+                "-qp_i", "23", "-qp_p", "23",
+            ],
+            "h264_vaapi": ["-c:v", "h264_vaapi", "-qp", "23"],
+        }
+        common = [
+            "-pix_fmt", "yuv420p", "-bf", "0",
+            "-video_track_timescale", "15360",
+        ]
+        for name in _HW_ENCODERS.get(sys.platform, ["h264_nvenc"]):
+            try:
+                result = subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc2=s=640x360:d=0.4:r=30",
+                    *probe_args[name], *common, "-f", "null", "-",
+                ], capture_output=True, text=True, timeout=20)
+                if result.returncode == 0:
                     _gpu_encoder_cache = name
                     break
-        except Exception:  # noqa: BLE001
-            pass
+            except Exception:  # noqa: BLE001
+                continue
     return _gpu_encoder_cache
 
 

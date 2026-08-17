@@ -193,14 +193,19 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
     # Read once per job — like `model` above, never live off a mutable
     # global, so a settings toggle flipped mid-render can't affect a job
     # already in flight (only jobs started after the flip pick it up).
-    gpu_encode = bool(config.load_settings().get("gpu_encode", False))
+    gpu_requested = bool(config.load_settings().get("gpu_encode", False))
+    gpu_encoder = config.gpu_encoder() if gpu_requested else ""
+    gpu_encode = bool(gpu_encoder)
     beat_workers = config.resolve_beat_workers(gpu_encode)
     emit("start", f"“{inputs['title']}” · {inputs['language']} · "
                   f"{inputs['length_chars']} chars · script model: {model} · "
                   f"b-roll: {', '.join(broll)} · stock matching: {smart} · "
-                  f"encoder: {'VideoToolbox (GPU)' if gpu_encode else 'x264 (CPU)'} "
+                  f"encoder: {gpu_encoder + ' (GPU)' if gpu_encode else 'libx264 (CPU)'} "
                   f"· {beat_workers} beat worker(s)"
                   + (" · ebook CTA" if inputs["promote_ebook"] else ""))
+    if gpu_requested and not gpu_encode:
+        emit("start", "GPU encode was enabled, but no working hardware H.264 "
+              "encoder passed the sample encode — using libx264")
 
     # 1+2. Outline, gate, and full script — skipped when the job dir already
     # has a script.txt (crash resume: the same dir is re-run and every asset

@@ -122,6 +122,24 @@ def probe_duration(path: Path) -> float:
         return 0.0
 
 
+def probe_stream_duration(path: Path, stream: str) -> float:
+    """Duration of the first video or audio stream, independent of container.
+
+    Container duration can hide a short audio/video mismatch because it is
+    simply the longest stream. Final delivery validation needs both values.
+    """
+    selector = {"video": "v:0", "audio": "a:0"}.get(stream, stream)
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", selector,
+             "-show_entries", "stream=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=30)
+        return float((out.stdout or "").strip())
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 def is_valid_video(path: Path, min_duration: float = 1.0) -> bool:
     """True only for a finalized, probeable video container.
 
@@ -310,6 +328,13 @@ def _fonts_dir_for(family: Optional[str]) -> str:
 # the visual "tier" a caller asks for looks about the same either path.
 _CRF_TO_VT_QV = {14: 85, 16: 78, 18: 70, 20: 65, 22: 58, 23: 55, 24: 52}
 
+# Every encoded MP4 segment follows the same timing contract. B-frames create
+# negative DTS/edit lists that can insert tiny duplicate gaps at concat cuts;
+# a fixed track timescale keeps frame boundaries exact at 30/60 fps.
+_SEGMENT_TIMING_ARGS = [
+    "-pix_fmt", "yuv420p", "-bf", "0", "-video_track_timescale", "15360",
+]
+
 
 def _encode_args(quality: Optional[str] = None, crf: Optional[int] = None,
                  gpu: bool = False) -> List[str]:
@@ -334,17 +359,20 @@ def _encode_args(quality: Optional[str] = None, crf: Optional[int] = None,
         if enc == "h264_nvenc":
             return ["-c:v", "h264_nvenc", "-preset", "p4",
                     "-rc", "vbr", "-cq", str(crf if crf is not None else 23),
-                    "-b:v", "0"]
+                    "-b:v", "0", *_SEGMENT_TIMING_ARGS]
         if enc == "h264_qsv":
             return ["-c:v", "h264_qsv",
-                    "-global_quality", str(crf if crf is not None else 23)]
+                    "-global_quality", str(crf if crf is not None else 23),
+                    *_SEGMENT_TIMING_ARGS]
         if enc == "h264_amf":
             q = str(crf if crf is not None else 23)
             return ["-c:v", "h264_amf", "-quality", "balanced",
-                    "-rc", "cqp", "-qp_i", q, "-qp_p", q]
+                    "-rc", "cqp", "-qp_i", q, "-qp_p", q,
+                    *_SEGMENT_TIMING_ARGS]
         if enc == "h264_vaapi":
             return ["-c:v", "h264_vaapi",
-                    "-qp", str(crf if crf is not None else 23)]
+                    "-qp", str(crf if crf is not None else 23),
+                    *_SEGMENT_TIMING_ARGS]
         if enc == "h264_videotoolbox":
             return ["-c:v", "h264_videotoolbox",
                     "-q:v", str(_CRF_TO_VT_QV.get(crf, 65)),
@@ -356,7 +384,8 @@ def _encode_args(quality: Optional[str] = None, crf: Optional[int] = None,
                     # their own branches above and are unaffected.
                     "-realtime", "1", "-prio_speed", "1",
                     "-power_efficient", "1",
-                    "-allow_sw", "1"]  # software fallback if VT is unavailable
+                    "-allow_sw", "1",
+                    *_SEGMENT_TIMING_ARGS]  # software fallback if VT is unavailable
         # gpu was requested but this machine has no hardware H.264 encoder —
         # fall through to x264 rather than emitting an invalid -c:v.
     args = ["-c:v", "libx264"]
@@ -364,7 +393,47 @@ def _encode_args(quality: Optional[str] = None, crf: Optional[int] = None,
         args += ["-preset", quality]
     if crf is not None:
         args += ["-crf", str(crf)]
-    return args
+    return [*args, *_SEGMENT_TIMING_ARGS]
+
+
+def lock_av_duration(path: Path, workdir: Path,
+                     log: Callable[[str], None] = lambda *_: None) -> Path:
+    """Make a final MP4's audio end exactly with its video stream.
+
+    AAC priming and concatenated source files can leave audio a fraction of a
+    second longer or shorter than the picture. Upload platforms may reject
+    that file, so copy the video losslessly and pad/trim only the audio when
+    the measured mismatch is material.
+    """
+    video_dur = probe_stream_duration(path, "video")
+    audio_dur = probe_stream_duration(path, "audio")
+    if not (video_dur > 0 and audio_dur > 0):
+        log(f"  final A/V check skipped for {path.name} (missing stream duration)")
+        return path
+    if abs(video_dur - audio_dur) <= 0.05:
+        log(f"  final A/V matched: video {video_dur:.2f}s · "
+            f"audio {audio_dur:.2f}s")
+        return path
+
+    log(f"  final A/V mismatch: video {video_dur:.2f}s · "
+        f"audio {audio_dur:.2f}s — locking audio to picture")
+    tmp = workdir / f"{path.stem}_avlock{path.suffix}"
+    tmp.unlink(missing_ok=True)
+    try:
+        _run([
+            "ffmpeg", "-y", "-i", str(path),
+            "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy",
+            "-af", (f"apad=whole_dur={video_dur + 0.5:.6f},"
+                    f"atrim=0:{video_dur:.6f}"),
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-movflags", "+faststart", str(tmp),
+        ], wallclock_s=max(600.0, video_dur * 0.2 + 120.0))
+        if not is_valid_video(tmp, min_duration=max(0.2, video_dur - 1.0)):
+            raise RuntimeError("A/V duration lock produced an invalid MP4")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return path
 
 
 def _sub_style(margin_r: int = 25) -> str:
@@ -1366,6 +1435,8 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                              popup_width=popup_width,
                              popup_margin=popup_margin,
                              workdir=workdir, gpu=gpu_encode)
+        lock_av_duration(part1, workdir, log=log)
+        lock_av_duration(part2, workdir, log=log)
         # Default player / download uses the free half (with Patreon end clip).
         # os.link, NOT Path.hardlink_to: the latter only exists on Python 3.10+
         # and this runs on 3.9, where it raised AttributeError straight into
@@ -1382,4 +1453,5 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
         return out_path
 
     _stitch(clips, out_path, "full video")
+    lock_av_duration(out_path, workdir, log=log)
     return out_path

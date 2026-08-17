@@ -2059,6 +2059,7 @@ def api_settings():
             "cpu_cores": config._detect_cpu_count(),
             "ram_gb": round(config._detect_ram_gb(), 1),
             "gpu_encode_available": config.gpu_encode_available(),
+            "gpu_encoder": config.gpu_encoder(),
         },
     })
 
@@ -2617,12 +2618,12 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5066))
     host = (os.environ.get("HOST") or "").strip() or (
         "0.0.0.0" if ACCESS else "127.0.0.1")
-    _vt = "available" if config.gpu_encode_available() else "unavailable"
+    _encoder = config.gpu_encoder() or "libx264"
     print(f"Dmiqwi → http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port} "
          f"(MAX_CONCURRENT_JOBS={config.MAX_CONCURRENT_JOBS}, "
          f"beat_workers: {config.resolve_beat_workers(False)} CPU / "
          f"{config.resolve_beat_workers(True)} GPU, "
-         f"VideoToolbox: {_vt})")
+         f"H.264 encoder: {_encoder})")
     # Restore any queue that survived the previous process, then drain it.
     _restore_queue()
     atexit.register(_persist_queue)

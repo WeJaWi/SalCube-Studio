@@ -842,8 +842,10 @@ function applyGpuToggleUi(on) {
 fetch("/api/settings").then(r => r.json()).then(s => {
   applyGpuToggleUi(!!s.gpu_encode);
   if (!s.hardware || !s.hardware.gpu_encode_available) {
-    $("#gpuToggleWrap").title = "VideoToolbox not available on this machine";
+    $("#gpuToggleWrap").title = "No working hardware H.264 encoder was found on this machine";
     $("#gpuToggle").disabled = true;
+  } else if (s.hardware.gpu_encoder) {
+    $("#gpuToggleWrap").title = `Use ${s.hardware.gpu_encoder} for jobs started after this change`;
   }
 }).catch(() => {});
 $("#gpuToggle").addEventListener("change", async () => {

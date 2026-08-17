@@ -4,12 +4,13 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import app
 from PIL import Image
 from docx import Document
-from pipeline import (delivery_doc, identity, llm, operations, orchestrator,
+from pipeline import (config, delivery_doc, identity, llm, operations, orchestrator,
                       render, research, script, storage, thumbnail)
 
 
@@ -253,6 +254,48 @@ class MacRenderOptimizationTests(unittest.TestCase):
         self.assertIn("-prio_speed", args)
         self.assertIn("-power_efficient", args)
         self.assertEqual(args[args.index("-q:v") + 1], "65")
+
+    def test_all_encoders_use_gapless_segment_timing(self):
+        args = render._encode_args(quality="veryfast", crf=20)
+        self.assertEqual(args[args.index("-bf") + 1], "0")
+        self.assertEqual(
+            args[args.index("-video_track_timescale") + 1], "15360")
+
+    def test_hardware_probe_skips_a_compiled_but_broken_encoder(self):
+        calls = []
+
+        def fake_run(cmd, **_kwargs):
+            calls.append(cmd)
+            return SimpleNamespace(
+                returncode=0 if "h264_qsv" in cmd else 1)
+
+        with patch.object(config, "_gpu_encoder_cache", None), \
+                patch.object(config.sys, "platform", "win32"), \
+                patch.object(config.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(config.gpu_encoder(), "h264_qsv")
+        self.assertIn("h264_nvenc", calls[0])
+        self.assertIn("h264_amf", calls[1])
+        self.assertIn("h264_qsv", calls[2])
+
+    def test_final_av_lock_reencodes_only_audio_when_streams_drift(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "final.mp4"
+            video.write_bytes(b"original")
+            commands = []
+
+            def fake_ffmpeg(cmd, **_kwargs):
+                commands.append(cmd)
+                Path(cmd[-1]).write_bytes(b"locked")
+
+            with patch.object(render, "probe_stream_duration",
+                              side_effect=[10.0, 10.3]), \
+                    patch.object(render, "_run", side_effect=fake_ffmpeg), \
+                    patch.object(render, "is_valid_video", return_value=True):
+                render.lock_av_duration(video, root)
+            self.assertEqual(video.read_bytes(), b"locked")
+            self.assertIn("copy", commands[0])
+            self.assertIn("atrim=0:10.000000", " ".join(commands[0]))
 
     def test_partial_mp4_is_not_a_valid_deliverable(self):
         with TemporaryDirectory() as tmp:
