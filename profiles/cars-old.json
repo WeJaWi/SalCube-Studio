@@ -1,0 +1,63 @@
+{
+  "name": "cars-old",
+  "description": "English researched videos about classic, vintage, and older cars, primarily before model year 2000. Enter a topic and choose from three generated titles.",
+  "engine": "hannah",
+  "channel_context": "an English long-form channel about classic, vintage, and older automobiles primarily before model year 2000, covering period engineering, model history, design, motorsport context, preservation, restoration, ownership, and how later myths differ from contemporary evidence",
+  "audience_line": "speaks to one classic-car enthusiast who appreciates period detail, mechanical understanding, historical context, and respect for originality without romanticizing poor safety or reliability",
+  "research": {"enabled": true, "provider": "gpt-5.6-terra", "kind": "automotive_classic", "title_choices": 3},
+  "thumbnail": {"enabled": false},
+  "video": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "ken_burns": true,
+    "beat_seconds": 21,
+    "broll_mix": {"stock": 0.38, "stock_image": 0.38, "animation": 0.16, "ai_video": 0.08},
+    "max_template_repeats": 2,
+    "anim_themes_default": ["amber", "forest"],
+    "ai_video_resolution": "720p",
+    "overlay": {"enabled": true, "opacity": 0.24},
+    "transitions": {"enabled": false, "seconds": 0.55, "types": ["fade", "smoothleft", "fade"]},
+    "intro_card": {"enabled": true, "brand": "OLD CARS"},
+    "host_budget_seconds": 0
+  },
+  "defaults": {"language": "English", "length_chars": 39500, "length_chars_min": 32000, "length_chars_max": 47000},
+  "host": {
+    "enabled": false,
+    "persona": "A careful automotive historian and mechanically informed classic-car narrator who respects period documentation, explains engineering in its original context, and separates surviving evidence from club lore.",
+    "register": "Evocative and enthusiastic but historically disciplined. Use period detail to create atmosphere without inventing scenes, quotations, motives, or production facts."
+  },
+  "ai_disclosure": "",
+  "style": {
+    "broll_style": "cinematic period automobiles, archival-inspired factory and road imagery, analog instruments, carburetors and mechanical details, restoration workshops, patina and period-correct environments, realistic proportions, no readable modern branding or anachronistic parts",
+    "music_style": "warm historical automotive documentary score, restrained drums, upright bass, guitar and subtle orchestral color, nostalgic without parody, no vocals"
+  },
+  "music": {"enabled": true, "tracks": "auto", "minutes_per_track": 18, "min_tracks": 2, "max_tracks": 5},
+  "voices": {"English": "elevenlabs_CwhRBWXzGAHq8TQ4Fs17"},
+  "writing_sections": [
+    {"name": "period_hook", "weight": 0.1, "hint": "Open with a verified design decision, historical turning point, or ownership reality that places the vehicle in its era."},
+    {"name": "historical_setting", "weight": 0.23, "hint": "Establish dates, market, manufacturer context, generation, variants, intended audience, and what contemporary conditions shaped the car."},
+    {"name": "machine_and_evolution", "weight": 0.3, "hint": "Explain period engineering, model changes, specifications, and tradeoffs while keeping market, year, body, engine, and homologation variants separate."},
+    {"name": "legacy_and_preservation", "weight": 0.24, "hint": "Examine reception, use, preservation, restoration, modern ownership, and later reputation. Separate original equipment, period modifications, and modern upgrades."},
+    {"name": "close_block", "weight": 0.13, "hint": "Resolve the historical question without mythmaking, identify uncertainties, invite informed owner knowledge, and add a soft subscription invitation. {LIKE_SUBSCRIBE}"}
+  ],
+  "cta_lines": {"like_subscribe": "Invite viewers to share period documents or exact variant details behind their experience, then softly ask them to subscribe for more accurate classic-car stories."},
+  "north_star": "Preserve the real machine and its real context. Period sources, variant precision, and explicit uncertainty take priority over nostalgia, repeated internet lore, auction language, or modern hindsight.",
+  "outline_extras": "Map dates, production claims, specifications, quotations, and historical firsts to supplied primary or period sources in the private outline. Mark disputed facts and omit unsupported lore.",
+  "rules": [
+    "English only.",
+    "Use the supplied research brief and source material as the factual boundary; do not convert repeated enthusiast lore into history.",
+    "Keep model year, series, chassis, body builder, engine, gearbox, trim, market, homologation, factory option, and later modification distinct.",
+    "Never invent production totals, chassis survival counts, prices, performance, racing results, quotations, designer intent, firsts, rarity, or celebrity ownership.",
+    "Use period specifications in their correct measurement standard and explain modern conversions carefully when supplied.",
+    "Distinguish original equipment, period-correct changes, restoration choices, replicas, restomods, and modern safety upgrades.",
+    "Do not romanticize weak historical safety, emissions, braking, tire, or reliability performance or encourage unsafe road use.",
+    "Body is continuous spoken English prose with no headings, citations, URLs, bullets, or stage directions."
+  ],
+  "hook_types": {
+    "bold_statement": "Open with the strongest verified historical or engineering consequence without using unsupported rarity or first-ever language.",
+    "question": "Ask a precise question about why the old car existed, how it worked, what changed, or why its reputation evolved.",
+    "short_story": "Open with a documented period setting or a clearly generic ownership moment; never fabricate a named historical scene.",
+    "pattern_break": "Correct a common classic-car myth only when supplied period evidence supports the correction."
+  }
+}

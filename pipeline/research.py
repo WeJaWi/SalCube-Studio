@@ -248,7 +248,66 @@ def astrology_package(theme: str) -> dict:
     }
 
 
+_AUTOMOTIVE_FOCUS = {
+    "cars": (
+        "general automobiles across engineering, design, history, comparisons, "
+        "ownership, and driving culture; choose a focused angle that matches the topic"),
+    "carparts": (
+        "automotive components, how systems work, maintenance, failure symptoms, "
+        "diagnostic logic, replacement choices, and repair safety"),
+    "cars-modern": (
+        "modern vehicles from roughly model year 2000 onward, including current "
+        "powertrains, EVs, hybrids, safety systems, infotainment, software, and ADAS"),
+    "cars-old": (
+        "classic, vintage, and older vehicles primarily before model year 2000, "
+        "including period engineering, model history, preservation, restoration, "
+        "and the distinction between original equipment and later modifications"),
+}
+
+
+def automotive_package(profile_name: str, theme: str) -> dict:
+    focus = _AUTOMOTIVE_FOCUS[profile_name]
+    package = llm.chat_json(
+        "Act as a meticulous automotive researcher and English YouTube editor. "
+        f"The channel focus is: {focus}. Research the user's topic and narrow it "
+        "to one coherent long-form video angle. Accuracy is more important than "
+        "drama. Distinguish model year, generation, trim, engine, drivetrain, and "
+        "market whenever a claim can vary. Separate manufacturer specifications "
+        "from measured road-test results and owner anecdotes. Do not invent part "
+        "fitment, torque values, fluid specifications, prices, production totals, "
+        "recall status, performance figures, quotations, or first/only/best claims. "
+        "For repair content, explain that the correct factory service information "
+        "for the exact vehicle takes priority and flag work involving lifting, "
+        "brakes, fuel, airbags, high voltage, or other serious hazards. For current "
+        "or time-sensitive claims, identify the as-of date. Omit any material claim "
+        "you cannot support. Prefer primary sources such as manufacturer manuals and "
+        "archives, official parts catalogs, regulators, standards bodies, museums, "
+        "and period documentation; use reputable technical publications only as "
+        "secondary support. Return ONLY JSON with: research_brief (a detailed, "
+        "internally consistent factual boundary and video structure), "
+        "source_material (a concise claim-to-source list including source names and "
+        "URLs where available), and titles (exactly 3 distinct, truthful, compelling "
+        "English YouTube titles under 100 characters). Titles must not exaggerate "
+        "beyond the verified brief.\n\n"
+        f"Profile: {profile_name}\nRequested topic: {theme}",
+        MODEL, max_tokens=5000, attempts=2, retries=1, timeout=180)
+    brief = str(package.get("research_brief") or "").strip()
+    if len(brief) < 500:
+        raise RuntimeError("Terra returned an incomplete automotive research brief")
+    return {
+        "titles": _titles(package.get("titles")),
+        "research_brief": brief,
+        "source_material": str(package.get("source_material") or "").strip(),
+        "source_metadata": {
+            "platform": "terra-research", "category": "automotive",
+            "profile": profile_name,
+        },
+    }
+
+
 def build_package(profile_name: str, theme: str) -> dict:
     if profile_name == "astrology-search":
         return astrology_package(theme)
+    if profile_name in _AUTOMOTIVE_FOCUS:
+        return automotive_package(profile_name, theme)
     raise RuntimeError(f"profile {profile_name} does not support research")

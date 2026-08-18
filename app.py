@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import hmac
 import json
+import re
 import secrets
 import threading
 import time
@@ -381,6 +382,10 @@ def _restore_queue() -> None:
                 log = list(row.get("log") or [])
             restored_thumbnail = (row.get("thumbnail")
                                   if isinstance(row.get("thumbnail"), dict) else {})
+            if not _profile_uses_thumbnail(profile):
+                # Profile configuration is authoritative for old persisted
+                # jobs too; do not resurrect a pre-update thumbnail thread.
+                restored_thumbnail = {"state": "disabled"}
             # A background thumbnail thread dies on restart just like a
             # render thread. Remember which independent approval task to
             # resume after releasing LOCK.
@@ -392,7 +397,9 @@ def _restore_queue() -> None:
                 "progress_pct": progress_pct,
                 "log": log,
                 "title": title,
-                "publication_title": row.get("publication_title"),
+                "publication_title": (row.get("publication_title") or title
+                                      if not _profile_uses_thumbnail(profile)
+                                      else row.get("publication_title")),
                 "profile": profile,
                 "inputs": inputs,
                 "created_at": row.get("created_at") or datetime.now().isoformat(
@@ -423,10 +430,8 @@ def _restore_queue() -> None:
                                 else {"state": "waiting_for_rules"}),
             }
             package_state = (JOBS[jid].get("package") or {}).get("state")
-            thumbnail_state = (JOBS[jid].get("thumbnail") or {}).get("state")
-            if (thumbnail_state == "approved"
-                    and package_state in ("waiting_for_thumbnail", "creating",
-                                          "uploading", "pending_drive_authorization")):
+            if (drive_complete and _profile_wants_docx(profile)
+                    and package_state != "uploaded"):
                 package_resume.append(jid)
         # queue_state.json is deliberately small and can be replaced during a
         # crash/deploy. Finished videos remain the source of truth on disk, so
@@ -671,31 +676,93 @@ def _drive_deliverables(job_dir: Path) -> list[tuple[str, Path]]:
     return [("final", final)] if video_render.is_valid_video(final) else []
 
 
-def _profile_wants_docx(profile_name: str) -> bool:
+def _profile_uses_thumbnail(profile_name: str) -> bool:
+    """Profiles opt out explicitly; the standalone thumbnail tool remains."""
     try:
-        return bool((orchestrator.load_profile(profile_name).get(
-            "drive_package") or {}).get("docx"))
+        thumbnail_cfg = orchestrator.load_profile(profile_name).get("thumbnail") or {}
+        return thumbnail_cfg.get("enabled", True) is not False
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _profile_wants_docx(profile_name: str) -> bool:
+    """Every real profile gets a cumulative titles document by default."""
+    try:
+        drive_cfg = orchestrator.load_profile(profile_name).get("drive") or {}
+        return drive_cfg.get("titles_docx", True) is not False
     except Exception:  # noqa: BLE001
         return False
 
 
+def _delivery_title_stem(title: str) -> str:
+    """Turn a publication title into a readable, portable Drive filename."""
+    stem = re.sub(r"[\x00-\x1f\x7f]+", " ", str(title or ""))
+    stem = re.sub(r"\s*[\\/]\s*", " - ", stem)
+    stem = re.sub(r"\s+", " ", stem).strip(" .")
+    if not stem:
+        raise ValueError("naming error: the video title cannot form a filename")
+    # Leave room for " - Part 2.mp4" while keeping filenames manageable on
+    # Windows workers and in browser Content-Disposition headers.
+    return stem[:180].rstrip(" .")
+
+
+def _video_drive_name(title: str, role: str = "final") -> str:
+    stem = _delivery_title_stem(title)
+    suffix = {"part1": " - Part 1", "part2": " - Part 2"}.get(role, "")
+    return f"{stem}{suffix}.mp4"
+
+
+def _local_title_conflict(profile_name: str, title: str,
+                          *, exclude_job_id: str = "") -> str:
+    wanted = _delivery_title_stem(title).casefold()
+    with LOCK:
+        rows = [(job_id, dict(job)) for job_id, job in JOBS.items()]
+    for job_id, job in rows:
+        if job_id == exclude_job_id or job.get("profile") != profile_name:
+            continue
+        if job.get("status") == "cancelled":
+            continue
+        existing = str(job.get("publication_title") or "").strip()
+        # A direct-title profile has no title gate, so its submitted title is
+        # already the future Drive filename. Research themes are not filenames.
+        if not existing and not (job.get("title_options") or {}):
+            existing = str(job.get("title") or "").strip()
+        if existing and _delivery_title_stem(existing).casefold() == wanted:
+            return job_id
+    return ""
+
+
+def _title_naming_error(profile_name: str, title: str,
+                        *, exclude_job_id: str = "") -> str:
+    """Return a blocking naming error without starting expensive production."""
+    try:
+        conflict = _local_title_conflict(
+            profile_name, title, exclude_job_id=exclude_job_id)
+        if conflict:
+            return ("naming error: this profile already has a job with the same "
+                    f"video title ({conflict})")
+        if DRIVE.configured and DRIVE.authorized:
+            with _DRIVE_UPLOAD_LOCK:
+                folder_id = DRIVE.ensure_profile_folder(profile_name)
+                for role in ("final", "part1", "part2"):
+                    name = _video_drive_name(title, role)
+                    if DRIVE.find_file(name, folder_id):
+                        return f'naming error: "{name}" already exists in Drive'
+    except Exception as exc:  # noqa: BLE001
+        return f"naming error: Drive could not verify that this title is unique ({exc})"
+    return ""
+
+
 def _upload_profile_docx(job_id: str, job_dir: Path) -> None:
-    """Upload the approved title + thumbnail sheet for opted-in profiles."""
+    """Append a finished title to the profile's one cumulative Drive DOCX."""
     with LOCK:
         job = JOBS.get(job_id)
         if not job or not _profile_wants_docx(job.get("profile", "")):
             return
-        thumb = dict(job.get("thumbnail") or {})
-        if thumb.get("state") != "approved" or not thumb.get("thumbnail_id"):
-            job["package"] = {"state": "waiting_for_thumbnail"}
-            return
         title = str(job.get("publication_title") or job.get("title") or job_id)
-        thumbnail_id = str(thumb["thumbnail_id"])
+        profile_name = str(job.get("profile") or "")
         drive = dict(job.get("drive") or {})
         files = dict(drive.get("files") or {})
-        if files.get("package", {}).get("id"):
-            job["package"] = {"state": "uploaded", "file": files["package"]}
-            return
         job["package"] = {"state": "creating"}
     if not DRIVE.configured or not DRIVE.authorized:
         with LOCK:
@@ -705,19 +772,30 @@ def _upload_profile_docx(job_id: str, job_dir: Path) -> None:
         _persist_queue()
         return
     try:
-        thumb_path = THUMB_OUT_DIR / f"{thumbnail_id}.png"
-        docx_path = job_dir / f"{job_id}-title-thumbnail.docx"
-        delivery_doc.create(title, thumb_path, docx_path)
-        with LOCK:
-            job = JOBS.get(job_id)
-            if job:
-                job["package"] = {"state": "uploading", "path": str(docx_path)}
+        docx_dir = config.OUTPUT_DIR / "profile-documents" / profile_name
+        docx_path = docx_dir / delivery_doc.DOCX_NAME
+        docx_dir.mkdir(parents=True, exist_ok=True)
         with _DRIVE_UPLOAD_LOCK:
+            folder_id = DRIVE.ensure_profile_folder(profile_name)
+            remote = DRIVE.find_file(delivery_doc.DOCX_NAME, folder_id)
+            if remote:
+                DRIVE.download_to_path(remote["id"], docx_path)
+                titles = delivery_doc.read_titles(docx_path)
+            else:
+                titles = []
+            delivery_doc.create([*titles, title], docx_path)
+            with LOCK:
+                current = JOBS.get(job_id)
+                if current:
+                    current["package"] = {
+                        "state": "uploading", "path": str(docx_path)}
             result = DRIVE.upload(
-                docx_path, dest_name=docx_path.name,
-                state_file=job_dir / ".gdrive-package.json",
+                docx_path, dest_name=delivery_doc.DOCX_NAME,
+                state_file=docx_dir / ".gdrive-titles.json",
                 content_type=("application/vnd.openxmlformats-officedocument."
-                              "wordprocessingml.document"))
+                              "wordprocessingml.document"),
+                folder_id=folder_id,
+                file_id=(remote or {}).get("id"))
         with LOCK:
             job = JOBS.get(job_id)
             if job:
@@ -727,7 +805,9 @@ def _upload_profile_docx(job_id: str, job_dir: Path) -> None:
                 drive["files"] = files
                 job["drive"] = drive
                 job["package"] = {"state": "uploaded", "file": result}
-        _append_job_log(job_id, "drive", "Title + thumbnail DOCX uploaded to Drive")
+        _append_job_log(
+            job_id, "drive",
+            f'Title added to {delivery_doc.DOCX_NAME} in the {profile_name} folder')
     except Exception as exc:  # noqa: BLE001
         traceback.print_exc()
         with LOCK:
@@ -761,6 +841,8 @@ def _upload_job_deliverables(job_id: str, job_dir: Path) -> None:
         job = JOBS.get(job_id)
         if not job:
             return
+        profile_name = str(job.get("profile") or "")
+        title = str(job.get("publication_title") or job.get("title") or job_id)
         drive = dict(job.get("drive") or {})
         files = dict(drive.get("files") or {})
         job["drive"] = {"state": "uploading", "files": files}
@@ -768,14 +850,23 @@ def _upload_job_deliverables(job_id: str, job_dir: Path) -> None:
     _persist_queue()
 
     try:
+        with _DRIVE_UPLOAD_LOCK:
+            folder_id = DRIVE.ensure_profile_folder(profile_name)
         for role, path in _drive_deliverables(job_dir):
             if role in files and not path.exists():
                 continue
-            suffix = "" if role == "final" else f"-{role}"
+            dest_name = _video_drive_name(title, role)
             with _DRIVE_UPLOAD_LOCK:
+                existing = DRIVE.find_file(dest_name, folder_id)
+                known_id = (files.get(role) or {}).get("id")
+                if existing and existing.get("id") != known_id:
+                    raise storage.DriveError(
+                        f'naming error: "{dest_name}" already exists in the '
+                        f"{profile_name} Drive folder")
                 result = DRIVE.upload(
-                    path, dest_name=f"{job_id}{suffix}.mp4",
-                    state_file=job_dir / f".gdrive-{role}.json")
+                    path, dest_name=dest_name,
+                    state_file=job_dir / f".gdrive-{role}.json",
+                    folder_id=folder_id, file_id=known_id)
             files[role] = result
             with LOCK:
                 job = JOBS.get(job_id)
@@ -791,7 +882,8 @@ def _upload_job_deliverables(job_id: str, job_dir: Path) -> None:
         with LOCK:
             job = JOBS.get(job_id)
             if job:
-                job["drive"] = {"state": "uploaded", "files": files}
+                job["drive"] = {"state": "uploaded", "files": files,
+                                "profile_folder_id": folder_id}
         _append_job_log(job_id, "drive", "Drive handoff complete; local deliverable removed")
         _upload_profile_docx(job_id, job_dir)
     except Exception as e:  # noqa: BLE001
@@ -1165,6 +1257,7 @@ def _enqueue_job(inputs: dict, profile: str, *, resume: str = "") -> str:
     inputs_file.write_text(json.dumps({**inputs, "_profile": profile}, indent=1))
     est_chars = int(inputs.get("length_chars") or defaults.get("length_chars", 15000))
     needs_research = bool((profile_data.get("research") or {}).get("enabled"))
+    uses_thumbnail = _profile_uses_thumbnail(profile)
 
     created_at = datetime.now().isoformat(timespec="seconds")
     with LOCK:
@@ -1177,6 +1270,7 @@ def _enqueue_job(inputs: dict, profile: str, *, resume: str = "") -> str:
                      "message": ("Terra is researching the theme and preparing three titles"
                                  if needs_research else "Added to queue")}],
             "title": title,
+            "publication_title": None if needs_research else title,
             "profile": profile,
             "inputs": inputs,
             "created_at": created_at,
@@ -1189,20 +1283,22 @@ def _enqueue_job(inputs: dict, profile: str, *, resume: str = "") -> str:
             "research_attempt": 1 if needs_research else 0,
             "title_options": ({"state": "generating", "theme": title}
                               if needs_research else {}),
-            "package": ({"state": "waiting_for_thumbnail"}
-                        if (profile_data.get("drive_package") or {}).get("docx")
+            "package": ({"state": "waiting_for_video"}
+                        if _profile_wants_docx(profile)
                         else {}),
             "thumbnail": (existing_thumb if isinstance(existing_thumb, dict)
-                          else ({"state": "waiting_for_title"}
-                                if needs_research else
-                                {"state": "generating_words"})),
+                          else ({"state": "disabled"}
+                                if not uses_thumbnail else
+                                ({"state": "waiting_for_title"}
+                                 if needs_research else
+                                 {"state": "generating_words"}))),
             # Deliberately inactive until the owner supplies channel rules.
             "description": {"state": "waiting_for_rules"},
         }
     _persist_queue()
     if needs_research:
         _start_profile_research(job_id)
-    elif not resume:
+    elif uses_thumbnail and not resume:
         _start_thumbnail_words(job_id)
     return job_id
 
@@ -1294,6 +1390,20 @@ def approve_researched_title(job_id: str):
             return jsonify({"error": "job is not awaiting a title choice"}), 409
         if chosen not in candidates:
             return jsonify({"error": "choose one of the three proposed titles"}), 400
+        profile_name = job["profile"]
+    naming_error = _title_naming_error(
+        profile_name, chosen, exclude_job_id=job_id)
+    if naming_error:
+        return jsonify({"error": naming_error}), 409
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "unknown job"}), 404
+        options = dict(job.get("title_options") or {})
+        candidates = [str(x).strip() for x in options.get("candidates") or []]
+        if (job.get("status") != "awaiting_title"
+                or options.get("state") != "ready" or chosen not in candidates):
+            return jsonify({"error": "title choices changed; select again"}), 409
         job["title"] = chosen
         job["publication_title"] = chosen
         job_inputs = job.setdefault("inputs", {})
@@ -1301,7 +1411,9 @@ def approve_researched_title(job_id: str):
         options.update(state="approved", selected=chosen,
                        approved_at=datetime.now().isoformat(timespec="seconds"))
         job["title_options"] = options
-        job["thumbnail"] = {"state": "generating_words"}
+        uses_thumbnail = _profile_uses_thumbnail(profile_name)
+        job["thumbnail"] = ({"state": "generating_words"}
+                            if uses_thumbnail else {"state": "disabled"})
         job["status"] = "queued"
         job["step"] = "queued"
         job["error"] = None
@@ -1310,12 +1422,12 @@ def approve_researched_title(job_id: str):
             "t": datetime.now().strftime("%H:%M:%S"), "step": "queue",
             "message": "Title approved — video moved into the production queue",
         })
-        profile_name = job["profile"]
         inputs_copy = dict(job_inputs)
     (config.OUTPUT_DIR / job_id / "inputs.json").write_text(json.dumps(
         {**inputs_copy, "_profile": profile_name}, indent=1))
     _persist_queue()
-    _start_thumbnail_words(job_id)
+    if uses_thumbnail:
+        _start_thumbnail_words(job_id)
     _kick_queue()
     return jsonify({"ok": True, "job_id": job_id, "title": chosen})
 
@@ -1378,6 +1490,23 @@ def start_render():
 
     if not titles and not resume:
         return jsonify({"error": "title is required"}), 400
+
+    if not resume:
+        try:
+            profile_data = orchestrator.load_profile(profile)
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"error": f"profile could not be loaded: {exc}"}), 400
+        needs_research = bool((profile_data.get("research") or {}).get("enabled"))
+        if not needs_research:
+            batch_names = [_delivery_title_stem(title).casefold() for title in titles]
+            if len(set(batch_names)) != len(batch_names):
+                return jsonify({
+                    "error": "naming error: the batch contains the same video title twice"
+                }), 409
+            for title in titles:
+                naming_error = _title_naming_error(profile, title)
+                if naming_error:
+                    return jsonify({"error": naming_error}), 409
 
     job_ids: list[str] = []
     for i, title in enumerate(titles):
@@ -1915,6 +2044,7 @@ def video(job_id: str):
     with LOCK:
         job = JOBS.get(job_id) or {}
         drive_files = ((job.get("drive") or {}).get("files") or {})
+        title = str(job.get("publication_title") or job.get("title") or job_id)
     drive_role = "part1" if part in ("1", "part1", "free") else (
         "part2" if part in ("2", "part2", "paid", "patreon") else "final")
     # Default view is the free half for a Patreon split, just like the local
@@ -1943,14 +2073,14 @@ def video(job_id: str):
         abort(404)
     # ?download=1 → save-as instead of playing in the browser tab
     download = request.args.get("download") == "1"
-    with LOCK:
-        title = (JOBS.get(job_id) or {}).get("title")
     if not title:  # server restarted since — the job dir remembers
         f = job_dir / "inputs.json"
         if f.exists():
             title = (json.loads(f.read_text()).get("title") or "").strip()
+    local_role = "part1" if path.name == "final_part1.mp4" else (
+        "part2" if path.name == "final_part2.mp4" else "final")
     return send_file(path, mimetype="video/mp4", as_attachment=download,
-                     download_name=f"{job_id}{suffix}.mp4")
+                     download_name=_video_drive_name(title or job_id, local_role))
 
 
 def _drive_redirect_uri() -> str:
@@ -1965,6 +2095,20 @@ def _drive_redirect_uri() -> str:
 @app.route("/api/drive/status")
 def drive_status():
     return jsonify(DRIVE.status())
+
+
+@app.route("/api/drive/disconnect", methods=["POST"])
+def drive_disconnect():
+    with LOCK:
+        active = [job_id for job_id, job in JOBS.items()
+                  if job.get("status") == "uploading"]
+    if active:
+        return jsonify({
+            "error": "Drive is uploading a video; wait for it to finish before changing accounts"
+        }), 409
+    with _DRIVE_UPLOAD_LOCK:
+        revoked = DRIVE.disconnect(revoke=True)
+    return jsonify({"ok": True, "revoked": revoked})
 
 
 @app.route("/api/drive/authorize")
@@ -2014,12 +2158,16 @@ def drive_retry(job_id: str):
             return jsonify({"error": "Drive upload already running"}), 409
         upload_video = bool(_drive_deliverables(job_dir))
         package_state = (job.get("package") or {}).get("state")
+        remote_files = ((job.get("drive") or {}).get("files") or {})
+        has_uploaded_video = any(role in remote_files
+                                 for role in ("final", "part1", "part2"))
         upload_package = bool(
             _profile_wants_docx(job.get("profile", ""))
-            and (job.get("thumbnail") or {}).get("state") == "approved"
-            and package_state != "uploaded")
+            and has_uploaded_video and package_state != "uploaded")
         if not upload_video and not upload_package:
-            return jsonify({"error": "no local video or approved DOCX package available to upload"}), 409
+            return jsonify({
+                "error": "no local video or finished titles document is available to upload"
+            }), 409
         if upload_video:
             job["drive"] = {"state": "uploading",
                             "files": (job.get("drive") or {}).get("files") or {}}
@@ -2296,6 +2444,12 @@ def _thumbnail_words_task(job_id: str) -> None:
             return
         title, profile_name = job["title"], job["profile"]
         inputs = dict(job.get("inputs") or {})
+    if not _profile_uses_thumbnail(profile_name):
+        with LOCK:
+            if job_id in JOBS:
+                JOBS[job_id]["thumbnail"] = {"state": "disabled"}
+        _persist_queue()
+        return
     _, character_name = _thumbnail_character(profile_name, inputs)
     language = _thumbnail_language(profile_name, inputs)
     show_name = _thumbnail_shows_name(profile_name)
@@ -2363,6 +2517,11 @@ def _thumbnail_words_task(job_id: str) -> None:
 
 
 def _start_thumbnail_words(job_id: str) -> None:
+    with LOCK:
+        job = JOBS.get(job_id)
+        profile_name = str((job or {}).get("profile") or "")
+    if not job or not _profile_uses_thumbnail(profile_name):
+        return
     threading.Thread(target=_thumbnail_words_task, args=(job_id,), daemon=True,
                      name=f"dmiqwi-thumb-words-{job_id}").start()
 
@@ -2431,12 +2590,22 @@ def approve_thumbnail_words(job_id: str):
     with LOCK:
         job = JOBS.get(job_id)
         profile_name = job.get("profile", "") if job else ""
+        if not job:
+            return jsonify({"error": "unknown job"}), 404
+        if not _profile_uses_thumbnail(profile_name):
+            return jsonify({"error": "thumbnail generation is disabled for this profile"}), 409
+        if _profile_locks_submitted_title(profile_name):
+            localized_title = str(job.get("title") or localized_title).strip()
     show_name = _thumbnail_shows_name(profile_name)
     required_words = ("main_text", "red_word", "yellow_word")
     if (not localized_title
             or not all(words[key] for key in required_words)
             or (show_name and not words["name"])):
         return jsonify({"error": "the localized title and required thumbnail word fields are required"}), 400
+    naming_error = _title_naming_error(
+        profile_name, localized_title, exclude_job_id=job_id)
+    if naming_error:
+        return jsonify({"error": naming_error}), 409
     with LOCK:
         job = JOBS.get(job_id)
         if not job:
@@ -2464,6 +2633,8 @@ def retry_thumbnail_words(job_id: str):
         job = JOBS.get(job_id)
         if not job:
             return jsonify({"error": "unknown job"}), 404
+        if not _profile_uses_thumbnail(job.get("profile", "")):
+            return jsonify({"error": "thumbnail generation is disabled for this profile"}), 409
         job["thumbnail"] = {"state": "generating_words"}
     _persist_queue()
     _start_thumbnail_words(job_id)
@@ -2484,13 +2655,7 @@ def approve_thumbnail_image(job_id: str):
         state["state"] = "approved"
         state["approved_at"] = datetime.now().isoformat(timespec="seconds")
         job["thumbnail"] = state
-        wants_docx = _profile_wants_docx(job.get("profile", ""))
     _persist_queue()
-    if wants_docx:
-        threading.Thread(
-            target=_upload_profile_docx,
-            args=(job_id, config.OUTPUT_DIR / job_id), daemon=True,
-            name=f"dmiqwi-docx-{job_id}").start()
     return jsonify({"ok": True, "thumbnail_id": state.get("thumbnail_id")})
 
 
@@ -2502,6 +2667,8 @@ def regenerate_thumbnail_image(job_id: str):
         job = JOBS.get(job_id)
         if not job:
             return jsonify({"error": "unknown job"}), 404
+        if not _profile_uses_thumbnail(job.get("profile", "")):
+            return jsonify({"error": "thumbnail generation is disabled for this profile"}), 409
         state = dict(job.get("thumbnail") or {})
         if not state.get("words"):
             return jsonify({"error": "approve thumbnail words first"}), 409

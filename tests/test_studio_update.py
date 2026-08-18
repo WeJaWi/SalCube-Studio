@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import app
-from PIL import Image
 from docx import Document
 from pipeline import (config, delivery_doc, identity, llm, operations, orchestrator,
                       render, research, script, storage, thumbnail)
@@ -74,13 +73,13 @@ class ResearchProfileTests(unittest.TestCase):
         job = app.JOBS[job_id]
         self.assertEqual(job["status"], "queued")
         self.assertEqual(job["title"], submitted)
-        self.assertEqual(job["thumbnail"]["state"], "generating_words")
+        self.assertEqual(job["thumbnail"]["state"], "disabled")
         self.assertEqual(job["inputs"]["language"], "English")
         self.assertGreaterEqual(job["inputs"]["length_chars"], 40000)
         self.assertLessEqual(job["inputs"]["length_chars"], 70000)
         self.assertEqual(job["video_group"], "profile")
         research_start.assert_not_called()
-        thumbnail_start.assert_called_once_with(job_id)
+        thumbnail_start.assert_not_called()
 
     def test_direct_astrology_skips_research_and_keeps_submitted_title(self):
         submitted = "The Three Zodiac Signs Entering a New Chapter"
@@ -98,9 +97,10 @@ class ResearchProfileTests(unittest.TestCase):
         self.assertGreaterEqual(job["inputs"]["length_chars"], 40000)
         self.assertLessEqual(job["inputs"]["length_chars"], 70000)
         research_start.assert_not_called()
-        thumbnail_start.assert_called_once_with(job_id)
+        self.assertEqual(job["thumbnail"]["state"], "disabled")
+        thumbnail_start.assert_not_called()
 
-    def test_direct_astrology_thumbnail_cannot_rewrite_submitted_title(self):
+    def test_direct_astrology_thumbnail_task_is_disabled(self):
         job_id = "55555555555555555555"
         submitted = "Your Moon Sign and the Patterns You Repeat"
         app.JOBS[job_id] = {
@@ -108,17 +108,11 @@ class ResearchProfileTests(unittest.TestCase):
             "profile": "astrology", "inputs": {"language": "English"},
             "log": [], "thumbnail": {"state": "generating_words"},
         }
-        package = {
-            "localized_title": "Terra Tried to Replace the Title",
-            "main_text": "Notice the repeating pattern",
-            "red_word": "Moon Sign", "yellow_word": "Inner Cycle",
-            "name": "ASTROLOGY",
-        }
-        with patch.object(app.llm, "chat_json", return_value=package), \
+        with patch.object(app.llm, "chat_json") as mocked, \
                 patch.object(app, "_persist_queue"):
             app._thumbnail_words_task(job_id)
-        self.assertEqual(
-            app.JOBS[job_id]["thumbnail"]["localized_title"], submitted)
+        self.assertEqual(app.JOBS[job_id]["thumbnail"], {"state": "disabled"})
+        mocked.assert_not_called()
 
     def test_title_approval_accepts_only_a_terra_candidate_and_queues_video(self):
         job_id = "22222222222222222222"
@@ -143,14 +137,13 @@ class ResearchProfileTests(unittest.TestCase):
         self.assertEqual(accepted.status_code, 200)
         self.assertEqual(app.JOBS[job_id]["status"], "queued")
         self.assertEqual(app.JOBS[job_id]["publication_title"], "Title Two")
-        self.assertEqual(app.JOBS[job_id]["thumbnail"]["state"],
-                         "generating_words")
+        self.assertEqual(app.JOBS[job_id]["thumbnail"]["state"], "disabled")
         saved = json.loads((job_dir / "inputs.json").read_text())
         self.assertEqual(saved["title"], "Title Two")
-        thumb.assert_called_once_with(job_id)
+        thumb.assert_not_called()
         kick.assert_called_once()
 
-    def test_direct_reddit_thumbnail_cannot_rewrite_submitted_title(self):
+    def test_direct_reddit_thumbnail_task_is_disabled(self):
         job_id = "33333333333333333333"
         app.JOBS[job_id] = {
             "status": "queued", "step": "queued", "title": "Chosen Title",
@@ -158,14 +151,11 @@ class ResearchProfileTests(unittest.TestCase):
             "inputs": {"language": "English"}, "log": [],
             "thumbnail": {"state": "generating_words"},
         }
-        package = {"localized_title": "Terra Changed It",
-                   "main_text": "THE TRUTH CAME OUT", "red_word": "TOO LATE",
-                   "yellow_word": "ONE DECISION", "name": "REDDIT STORIES"}
-        with patch.object(app.llm, "chat_json", return_value=package), \
+        with patch.object(app.llm, "chat_json") as mocked, \
                 patch.object(app, "_persist_queue"):
             app._thumbnail_words_task(job_id)
-        self.assertEqual(app.JOBS[job_id]["thumbnail"]["localized_title"],
-                         "Chosen Title")
+        self.assertEqual(app.JOBS[job_id]["thumbnail"], {"state": "disabled"})
+        mocked.assert_not_called()
 
     def test_reddit_html_parser_extracts_submission_not_sidebar(self):
         page = ("<div class=\"usertext-body may-blank-within md-container\">"
@@ -179,20 +169,98 @@ class ResearchProfileTests(unittest.TestCase):
         self.assertIn("It has an update.", text)
         self.assertNotIn("sidebar", text)
 
+    def test_car_profile_uses_research_gate_small_length_and_no_thumbnail(self):
+        inputs = app._build_inputs({"video_group": "small"}, "turbo lag")
+        with patch.object(app.identity, "numeric_id",
+                          return_value="66666666666666666666"), \
+                patch.object(app, "_start_profile_research") as research_start, \
+                patch.object(app, "_start_thumbnail_words") as thumbnail_start, \
+                patch.object(app, "_persist_queue"):
+            job_id = app._enqueue_job(inputs, "cars-modern")
+        job = app.JOBS[job_id]
+        self.assertEqual(job["status"], "researching")
+        self.assertEqual(job["title_options"]["theme"], "turbo lag")
+        self.assertEqual(job["thumbnail"], {"state": "disabled"})
+        self.assertEqual(job["inputs"]["language"], "English")
+        self.assertGreaterEqual(job["inputs"]["length_chars"], 32000)
+        self.assertLessEqual(job["inputs"]["length_chars"], 47000)
+        research_start.assert_called_once_with(job_id)
+        thumbnail_start.assert_not_called()
+
+    def test_all_car_profiles_have_distinct_automotive_accuracy_rules(self):
+        for name in ("cars", "carparts", "cars-modern", "cars-old"):
+            profile = orchestrator.load_profile(name)
+            self.assertTrue(profile["research"]["enabled"])
+            self.assertFalse(profile["thumbnail"]["enabled"])
+            self.assertEqual(profile["defaults"]["language"], "English")
+            self.assertEqual(profile["defaults"]["length_chars_min"], 32000)
+            self.assertEqual(profile["defaults"]["length_chars_max"], 47000)
+            rules = " ".join(profile["rules"]).lower()
+            self.assertIn("research", rules)
+        self.assertIn("torque", " ".join(
+            orchestrator.load_profile("carparts")["rules"]).lower())
+        self.assertIn("software", " ".join(
+            orchestrator.load_profile("cars-modern")["rules"]).lower())
+        self.assertIn("period", " ".join(
+            orchestrator.load_profile("cars-old")["rules"]).lower())
+
+    def test_automotive_research_requires_precise_sourced_claims(self):
+        response = {
+            "research_brief": "Verified model-year and market distinctions. " * 30,
+            "source_material": "Manufacturer workshop manual: https://example.test/manual",
+            "titles": ["Title One", "Title Two", "Title Three"],
+        }
+        with patch.object(research.llm, "chat_json", return_value=response) as mocked:
+            package = research.automotive_package("carparts", "water pump failure")
+        prompt = mocked.call_args.args[0]
+        self.assertIn("torque values", prompt)
+        self.assertIn("factory service information", prompt)
+        self.assertEqual(package["titles"], response["titles"])
+        self.assertEqual(package["source_metadata"]["profile"], "carparts")
+
+    def test_duplicate_generated_title_is_rejected_before_queueing(self):
+        current_id = "77777777777777777777"
+        existing_id = "88888888888888888888"
+        current_dir = self.out / current_id
+        current_dir.mkdir()
+        candidates = ["Same Car Title", "Alternative Two", "Alternative Three"]
+        app.JOBS[existing_id] = {
+            "status": "done", "profile": "cars", "title": "Same Car Title",
+            "publication_title": "Same Car Title", "title_options": {"state": "approved"},
+        }
+        app.JOBS[current_id] = {
+            "status": "awaiting_title", "step": "title", "title": "car topic",
+            "profile": "cars", "inputs": {"title": "car topic"}, "log": [],
+            "title_options": {"state": "ready", "theme": "car topic",
+                              "candidates": candidates},
+            "thumbnail": {"state": "disabled"},
+        }
+        fake_drive = SimpleNamespace(configured=False, authorized=False)
+        with patch.object(app, "DRIVE", fake_drive), \
+                patch.object(app, "_persist_queue"), \
+                patch.object(app, "_kick_queue") as kick:
+            response = self.client.post(
+                f"/api/title/job/{current_id}/approve",
+                json={"title": "Same Car Title"})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("naming error", response.get_json()["error"])
+        self.assertEqual(app.JOBS[current_id]["status"], "awaiting_title")
+        kick.assert_not_called()
+
 
 class DeliveryDocumentTests(unittest.TestCase):
-    def test_docx_contains_title_and_embedded_thumbnail(self):
+    def test_docx_contains_only_unique_titles_and_no_thumbnails(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            image_path = root / "thumb.png"
-            Image.new("RGB", (1280, 720), (35, 29, 48)).save(image_path)
             out = delivery_doc.create(
-                "Three Signs Your Life Is Entering a New Cycle",
-                image_path, root / "package.docx")
+                ["First Finished Video", "Second Finished Video",
+                 "first finished video"], root / delivery_doc.DOCX_NAME)
             doc = Document(out)
-            text = "\n".join(p.text for p in doc.paragraphs)
-            self.assertIn("Three Signs Your Life Is Entering a New Cycle", text)
-            self.assertEqual(len(doc.inline_shapes), 1)
+            self.assertEqual([p.text for p in doc.paragraphs],
+                             ["First Finished Video", "Second Finished Video"])
+            self.assertEqual(len(doc.inline_shapes), 0)
+            self.assertEqual(delivery_doc.read_titles(out),
+                             ["First Finished Video", "Second Finished Video"])
             self.assertGreater(out.stat().st_size, 1000)
 
     def test_drive_session_uses_docx_content_type(self):
@@ -208,6 +276,146 @@ class DeliveryDocumentTests(unittest.TestCase):
         headers = request_call.call_args.kwargs["headers"]
         self.assertEqual(headers["X-Upload-Content-Type"],
                          "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    def test_drive_update_session_uses_patch_and_preserves_parent(self):
+        drive = storage.GoogleDriveStorage()
+        response = type("Response", (), {
+            "status_code": 200, "headers": {"Location": "https://session"},
+        })()
+        with patch.object(drive, "_request", return_value=response) as request_call:
+            drive._start_session(
+                delivery_doc.DOCX_NAME, 4321, "profile-folder",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                file_id="existing-doc")
+        self.assertEqual(request_call.call_args.args[:2],
+                         ("PATCH", f"{storage.DRIVE_UPLOAD_API}/files/existing-doc"))
+        self.assertEqual(request_call.call_args.kwargs["json"],
+                         {"name": delivery_doc.DOCX_NAME})
+
+    def test_reauthorization_reuses_existing_app_root_folder(self):
+        with TemporaryDirectory() as tmp:
+            drive = storage.GoogleDriveStorage(
+                client_file=Path(tmp) / "client.json",
+                token_file=Path(tmp) / "token.json")
+            with patch.object(drive, "find_file",
+                              return_value={"id": "existing-root"}) as find, \
+                    patch.object(drive, "_request") as request_call:
+                folder_id = drive.ensure_folder()
+            self.assertEqual(folder_id, "existing-root")
+            find.assert_called_once_with(
+                drive.folder_name, "root", mime_type=storage.FOLDER_MIME)
+            request_call.assert_not_called()
+
+    def test_disconnect_revokes_and_removes_local_token(self):
+        with TemporaryDirectory() as tmp:
+            token_file = Path(tmp) / "token.json"
+            token_file.write_text(json.dumps({"refresh_token": "secret"}))
+            drive = storage.GoogleDriveStorage(
+                client_file=Path(tmp) / "client.json", token_file=token_file)
+            response = SimpleNamespace(status_code=200)
+            with patch.object(storage.requests, "post", return_value=response) as post:
+                revoked = drive.disconnect()
+            self.assertTrue(revoked)
+            self.assertFalse(token_file.exists())
+            self.assertFalse(drive.authorized)
+            self.assertEqual(post.call_args.args[0], storage.OAUTH_REVOKE_URL)
+
+    def test_finished_titles_are_merged_into_one_profile_document(self):
+        class FakeDrive:
+            configured = True
+            authorized = True
+
+            def __init__(self):
+                self.remote = None
+                self.uploads = []
+
+            def ensure_profile_folder(self, profile):
+                self.profile = profile
+                return "folder-id"
+
+            def find_file(self, name, folder_id):
+                return self.remote
+
+            def download_to_path(self, file_id, dest):
+                return dest
+
+            def upload(self, source, **kwargs):
+                self.uploads.append(kwargs)
+                self.remote = {"id": "doc-id", "name": kwargs["dest_name"]}
+                return {"id": "doc-id", "name": kwargs["dest_name"],
+                        "size": source.stat().st_size}
+
+        fake = FakeDrive()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jobs = (("90111111111111111111", "First Car Video"),
+                    ("90222222222222222222", "Second Car Video"))
+            for job_id, title in jobs:
+                app.JOBS[job_id] = {
+                    "status": "done", "profile": "cars", "title": title,
+                    "publication_title": title, "drive": {
+                        "state": "uploaded",
+                        "files": {"final": {"id": f"video-{job_id}"}}},
+                    "package": {"state": "waiting_for_video"}, "log": [],
+                }
+            with patch.object(app.config, "OUTPUT_DIR", root), \
+                    patch.object(app, "DRIVE", fake), \
+                    patch.object(app, "_persist_queue"):
+                for job_id, _ in jobs:
+                    app._upload_profile_docx(job_id, root / job_id)
+            doc_path = (root / "profile-documents" / "cars" /
+                        delivery_doc.DOCX_NAME)
+            self.assertEqual(delivery_doc.read_titles(doc_path),
+                             ["First Car Video", "Second Car Video"])
+            self.assertEqual(fake.profile, "cars")
+            self.assertEqual(fake.uploads[0]["file_id"], None)
+            self.assertEqual(fake.uploads[1]["file_id"], "doc-id")
+            self.assertEqual(fake.uploads[1]["folder_id"], "folder-id")
+
+    def test_video_upload_uses_title_inside_profile_folder(self):
+        class FakeDrive:
+            configured = True
+            authorized = True
+
+            def __init__(self):
+                self.upload_call = None
+
+            def ensure_profile_folder(self, profile):
+                self.profile = profile
+                return "cars-folder"
+
+            def find_file(self, name, folder_id):
+                return None
+
+            def upload(self, source, **kwargs):
+                self.upload_call = kwargs
+                return {"id": "video-id", "name": kwargs["dest_name"],
+                        "size": source.stat().st_size}
+
+        fake = FakeDrive()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job_id = "90333333333333333333"
+            job_dir = root / job_id
+            job_dir.mkdir()
+            video = job_dir / "final.mp4"
+            video.write_bytes(b"not-a-real-video")
+            app.JOBS[job_id] = {
+                "status": "uploading", "profile": "cars-modern",
+                "title": "How Modern Cars See the Road", "log": [],
+                "drive": {"state": "uploading", "files": {}},
+            }
+            with patch.object(app, "DRIVE", fake), \
+                    patch.object(app, "_drive_deliverables",
+                                 return_value=[("final", video)]), \
+                    patch.object(app, "_upload_profile_docx") as docx_update, \
+                    patch.object(app, "_persist_queue"):
+                app._upload_job_deliverables(job_id, job_dir)
+            self.assertEqual(fake.profile, "cars-modern")
+            self.assertEqual(fake.upload_call["folder_id"], "cars-folder")
+            self.assertEqual(fake.upload_call["dest_name"],
+                             "How Modern Cars See the Road.mp4")
+            docx_update.assert_called_once_with(job_id, job_dir)
 
 
 class SpotifyPopupTests(unittest.TestCase):
@@ -697,24 +905,18 @@ class ThumbnailApprovalTests(unittest.TestCase):
         self.assertEqual(app.JOBS[self.job_id]["status"], "done")
         self.assertEqual(app.JOBS[self.job_id]["thumbnail"]["state"], "approved")
 
-    def test_astrology_word_package_forces_empty_bottom_name(self):
+    def test_astrology_thumbnail_word_task_is_disabled(self):
         app.JOBS[self.job_id].update(
             profile="astrology", inputs={"language": "English"},
             title="A New Moon Pattern", thumbnail={"state": "generating_words"})
-        package = {
-            "localized_title": "Terra Tried Another Title",
-            "main_text": "Notice This Pattern", "red_word": "NEW MOON",
-            "yellow_word": "INNER CYCLE", "name": "ASTROLOGY",
-        }
-        with patch.object(app.llm, "chat_json", return_value=package) as mocked, \
+        with patch.object(app.llm, "chat_json") as mocked, \
                 patch.object(app, "_persist_queue"):
             app._thumbnail_words_task(self.job_id)
         state = app.JOBS[self.job_id]["thumbnail"]
-        self.assertEqual(state["state"], "words_ready")
-        self.assertEqual(state["words"]["name"], "")
-        self.assertIn("no bottom name label", mocked.call_args.args[0])
+        self.assertEqual(state["state"], "disabled")
+        mocked.assert_not_called()
 
-    def test_astrology_approval_allows_empty_bottom_name(self):
+    def test_astrology_thumbnail_approval_is_rejected(self):
         app.JOBS[self.job_id].update(
             profile="astrology", inputs={"language": "English"},
             title="A New Moon Pattern")
@@ -726,8 +928,8 @@ class ThumbnailApprovalTests(unittest.TestCase):
                       "main_text": "Notice This Pattern",
                       "red_word": "NEW MOON", "yellow_word": "INNER CYCLE",
                       "name": ""})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(app.JOBS[self.job_id]["thumbnail"]["words"]["name"], "")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("disabled", response.get_json()["error"])
 
 
 class ThumbnailProviderTests(unittest.TestCase):

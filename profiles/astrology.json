@@ -6,8 +6,7 @@
   "audience_line": "speaks to one spiritually curious viewer seeking meaning, timing, reflection, and a grounded way to think about change",
   "research": {"enabled": false, "kind": "direct_title"},
   "title": {"lock_submitted": true},
-  "drive_package": {"docx": true},
-  "thumbnail": {"no_character": true, "display_name": "ASTROLOGY", "show_name": false},
+  "thumbnail": {"enabled": false},
   "video": {
     "width": 1920,
     "height": 1080,

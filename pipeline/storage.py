@@ -24,6 +24,7 @@ DRIVE_API = "https://www.googleapis.com/drive/v3"
 DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3"
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 FOLDER_MIME = "application/vnd.google-apps.folder"
+OAUTH_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 
 
 class DriveError(RuntimeError):
@@ -89,11 +90,13 @@ class GoogleDriveStorage:
         return bool(self._load_token().get("refresh_token"))
 
     def status(self) -> dict:
+        token = self._load_token()
         return {
             "configured": self.configured,
             "authorized": self.authorized,
             "folder_name": self.folder_name,
             "token_file": str(self.token_file),
+            "account": token.get("account") or {},
         }
 
     def authorization_url(self, redirect_uri: str, state: str) -> str:
@@ -125,11 +128,49 @@ class GoogleDriveStorage:
         if not token.get("refresh_token"):
             raise DriveError("Google did not return a refresh token; revoke this app "
                              "in your Google Account and authorize again")
-        self._save_token(token)
+        if token.get("access_token"):
+            token["expires_at"] = time.time() + int(token.get("expires_in") or 3600)
+        # A newly selected account must never inherit the old account's cached
+        # root/profile folder ids. Replace the token file instead of merging it.
+        self._replace_token(token)
+        try:
+            about = self._request(
+                "GET", f"{DRIVE_API}/about",
+                params={"fields": "user(displayName,emailAddress)"}).json()
+            account = about.get("user") or {}
+            if account:
+                self._save_token({"account": account})
+        except Exception:  # noqa: BLE001 -- account label is non-essential
+            pass
+
+    def disconnect(self, *, revoke: bool = True) -> bool:
+        """Forget the connected account and optionally revoke its OAuth grant.
+
+        Local credentials are always cleared, even when Google cannot be
+        reached. The boolean return tells the UI whether revocation succeeded.
+        """
+        token = dict(self._load_token())
+        revoked = not bool(token.get("refresh_token") or token.get("access_token"))
+        if revoke:
+            credential = token.get("refresh_token") or token.get("access_token")
+            if credential:
+                try:
+                    response = requests.post(
+                        OAUTH_REVOKE_URL, params={"token": credential},
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        timeout=30)
+                    revoked = response.status_code == 200
+                except requests.RequestException:
+                    revoked = False
+        self._token = {}
+        self.token_file.unlink(missing_ok=True)
+        return revoked
 
     def upload(self, source: Path, *, dest_name: Optional[str] = None,
                state_file: Optional[Path] = None,
-               content_type: Optional[str] = None) -> dict:
+               content_type: Optional[str] = None,
+               folder_id: Optional[str] = None,
+               file_id: Optional[str] = None) -> dict:
         """Upload and verify one local file, returning only small metadata.
 
         ``state_file`` lets a retry continue a valid Drive session after a
@@ -147,7 +188,11 @@ class GoogleDriveStorage:
                         or "application/octet-stream")
         state_file = state_file or source.with_name(f".{source.name}.gdrive-upload.json")
         state = self._load_upload_state(state_file, source, total)
-        folder_id = state.get("folder_id") or self.ensure_folder()
+        target_folder_id = folder_id or self.ensure_folder()
+        if (state.get("folder_id") != target_folder_id
+                or state.get("file_id") != file_id):
+            state = {}
+        folder_id = target_folder_id
         session_url = state.get("session_url")
         offset = -1
         if session_url:
@@ -161,10 +206,11 @@ class GoogleDriveStorage:
                 session_url = None  # expired sessions must be reopened
         if not session_url:
             session_url = self._start_session(dest_name, total, folder_id,
-                                              content_type)
+                                              content_type, file_id=file_id)
             offset = -1
             state = {"source_name": source.name, "size": total,
-                     "folder_id": folder_id, "session_url": session_url}
+                     "folder_id": folder_id, "file_id": file_id,
+                     "session_url": session_url}
             _atomic_json_write(state_file, state)
 
         result = self._send_chunks(source, total, session_url, state_file, state,
@@ -186,18 +232,87 @@ class GoogleDriveStorage:
                     return existing
             if r.status_code not in (404,):
                 self._require_ok(r, "checking Drive folder")
-        r = self._request("POST", f"{DRIVE_API}/files", json={
-            "name": self.folder_name,
-            "mimeType": FOLDER_MIME,
-        }, params={"fields": "id,name"})
-        self._require_ok(r, "creating Drive videos folder")
-        folder_id = r.json().get("id")
-        if not folder_id:
-            raise DriveError("Drive created the folder without returning its id")
+        # Reconnecting the same Google account replaces the local token cache.
+        # Reuse the app-created root instead of making another `videos` folder.
+        found = self.find_file(self.folder_name, "root", mime_type=FOLDER_MIME)
+        if found:
+            folder_id = found["id"]
+        else:
+            r = self._request("POST", f"{DRIVE_API}/files", json={
+                "name": self.folder_name,
+                "mimeType": FOLDER_MIME,
+            }, params={"fields": "id,name"})
+            self._require_ok(r, "creating Drive videos folder")
+            folder_id = r.json().get("id")
+            if not folder_id:
+                raise DriveError("Drive created the folder without returning its id")
         token["folder_id"] = folder_id
         token["folder_name"] = self.folder_name
         self._save_token(token)
         return folder_id
+
+    def ensure_profile_folder(self, profile_name: str) -> str:
+        """Return a stable child folder below the app's Drive root."""
+        root_id = self.ensure_folder()
+        token = self._load_token()
+        folders = dict(token.get("profile_folders") or {})
+        existing = folders.get(profile_name)
+        if existing and self._folder_is_usable(existing, parent_id=root_id):
+            return existing
+        found = self.find_file(profile_name, root_id, mime_type=FOLDER_MIME)
+        if found:
+            folder_id = found["id"]
+        else:
+            r = self._request("POST", f"{DRIVE_API}/files", json={
+                "name": profile_name, "mimeType": FOLDER_MIME,
+                "parents": [root_id],
+            }, params={"fields": "id,name"})
+            self._require_ok(r, f"creating Drive folder for {profile_name}")
+            folder_id = r.json().get("id")
+            if not folder_id:
+                raise DriveError(
+                    f"Drive created the {profile_name} folder without returning its id")
+        folders[profile_name] = folder_id
+        self._save_token({"profile_folders": folders})
+        return folder_id
+
+    def find_file(self, name: str, folder_id: str,
+                  *, mime_type: Optional[str] = None) -> Optional[dict]:
+        """Find one exact-name, non-trashed child owned by this app."""
+        escaped_name = name.replace("\\", "\\\\").replace("'", "\\'")
+        escaped_parent = folder_id.replace("\\", "\\\\").replace("'", "\\'")
+        query = (f"name = '{escaped_name}' and '{escaped_parent}' in parents "
+                 "and trashed = false")
+        if mime_type:
+            escaped_mime = mime_type.replace("'", "\\'")
+            query += f" and mimeType = '{escaped_mime}'"
+        r = self._request("GET", f"{DRIVE_API}/files", params={
+            "q": query, "pageSize": 10,
+            "fields": "files(id,name,size,md5Checksum,mimeType,webViewLink,modifiedTime)",
+            "orderBy": "modifiedTime desc",
+        })
+        self._require_ok(r, f"checking Drive for {name}")
+        files = r.json().get("files") or []
+        return files[0] if files else None
+
+    def download_to_path(self, file_id: str, dest: Path) -> Path:
+        """Download a private Drive file atomically to a local path."""
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".tmp")
+        r = self.download_response(file_id)
+        try:
+            with tmp.open("wb") as out:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        out.write(chunk)
+            if not tmp.is_file() or tmp.stat().st_size <= 0:
+                raise DriveError("Drive downloaded an empty file")
+            tmp.replace(dest)
+            return dest
+        finally:
+            r.close()
+            tmp.unlink(missing_ok=True)
 
     def download_response(self, file_id: str, byte_range: str = "") -> requests.Response:
         headers = {"Range": byte_range} if byte_range else {}
@@ -240,6 +355,23 @@ class GoogleDriveStorage:
         self._token = current
         _atomic_json_write(self.token_file, current)
 
+    def _replace_token(self, token: dict) -> None:
+        self._token = dict(token)
+        _atomic_json_write(self.token_file, self._token)
+
+    def _folder_is_usable(self, folder_id: str,
+                          *, parent_id: Optional[str] = None) -> bool:
+        r = self._request(
+            "GET", f"{DRIVE_API}/files/{folder_id}",
+            params={"fields": "id,mimeType,trashed,parents"})
+        if r.status_code == 404:
+            return False
+        self._require_ok(r, "checking Drive profile folder")
+        data = r.json()
+        return bool(data.get("mimeType") == FOLDER_MIME
+                    and not data.get("trashed")
+                    and (not parent_id or parent_id in (data.get("parents") or [])))
+
     def _access_token(self, force_refresh: bool = False) -> str:
         token = self._load_token()
         if not token.get("refresh_token"):
@@ -276,15 +408,22 @@ class GoogleDriveStorage:
         return r
 
     def _start_session(self, dest_name: str, total: int, folder_id: str,
-                       content_type: str) -> str:
-        r = self._request("POST", f"{DRIVE_UPLOAD_API}/files", params={
+                       content_type: str,
+                       file_id: Optional[str] = None) -> str:
+        method = "PATCH" if file_id else "POST"
+        url = (f"{DRIVE_UPLOAD_API}/files/{file_id}"
+               if file_id else f"{DRIVE_UPLOAD_API}/files")
+        metadata = {"name": dest_name}
+        if not file_id:
+            metadata["parents"] = [folder_id]
+        r = self._request(method, url, params={
             "uploadType": "resumable", "supportsAllDrives": "true",
             "fields": "id,name,size,md5Checksum,webViewLink",
         }, headers={
             "Content-Type": "application/json; charset=UTF-8",
             "X-Upload-Content-Type": content_type,
             "X-Upload-Content-Length": str(total),
-        }, json={"name": dest_name, "parents": [folder_id]})
+        }, json=metadata)
         self._require_ok(r, "starting Drive resumable upload")
         session_url = r.headers.get("Location")
         if not session_url:

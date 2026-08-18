@@ -2,7 +2,7 @@
 
 Formerly *Senior Health Studio*. Channel profiles still include Grandma Hannah & Matthias Richter.
 
-Six channel formats, one tool — pick the profile in the UI:
+Profile-driven channel formats, one tool — pick the profile in the UI:
 - **classic** — English/German long-form philosopher narrations in
   the cited author's own voice (default Joseph Murphy — change per video via
   "cited thinker(s)"). Classic cheap format: NO on-camera avatar, pure voice-over
@@ -29,6 +29,18 @@ Six channel formats, one tool — pick the profile in the UI:
   a bounded research brief and exactly three titles. Unverified transit/date
   claims are never invented; without verified dates the treatment remains
   evergreen, reflective, and non-deterministic.
+- **cars** — researched general automotive engineering, history, comparisons,
+  ownership, design, and driving culture.
+- **carparts** — researched components, system operation, maintenance,
+  diagnostic reasoning, replacement choices, and repair safety.
+- **cars-modern** — researched model-year-2000+ vehicles, including combustion,
+  hybrid and EV powertrains, software, ADAS, connectivity, and ownership tradeoffs.
+- **cars-old** — researched pre-2000 classic/vintage vehicles, period engineering,
+  model history, preservation, restoration, and original-versus-modified details.
+
+The four car profiles accept an English topic, build an accuracy-bounded research
+brief with source material, and present exactly three truthful titles before the
+normal Small (32k–47k character) production job starts.
 
 A local web app that turns a title into a complete Grandma Hannah
 senior-health video: Sonnet 5 writes an outline + 4 hooks, **you approve at
@@ -101,7 +113,8 @@ awake during multi-hour renders without forcing the display to stay on.
 1. Enter a **title**, choose **Small** (a one-time random target from
    32,000–47,000 characters) or **Big** (180,000–210,000), set any optional
    flags, and click Add to queue. Each video gets a collision-checked
-   20-digit ID. That ID is its job folder and its download/Drive filename.
+   20-digit ID. That ID remains its private local job folder; Drive and browser
+   downloads use the publication title as the filename.
 2. The writer delivers a **detailed outline + hooks**. The studio defaults
    to an auto-selected bold-statement hook so a title can run unattended.
    Switch Hook approval back to the manual gate when you want to pick the
@@ -124,7 +137,8 @@ awake during multi-hour renders without forcing the display to stay on.
    timestamps, duration matching, and MP4 `faststart`. The delivered file is
    validated against that contract before it can be marked complete, which
    keeps it compatible with Spotify for Creators.
-5. In parallel, GPT-5.6 Terra proposes thumbnail words. Rendering does not
+5. For thumbnail-enabled profiles, GPT-5.6 Terra proposes thumbnail words in
+   parallel. Rendering does not
    wait for thumbnail approval. It resolves the script language from the UI
    override or profile, rewrites/translates the publication title into that
    language, and proposes different (non-repeating) thumbnail text using the
@@ -132,10 +146,12 @@ awake during multi-hour renders without forcing the display to stay on.
    only then is the image generated. Approve that image separately. The
    thumbnail gets its own 20-digit ID and remains visible/downloadable from
    the video job.
-   Astrology Search adds an earlier gate: Terra first researches the theme and
-   presents exactly three titles. The video enters the render queue only after
-   one title is selected. Regular Astrology and Reddit skip this gate and lock
-   the exact title entered in the form through thumbnail approval.
+   Astrology Search and all four car profiles add an earlier gate: Terra first
+   researches the theme and presents exactly three titles. The video enters the
+   render queue only after one title is selected. Thumbnail generation is fully
+   disabled for `astrology`, `astrology-search`, `reddit`, `cars`, `carparts`,
+   `cars-modern`, and `cars-old`; those jobs show no thumbnail approval card and
+   make no thumbnail-provider calls.
 6. When the Spotify CTA is enabled, choose either the standard localized
    card or the dedicated **GEISTMEISTER** card. The standard card uses timed
    windows; GEISTMEISTER stays visible for the entire video and also names
@@ -192,8 +208,27 @@ on camera per video)**, `split_every_seconds` (240), `split_max_seconds` (35).
 ## Google Drive deliverables
 
 When `GDRIVE_CLIENT_SECRET_FILE` points to a Google **Desktop OAuth client**
-JSON, finished videos upload to an app-owned `videos` folder in Drive. The
-first time, after restarting the app, open:
+JSON, finished videos upload below an app-owned `videos` folder in Drive. Each
+profile has its own child folder, and each video is named from its title:
+
+```text
+videos/
+  cars/
+    How Modern Cars See the Road.mp4
+    Titles and Thumbnails.docx
+  reddit/
+    The Family Secret I Found Too Late.mp4
+    Titles and Thumbnails.docx
+```
+
+Despite its requested filename, `Titles and Thumbnails.docx` contains titles
+only—one plain paragraph per unique finished video, with no images, dates, IDs,
+or metadata. It is updated only after the corresponding video has uploaded and
+verified successfully. A duplicate title in the same profile produces a naming
+error before production; an existing Drive filename is never overwritten.
+
+The first time, after restarting the app, use **Connect** in the Drive status
+panel or open:
 
 ```
 http://localhost:5066/api/drive/authorize
@@ -206,10 +241,10 @@ the remote size/checksum, and only then deletes the local deliverable. Drive
 files are private—both free and Patreon parts are served through this app's
 normal authenticated video route, never an "anyone with the link" share.
 
-For `reddit`, `astrology`, and `astrology-search`, approving the final thumbnail creates a
-one-page `{video-id}-title-thumbnail.docx` containing only the approved title
-and embedded thumbnail. It uploads to the same Drive folder; no research or
-source metadata is included.
+The panel shows the connected account and provides **Change** and **Disconnect**.
+Changing accounts revokes and removes the old local token before opening a fresh
+Google consent flow, so cached folder IDs from one account cannot leak into the
+next account.
 
 If a render completed before authorization or an upload temporarily fails,
 the local video is retained. Retry it with:

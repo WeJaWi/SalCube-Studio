@@ -106,9 +106,12 @@
     background:rgba(0,0,0,.12); margin-bottom:10px; }
   .ops-drive { display:flex; align-items:center; gap:7px; color:var(--muted);
     font-size:11px; margin:-2px 0 10px; padding:0 2px; }
-  .ops-drive a { margin-left:auto; color:var(--cyan); text-decoration:none;
-    font-weight:650; }
-  .ops-drive a:hover { text-decoration:underline; }
+  .drive-actions { margin-left:auto; display:flex; align-items:center; gap:7px; }
+  .drive-action { color:var(--cyan); text-decoration:none; font:650 10px/1 var(--font);
+    text-transform:uppercase; letter-spacing:.04em; border:0; background:none;
+    box-shadow:none; padding:0; margin:0; width:auto; border-radius:0; }
+  .drive-action:hover { color:var(--cyan); text-decoration:underline;
+    background:none; box-shadow:none; transform:none; filter:none; }
   .ops-log { flex:1; min-height:170px; overflow:auto; border:1px solid var(--border-soft);
     background:#1a1c1f; border-radius:var(--radius-sm); padding:8px; }
   .ops-entry { padding:9px 7px; border-bottom:1px solid var(--border-soft); }
@@ -806,7 +809,11 @@
   <div class="ops-drive">
     <span class="dot" id="driveDot"></span>
     <span id="driveState">Checking Google Drive…</span>
-    <a id="driveAuthorize" class="hidden" href="/api/drive/authorize" target="_blank" rel="noopener">Authorize</a>
+    <span class="drive-actions">
+      <a id="driveAuthorize" class="drive-action hidden" href="/api/drive/authorize" target="_blank" rel="noopener">Connect</a>
+      <button type="button" id="driveChange" class="drive-action hidden">Change</button>
+      <button type="button" id="driveDisconnect" class="drive-action hidden">Disconnect</button>
+    </span>
   </div>
   <div id="opsLog" class="ops-log"><div class="hint">Waiting for the first system update…</div></div>
   <div class="ops-chat">
@@ -1457,6 +1464,11 @@ function renderTitleGate(options, status) {
 function renderThumbnailApproval(t, jobId) {
   const panel = $("#thumbApproval"), wordsBox = $("#thumbWords");
   const imageBox = $("#thumbImage"), retry = $("#retryThumb");
+  if (!t || t.state === "disabled") {
+    panel.classList.add("hidden");
+    thumbnailFormFor = null;
+    return;
+  }
   panel.classList.remove("hidden");
   wordsBox.classList.add("hidden");
   imageBox.classList.add("hidden");
@@ -1570,10 +1582,14 @@ async function refreshDrive() {
   try {
     const data = await (await fetch("/api/drive/status")).json();
     const ready = !!data.authorized;
-    $("#driveDot").className = "dot " + (ready ? "online" : "busy");
-    $("#driveState").textContent = ready ? "Google Drive connected"
+    const account = data.account || {};
+    const accountName = account.emailAddress || account.displayName || "connected";
+    $("#driveDot").className = "dot " + (ready ? "online" : (data.configured ? "busy" : "offline"));
+    $("#driveState").textContent = ready ? `Google Drive · ${accountName}`
       : (data.configured ? "Google Drive needs your approval" : "Google Drive not configured");
     $("#driveAuthorize").classList.toggle("hidden", ready || !data.configured);
+    $("#driveChange").classList.toggle("hidden", !ready);
+    $("#driveDisconnect").classList.toggle("hidden", !ready);
   } catch (e) {
     $("#driveDot").className = "dot offline";
     $("#driveState").textContent = "Could not check Google Drive";
@@ -1581,6 +1597,29 @@ async function refreshDrive() {
 }
 refreshDrive();
 setInterval(refreshDrive, 15000);
+
+async function disconnectDrive(changeAccount) {
+  const action = changeAccount ? "change the connected Google Drive account" : "disconnect Google Drive";
+  if (!confirm(`Are you sure you want to ${action}?`)) return;
+  $("#driveChange").disabled = true;
+  $("#driveDisconnect").disabled = true;
+  try {
+    const response = await fetch("/api/drive/disconnect", {method:"POST"});
+    const data = await response.json();
+    if (data.error) {
+      alert(data.error);
+    } else if (changeAccount) {
+      window.open("/api/drive/authorize", "_blank", "noopener");
+    }
+  } catch (e) {
+    alert("Could not update the Drive connection.");
+  }
+  $("#driveChange").disabled = false;
+  $("#driveDisconnect").disabled = false;
+  refreshDrive();
+}
+$("#driveChange").addEventListener("click", () => disconnectDrive(true));
+$("#driveDisconnect").addEventListener("click", () => disconnectDrive(false));
 
 $("#askOps").addEventListener("click", async () => {
   const q = $("#opsQuestion").value.trim();

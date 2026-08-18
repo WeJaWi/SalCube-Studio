@@ -6,8 +6,7 @@
   "audience_line": "speaks to one viewer who enjoys relationship conflict, family drama, moral dilemmas, consequences, and satisfying real-life turning points",
   "research": {"enabled": false, "kind": "direct_title"},
   "title": {"lock_submitted": true},
-  "drive_package": {"docx": true},
-  "thumbnail": {"no_character": true, "display_name": "REDDIT STORIES"},
+  "thumbnail": {"enabled": false},
   "video": {
     "width": 1920,
     "height": 1080,

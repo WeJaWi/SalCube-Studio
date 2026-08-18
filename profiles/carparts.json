@@ -1,0 +1,63 @@
+{
+  "name": "carparts",
+  "description": "English researched videos about automotive parts, systems, maintenance, and diagnostic reasoning. Enter a topic and choose from three generated titles.",
+  "engine": "hannah",
+  "channel_context": "an English long-form automotive parts channel explaining components, system operation, wear, maintenance, failure symptoms, diagnostic logic, replacement quality, and repair decisions without pretending one symptom proves one fault",
+  "audience_line": "speaks to one practical owner or developing enthusiast who wants to understand a car part before buying, diagnosing, maintaining, or discussing a repair",
+  "research": {"enabled": true, "provider": "gpt-5.6-terra", "kind": "automotive_parts", "title_choices": 3},
+  "thumbnail": {"enabled": false},
+  "video": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "ken_burns": true,
+    "beat_seconds": 18,
+    "broll_mix": {"stock": 0.35, "stock_image": 0.25, "animation": 0.3, "ai_video": 0.1},
+    "max_template_repeats": 2,
+    "anim_themes_default": ["classic", "amber"],
+    "ai_video_resolution": "720p",
+    "overlay": {"enabled": true, "opacity": 0.18},
+    "transitions": {"enabled": false, "seconds": 0.4, "types": ["fade", "smoothleft", "fade"]},
+    "intro_card": {"enabled": true, "brand": "CAR PARTS"},
+    "host_budget_seconds": 0
+  },
+  "defaults": {"language": "English", "length_chars": 39500, "length_chars_min": 32000, "length_chars_max": 47000},
+  "host": {
+    "enabled": false,
+    "persona": "A careful automotive systems educator who thinks like a diagnostic technician: verify the complaint, understand the system, test before replacing, and put safety and factory information first.",
+    "register": "Practical, patient, mechanically precise, and understandable to a non-technician. Never sound like a remote diagnosis or a universal service manual."
+  },
+  "ai_disclosure": "",
+  "style": {
+    "broll_style": "clean automotive workshop documentary imagery, isolated mechanical and electrical components, hands using appropriate tools safely, exploded-view inspired compositions without labels, realistic materials and connections, no readable branding or dangerous procedures",
+    "music_style": "light technical documentary underscore, controlled pulse, soft percussion and restrained electronics, focused and unobtrusive, no vocals"
+  },
+  "music": {"enabled": true, "tracks": "auto", "minutes_per_track": 18, "min_tracks": 2, "max_tracks": 5},
+  "voices": {"English": "elevenlabs_CwhRBWXzGAHq8TQ4Fs17"},
+  "writing_sections": [
+    {"name": "symptom_or_question", "weight": 0.1, "hint": "Open with the practical question, symptom pattern, or purchasing decision while making clear that symptoms can have multiple causes."},
+    {"name": "part_and_system", "weight": 0.25, "hint": "Identify the component, its variants, where it sits in the larger system, what it does, and how operation differs across vehicle designs."},
+    {"name": "operation_and_failure", "weight": 0.28, "hint": "Explain normal operation, wear mechanisms, plausible failure modes, and what evidence separates them. Never turn correlation into a diagnosis."},
+    {"name": "testing_and_decisions", "weight": 0.24, "hint": "Explain a safe diagnostic sequence, maintenance or purchasing considerations, and when factory procedures, special equipment, or a qualified professional are required."},
+    {"name": "close_block", "weight": 0.13, "hint": "Summarize what the part can and cannot explain, reinforce exact-vehicle verification, invite a relevant viewer experience, and add a soft subscription invitation. {LIKE_SUBSCRIBE}"}
+  ],
+  "cta_lines": {"like_subscribe": "Ask viewers to share the exact vehicle and evidence behind their experience—not just the replaced part—then softly invite them to subscribe."},
+  "north_star": "Help viewers understand and verify before replacing parts. The script must separate system knowledge, symptoms, tests, and confirmed faults while protecting safety and exact-vehicle fitment.",
+  "outline_extras": "Privately map every specification and diagnostic claim to the supplied sources. Mark exact-vehicle dependencies and all lifting, brake, fuel, airbag, high-voltage, pressure, heat, or rotating-equipment hazards.",
+  "rules": [
+    "English only.",
+    "Use only the supplied research brief and sources for specifications, service information, failure rates, and fitment.",
+    "Never claim a symptom confirms one failed part; explain alternative causes and what test would distinguish them.",
+    "Never invent torque values, fluid grades or capacities, fuse ratings, wiring details, part numbers, intervals, prices, or compatibility.",
+    "Tell viewers to use the factory procedure and specifications for the exact VIN, model year, engine, drivetrain, and market.",
+    "Flag work involving lifting, brakes, steering, fuel, refrigerant, airbags, high voltage, hot or pressurized systems, or rotating machinery as professional/high-risk when appropriate.",
+    "Never advise bypassing emissions or safety systems.",
+    "Body is continuous spoken English prose with no headings, citations, URLs, bullets, or stage directions."
+  ],
+  "hook_types": {
+    "bold_statement": "State the most useful verified truth about the part or diagnostic mistake without claiming it applies to every vehicle.",
+    "question": "Ask the exact system, symptom, maintenance, or buying question the evidence can answer.",
+    "short_story": "Open with a realistic diagnostic sequence where testing changes the obvious first conclusion; do not present a composite as a documented case.",
+    "pattern_break": "Correct a common parts-cannon or maintenance myth supported by the research."
+  }
+}
