@@ -169,8 +169,9 @@ class ResearchProfileTests(unittest.TestCase):
         self.assertIn("It has an update.", text)
         self.assertNotIn("sidebar", text)
 
-    def test_car_profile_uses_research_gate_small_length_and_no_thumbnail(self):
-        inputs = app._build_inputs({"video_group": "small"}, "turbo lag")
+    def test_car_profile_skips_title_research_and_keeps_submitted_title(self):
+        submitted = "Why Turbo Lag Still Matters"
+        inputs = app._build_inputs({"video_group": "small"}, submitted)
         with patch.object(app.identity, "numeric_id",
                           return_value="66666666666666666666"), \
                 patch.object(app, "_start_profile_research") as research_start, \
@@ -178,25 +179,29 @@ class ResearchProfileTests(unittest.TestCase):
                 patch.object(app, "_persist_queue"):
             job_id = app._enqueue_job(inputs, "cars-modern")
         job = app.JOBS[job_id]
-        self.assertEqual(job["status"], "researching")
-        self.assertEqual(job["title_options"]["theme"], "turbo lag")
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["title"], submitted)
+        self.assertEqual(job["publication_title"], submitted)
+        self.assertEqual(job["title_options"], {})
+        self.assertEqual(job["research_attempt"], 0)
         self.assertEqual(job["thumbnail"], {"state": "disabled"})
         self.assertEqual(job["inputs"]["language"], "English")
         self.assertGreaterEqual(job["inputs"]["length_chars"], 32000)
         self.assertLessEqual(job["inputs"]["length_chars"], 47000)
-        research_start.assert_called_once_with(job_id)
+        research_start.assert_not_called()
         thumbnail_start.assert_not_called()
 
     def test_all_car_profiles_have_distinct_automotive_accuracy_rules(self):
         for name in ("cars", "carparts", "cars-modern", "cars-old"):
             profile = orchestrator.load_profile(name)
-            self.assertTrue(profile["research"]["enabled"])
+            self.assertFalse(profile["research"]["enabled"])
+            self.assertTrue(profile["title"]["lock_submitted"])
             self.assertFalse(profile["thumbnail"]["enabled"])
             self.assertEqual(profile["defaults"]["language"], "English")
             self.assertEqual(profile["defaults"]["length_chars_min"], 32000)
             self.assertEqual(profile["defaults"]["length_chars_max"], 47000)
             rules = " ".join(profile["rules"]).lower()
-            self.assertIn("research", rules)
+            self.assertIn("never invent", rules)
         self.assertIn("torque", " ".join(
             orchestrator.load_profile("carparts")["rules"]).lower())
         self.assertIn("software", " ".join(
@@ -225,12 +230,12 @@ class ResearchProfileTests(unittest.TestCase):
         current_dir.mkdir()
         candidates = ["Same Car Title", "Alternative Two", "Alternative Three"]
         app.JOBS[existing_id] = {
-            "status": "done", "profile": "cars", "title": "Same Car Title",
+            "status": "done", "profile": "astrology-search", "title": "Same Car Title",
             "publication_title": "Same Car Title", "title_options": {"state": "approved"},
         }
         app.JOBS[current_id] = {
             "status": "awaiting_title", "step": "title", "title": "car topic",
-            "profile": "cars", "inputs": {"title": "car topic"}, "log": [],
+            "profile": "astrology-search", "inputs": {"title": "car topic"}, "log": [],
             "title_options": {"state": "ready", "theme": "car topic",
                               "candidates": candidates},
             "thumbnail": {"state": "disabled"},

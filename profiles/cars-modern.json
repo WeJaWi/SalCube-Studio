@@ -1,10 +1,11 @@
 {
   "name": "cars-modern",
-  "description": "English researched videos about modern vehicles and technology from roughly model year 2000 onward. Enter a topic and choose from three generated titles.",
+  "description": "English modern-car videos using the exact title you submit. No title-research or title-selection gate.",
   "engine": "hannah",
   "channel_context": "an English long-form channel about modern vehicles from roughly model year 2000 onward, including combustion, hybrid and electric powertrains, safety systems, software, infotainment, connectivity, efficiency, regulation, ADAS, and the ownership tradeoffs created by new technology",
   "audience_line": "speaks to one current or prospective owner who wants modern vehicle technology explained accurately without marketing hype or anti-technology panic",
-  "research": {"enabled": true, "provider": "gpt-5.6-terra", "kind": "automotive_modern", "title_choices": 3},
+  "research": {"enabled": false, "kind": "direct_title"},
+  "title": {"lock_submitted": true},
   "thumbnail": {"enabled": false},
   "video": {
     "width": 1920,
@@ -38,15 +39,15 @@
     {"name": "modern_tension", "weight": 0.1, "hint": "Open with the verified capability, limitation, or ownership tradeoff that makes this modern-car topic matter now."},
     {"name": "system_context", "weight": 0.23, "hint": "Define the technology, model years, markets, trims, hardware and software versions, and regulatory context needed to understand the topic."},
     {"name": "how_it_works", "weight": 0.3, "hint": "Explain the mechanical, electrical, software, energy, or sensing chain accurately and distinguish design intent from measured performance."},
-    {"name": "benefits_limits_ownership", "weight": 0.24, "hint": "Evaluate benefits, failure modes, usability, repairability, cost, privacy, efficiency, or safety tradeoffs only where supported and dated in the research."},
+    {"name": "benefits_limits_ownership", "weight": 0.24, "hint": "Evaluate benefits, failure modes, usability, repairability, cost, privacy, efficiency, or safety tradeoffs only when they can be stated with clear conditions and dates."},
     {"name": "close_block", "weight": 0.13, "hint": "State the most defensible conclusion, explain what varies or may change, invite a specific viewer perspective, and add a soft subscription invitation. {LIKE_SUBSCRIBE}"}
   ],
   "cta_lines": {"like_subscribe": "Ask viewers to name their market, model year, trim, or software version when sharing experience, then softly invite them to subscribe."},
   "north_star": "Explain modern car technology without marketing hype, fear, or false universality. Version, date, market, model year, trim, test conditions, and evidence type remain visible in every important claim.",
-  "outline_extras": "Attach an as-of date and supplied source to current claims in the private outline. Separate regulation, manufacturer specification, independent measurement, and anecdotal experience.",
+  "outline_extras": "Attach an as-of date to current claims in the private outline and flag facts requiring verification. Separate regulation, manufacturer specification, independent measurement, and anecdotal experience.",
   "rules": [
     "English only.",
-    "Use the supplied research brief and sources as the factual boundary and preserve all as-of dates.",
+    "Preserve as-of dates for current claims and omit details that cannot be stated confidently.",
     "Distinguish markets, model years, trims, battery sizes, drivetrains, charging standards, hardware generations, software versions, option packages, and test conditions.",
     "Never imply driver-assistance is autonomous driving or encourage hands-off/inattentive use beyond the verified operating design domain.",
     "Never invent range, charging speed, efficiency, acceleration, safety performance, prices, subscription terms, availability, recalls, or future product plans.",
@@ -56,8 +57,8 @@
   ],
   "hook_types": {
     "bold_statement": "State the strongest verified modern-vehicle tradeoff without turning a dated or conditional fact into a universal claim.",
-    "question": "Ask a concrete technology, ownership, safety, efficiency, or repairability question the research can answer.",
+    "question": "Ask a concrete technology, ownership, safety, efficiency, or repairability question the video can answer precisely.",
     "short_story": "Open on a real-world modern-car moment where hardware, software, energy, or human behavior changes the outcome without inventing a documented incident.",
-    "pattern_break": "Correct marketing hype or reflexive skepticism using the supplied evidence."
+    "pattern_break": "Correct marketing hype or reflexive skepticism only when the correction can be stated confidently and precisely."
   }
 }

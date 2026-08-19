@@ -1,10 +1,11 @@
 {
   "name": "carparts",
-  "description": "English researched videos about automotive parts, systems, maintenance, and diagnostic reasoning. Enter a topic and choose from three generated titles.",
+  "description": "English automotive-parts videos using the exact title you submit. No title-research or title-selection gate.",
   "engine": "hannah",
   "channel_context": "an English long-form automotive parts channel explaining components, system operation, wear, maintenance, failure symptoms, diagnostic logic, replacement quality, and repair decisions without pretending one symptom proves one fault",
   "audience_line": "speaks to one practical owner or developing enthusiast who wants to understand a car part before buying, diagnosing, maintaining, or discussing a repair",
-  "research": {"enabled": true, "provider": "gpt-5.6-terra", "kind": "automotive_parts", "title_choices": 3},
+  "research": {"enabled": false, "kind": "direct_title"},
+  "title": {"lock_submitted": true},
   "thumbnail": {"enabled": false},
   "video": {
     "width": 1920,
@@ -43,10 +44,10 @@
   ],
   "cta_lines": {"like_subscribe": "Ask viewers to share the exact vehicle and evidence behind their experience—not just the replaced part—then softly invite them to subscribe."},
   "north_star": "Help viewers understand and verify before replacing parts. The script must separate system knowledge, symptoms, tests, and confirmed faults while protecting safety and exact-vehicle fitment.",
-  "outline_extras": "Privately map every specification and diagnostic claim to the supplied sources. Mark exact-vehicle dependencies and all lifting, brake, fuel, airbag, high-voltage, pressure, heat, or rotating-equipment hazards.",
+  "outline_extras": "Privately flag every specification and diagnostic claim that requires exact-vehicle verification. Mark exact-vehicle dependencies and all lifting, brake, fuel, airbag, high-voltage, pressure, heat, or rotating-equipment hazards.",
   "rules": [
     "English only.",
-    "Use only the supplied research brief and sources for specifications, service information, failure rates, and fitment.",
+    "Never invent specifications, service information, failure rates, or fitment; treat uncertain details as unknown and require exact-vehicle verification.",
     "Never claim a symptom confirms one failed part; explain alternative causes and what test would distinguish them.",
     "Never invent torque values, fluid grades or capacities, fuse ratings, wiring details, part numbers, intervals, prices, or compatibility.",
     "Tell viewers to use the factory procedure and specifications for the exact VIN, model year, engine, drivetrain, and market.",
@@ -58,6 +59,6 @@
     "bold_statement": "State the most useful verified truth about the part or diagnostic mistake without claiming it applies to every vehicle.",
     "question": "Ask the exact system, symptom, maintenance, or buying question the evidence can answer.",
     "short_story": "Open with a realistic diagnostic sequence where testing changes the obvious first conclusion; do not present a composite as a documented case.",
-    "pattern_break": "Correct a common parts-cannon or maintenance myth supported by the research."
+    "pattern_break": "Correct a common parts-cannon or maintenance myth only when the correction can be stated confidently and safely."
   }
 }

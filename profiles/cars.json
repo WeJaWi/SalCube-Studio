@@ -1,10 +1,11 @@
 {
   "name": "cars",
-  "description": "English researched long-form automotive videos. Enter a topic; Terra prepares an accuracy brief and three titles before production.",
+  "description": "English long-form automotive videos using the exact title you submit. No title-research or title-selection gate.",
   "engine": "hannah",
   "channel_context": "an English long-form automotive channel covering how cars work, why important models mattered, engineering tradeoffs, ownership realities, design, comparisons, and driving culture across eras",
   "audience_line": "speaks to one curious car enthusiast who values clear explanations, mechanical accuracy, useful context, and enthusiasm without brand tribalism",
-  "research": {"enabled": true, "provider": "gpt-5.6-terra", "kind": "automotive_general", "title_choices": 3},
+  "research": {"enabled": false, "kind": "direct_title"},
+  "title": {"lock_submitted": true},
   "thumbnail": {"enabled": false},
   "video": {
     "width": 1920,
@@ -35,18 +36,18 @@
   "music": {"enabled": true, "tracks": "auto", "minutes_per_track": 18, "min_tracks": 2, "max_tracks": 5},
   "voices": {"English": "elevenlabs_CwhRBWXzGAHq8TQ4Fs17"},
   "writing_sections": [
-    {"name": "roadside_hook", "weight": 0.1, "hint": "Open on the topic's most revealing real-world consequence or engineering question without exaggerating the researched facts."},
+    {"name": "roadside_hook", "weight": 0.1, "hint": "Open on the topic's most revealing real-world consequence or engineering question without exaggerating factual claims."},
     {"name": "context_and_definitions", "weight": 0.2, "hint": "Define the exact vehicles, generations, systems, era, and market being discussed. Explain what can vary by year, trim, engine, drivetrain, or region."},
-    {"name": "engineering_story", "weight": 0.32, "hint": "Explain how the relevant systems and design decisions work, why they were chosen, and the compromises they create. Use only the supplied factual brief and sources."},
+    {"name": "engineering_story", "weight": 0.32, "hint": "Explain how the relevant systems and design decisions work, why they were chosen, and the compromises they create. Omit any specific claim that cannot be stated confidently and precisely."},
     {"name": "real_world_meaning", "weight": 0.25, "hint": "Translate the engineering and history into driving, ownership, maintenance, value, or cultural consequences without presenting anecdotes as universal evidence."},
     {"name": "close_block", "weight": 0.13, "hint": "Recap the most useful conclusion, identify remaining uncertainty honestly, invite a specific viewer perspective, and add a restrained subscription invitation. {LIKE_SUBSCRIBE}"}
   ],
   "cta_lines": {"like_subscribe": "Invite viewers to share their experience with the exact model, era, or engineering choice, then softly ask them to subscribe for more accurate automotive stories."},
-  "north_star": "Make car enthusiasm more informed. Every specification, date, comparison, and historical claim must remain inside the researched evidence and preserve model-year, trim, drivetrain, and market distinctions.",
-  "outline_extras": "For every numerical or historical claim, attach the supporting supplied source in the private outline. If the brief does not verify a detail, omit it instead of estimating.",
+  "north_star": "Make car enthusiasm more informed. Every specification, date, comparison, and historical claim must be stated cautiously and preserve model-year, trim, drivetrain, and market distinctions.",
+  "outline_extras": "Flag every numerical or historical claim that requires verification in the private outline. If a detail is uncertain, omit it instead of estimating.",
   "rules": [
     "English only.",
-    "Treat the supplied research brief and source material as the factual boundary; never invent missing specifications or history.",
+    "Never invent missing specifications or history; omit uncertain details instead of estimating.",
     "Keep model year, generation, trim, engine, transmission, drivetrain, body style, and sales market distinct whenever they affect a claim.",
     "Label manufacturer claims, instrumented test results, and owner anecdotes as different kinds of evidence.",
     "Never invent performance figures, production totals, prices, recall status, quotations, awards, firsts, or rarity claims.",
@@ -54,9 +55,9 @@
     "Body is continuous spoken English prose with no headings, citations, URLs, bullets, or stage directions."
   ],
   "hook_types": {
-    "bold_statement": "Open with the strongest verified automotive implication in the brief, stated precisely rather than as an absolute.",
-    "question": "Ask a concrete engineering, history, comparison, or ownership question that the researched video will answer.",
+    "bold_statement": "Open with the strongest defensible automotive implication, stated precisely rather than as an absolute.",
+    "question": "Ask a concrete engineering, history, comparison, or ownership question that the video will answer precisely.",
     "short_story": "Open on a vivid but factual moment involving the vehicle, system, road, factory, workshop, or owner decision.",
-    "pattern_break": "Challenge a common car assumption only when the research brief supports the correction."
+    "pattern_break": "Challenge a common car assumption only when the correction can be stated confidently and precisely."
   }
 }

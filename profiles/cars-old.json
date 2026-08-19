@@ -1,10 +1,11 @@
 {
   "name": "cars-old",
-  "description": "English researched videos about classic, vintage, and older cars, primarily before model year 2000. Enter a topic and choose from three generated titles.",
+  "description": "English classic-car videos using the exact title you submit. No title-research or title-selection gate.",
   "engine": "hannah",
   "channel_context": "an English long-form channel about classic, vintage, and older automobiles primarily before model year 2000, covering period engineering, model history, design, motorsport context, preservation, restoration, ownership, and how later myths differ from contemporary evidence",
   "audience_line": "speaks to one classic-car enthusiast who appreciates period detail, mechanical understanding, historical context, and respect for originality without romanticizing poor safety or reliability",
-  "research": {"enabled": true, "provider": "gpt-5.6-terra", "kind": "automotive_classic", "title_choices": 3},
+  "research": {"enabled": false, "kind": "direct_title"},
+  "title": {"lock_submitted": true},
   "thumbnail": {"enabled": false},
   "video": {
     "width": 1920,
@@ -43,10 +44,10 @@
   ],
   "cta_lines": {"like_subscribe": "Invite viewers to share period documents or exact variant details behind their experience, then softly ask them to subscribe for more accurate classic-car stories."},
   "north_star": "Preserve the real machine and its real context. Period sources, variant precision, and explicit uncertainty take priority over nostalgia, repeated internet lore, auction language, or modern hindsight.",
-  "outline_extras": "Map dates, production claims, specifications, quotations, and historical firsts to supplied primary or period sources in the private outline. Mark disputed facts and omit unsupported lore.",
+  "outline_extras": "Flag dates, production claims, specifications, quotations, and historical firsts that require primary or period-source verification in the private outline. Mark disputed facts and omit unsupported lore.",
   "rules": [
     "English only.",
-    "Use the supplied research brief and source material as the factual boundary; do not convert repeated enthusiast lore into history.",
+    "Do not convert repeated enthusiast lore into history; omit uncertain dates, specifications, quotations, and production claims.",
     "Keep model year, series, chassis, body builder, engine, gearbox, trim, market, homologation, factory option, and later modification distinct.",
     "Never invent production totals, chassis survival counts, prices, performance, racing results, quotations, designer intent, firsts, rarity, or celebrity ownership.",
     "Use period specifications in their correct measurement standard and explain modern conversions carefully when supplied.",
