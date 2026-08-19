@@ -7,6 +7,7 @@ upload API (3-day retention) used to hand local files to kie models.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -69,27 +70,125 @@ def download(url: str, dest: Path) -> Path:
 
 
 # ───────────────────────── ai33.pro ─────────────────────────────
-def _ai33_headers() -> dict:
-    return {"xi-api-key": config.AI33_API_KEY}
+class AI33CreditsExhausted(RuntimeError):
+    """The selected ai33 account explicitly reported no credits/quota."""
+
+
+_AI33_KEY_LOCK = threading.Lock()
+_AI33_TASK_KEYS: Dict[str, str] = {}
+_AI33_PRIMARY_DEPLETED = False
+
+
+def _ai33_headers(api_key: Optional[str] = None) -> dict:
+    return {"xi-api-key": api_key or config.AI33_API_KEY}
+
+
+def _ai33_keys() -> list[str]:
+    """Configured keys in selection order, without duplicates.
+
+    Once the primary explicitly reports exhausted credits, keep new work on
+    the backup for the life of this process. A restart probes the primary
+    again, which is useful after its balance has been topped up.
+    """
+    with _AI33_KEY_LOCK:
+        depleted = _AI33_PRIMARY_DEPLETED
+    primary = (config.AI33_API_KEY or "").strip()
+    backup = (config.AI33_API_KEY_BACKUP or "").strip()
+    ordered = ([backup] if depleted and backup else [primary, backup])
+    keys: list[str] = []
+    for key in ordered:
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _ai33_credit_error(status_code: Optional[int], provider_code: Any,
+                       message: str) -> bool:
+    try:
+        code = int(provider_code)
+    except (TypeError, ValueError):
+        code = None
+    if status_code == 402 or code == 402:
+        return True
+    text = (message or "").casefold()
+    direct = (
+        "insufficient credits", "insufficient credit", "credits exhausted",
+        "credit exhausted", "out of credits", "out of credit",
+        "insufficient balance", "balance insufficient", "payment required",
+        "quota exhausted", "quota exceeded", "insufficient quota",
+    )
+    return any(marker in text for marker in direct)
+
+
+def _mark_ai33_primary_depleted(api_key: str) -> None:
+    global _AI33_PRIMARY_DEPLETED
+    primary = (config.AI33_API_KEY or "").strip()
+    backup = (config.AI33_API_KEY_BACKUP or "").strip()
+    if api_key == primary and backup and backup != primary:
+        with _AI33_KEY_LOCK:
+            _AI33_PRIMARY_DEPLETED = True
+
+
+def _remember_ai33_task(task_id: str, api_key: str) -> None:
+    with _AI33_KEY_LOCK:
+        _AI33_TASK_KEYS[task_id] = api_key
+
+
+def _forget_ai33_task(task_id: str) -> None:
+    with _AI33_KEY_LOCK:
+        _AI33_TASK_KEYS.pop(task_id, None)
+
+
+def _ai33_submit(request_fn) -> str:
+    keys = _ai33_keys()
+    if not keys:
+        raise RuntimeError("ai33 API key is not configured")
+    for index, api_key in enumerate(keys):
+        try:
+            response = _retrying(lambda: request_fn(api_key))
+            data = _ai33_check(response)
+        except AI33CreditsExhausted:
+            _mark_ai33_primary_depleted(api_key)
+            if index + 1 >= len(keys):
+                raise
+            print("[ai33] primary credits exhausted — switching to backup key")
+            continue
+        except RuntimeError as exc:
+            # A final 429 from _retrying is raised before _ai33_check sees the
+            # response. Only treat it as a billing failover when its body says
+            # credits/quota; an ordinary rate limit stays on the primary.
+            if not _ai33_credit_error(None, None, str(exc)):
+                raise
+            _mark_ai33_primary_depleted(api_key)
+            if index + 1 >= len(keys):
+                raise AI33CreditsExhausted(
+                    "ai33 credits are exhausted for every configured key") from exc
+            print("[ai33] primary credits exhausted — switching to backup key")
+            continue
+        task_id = str(data.get("task_id") or "").strip()
+        if not task_id:
+            raise RuntimeError("ai33 response did not include a task_id")
+        _remember_ai33_task(task_id, api_key)
+        return task_id
+    raise AI33CreditsExhausted(
+        "ai33 credits are exhausted for every configured key")
 
 
 def ai33_submit_json(path: str, body: dict) -> str:
     """POST a JSON job to ai33, return task_id."""
     url = f"{config.AI33_BASE_URL}{path}"
-    r = _retrying(lambda: requests.post(
-        url, headers={**_ai33_headers(), "Content-Type": "application/json"},
+    return _ai33_submit(lambda api_key: requests.post(
+        url, headers={**_ai33_headers(api_key),
+                      "Content-Type": "application/json"},
         json=body, timeout=60))
-    data = _ai33_check(r)
-    return data["task_id"]
 
 
 def ai33_submit_form(path: str, fields: dict, files: Optional[dict] = None) -> str:
     """POST a multipart/form job to ai33, return task_id."""
     url = f"{config.AI33_BASE_URL}{path}"
-    r = _retrying(lambda: requests.post(url, headers=_ai33_headers(),
-                                        data=fields, files=files, timeout=120))
-    data = _ai33_check(r)
-    return data["task_id"]
+    return _ai33_submit(lambda api_key: requests.post(
+        url, headers=_ai33_headers(api_key), data=fields, files=files,
+        timeout=120))
 
 
 def _ai33_check(r: requests.Response) -> dict:
@@ -97,8 +196,19 @@ def _ai33_check(r: requests.Response) -> dict:
         data = r.json()
     except Exception:
         raise RuntimeError(f"ai33 non-JSON response {r.status_code}: {r.text[:300]}")
-    if r.status_code >= 400 or not data.get("success", True):
-        raise RuntimeError(f"ai33 error {r.status_code}: {data.get('message') or r.text[:300]}")
+    message = str(data.get("message") or data.get("error_message")
+                  or r.text[:300])
+    provider_code = data.get("code")
+    try:
+        provider_code_int = int(provider_code)
+    except (TypeError, ValueError):
+        provider_code_int = None
+    bad_provider_code = (provider_code_int is not None
+                         and provider_code_int not in (0, 200))
+    if r.status_code >= 400 or not data.get("success", True) or bad_provider_code:
+        if _ai33_credit_error(r.status_code, provider_code, message):
+            raise AI33CreditsExhausted("ai33 account credits are exhausted")
+        raise RuntimeError(f"ai33 error {r.status_code}: {message}")
     return data
 
 
@@ -106,10 +216,17 @@ def ai33_poll(task_id: str, timeout_s: int = 1200, interval: float = 5.0,
               on_progress=None) -> Dict[str, Any]:
     """Poll GET /v1/task/{id} until done. Returns the full task object."""
     url = f"{config.AI33_BASE_URL}/v1/task/{task_id}"
+    with _AI33_KEY_LOCK:
+        task_key = _AI33_TASK_KEYS.get(task_id)
+    if not task_key:
+        keys = _ai33_keys()
+        if not keys:
+            raise RuntimeError("ai33 API key is not configured")
+        task_key = keys[0]
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
-            r = requests.get(url, headers={**_ai33_headers(),
+            r = requests.get(url, headers={**_ai33_headers(task_key),
                                            "Content-Type": "application/json"},
                              timeout=60)
         except requests.RequestException:
@@ -120,14 +237,41 @@ def ai33_poll(task_id: str, timeout_s: int = 1200, interval: float = 5.0,
         except ValueError:  # 502/504 HTML page — transient, keep polling
             cancel.sleep(interval)
             continue
+        message = str(data.get("message") or data.get("error_message") or "")
+        if r.status_code == 429 or r.status_code >= 500:
+            if _ai33_credit_error(r.status_code, data.get("code"), message):
+                _mark_ai33_primary_depleted(task_key)
+                _forget_ai33_task(task_id)
+                raise AI33CreditsExhausted(
+                    "ai33 task polling reported exhausted credits")
+            cancel.sleep(interval)
+            continue
+        if r.status_code >= 400 or not data.get("success", True):
+            try:
+                _ai33_check(r)
+            except AI33CreditsExhausted:
+                _mark_ai33_primary_depleted(task_key)
+                _forget_ai33_task(task_id)
+                raise
+            except Exception:
+                _forget_ai33_task(task_id)
+                raise
         status = data.get("status")
         if on_progress:
             on_progress(data.get("progress", 0))
         if status == "done":
+            _forget_ai33_task(task_id)
             return data
         if status in ("error", "failed"):
-            raise RuntimeError(f"ai33 task failed: {data.get('error_message')}")
+            message = str(data.get("error_message") or data.get("message") or "")
+            _forget_ai33_task(task_id)
+            if _ai33_credit_error(r.status_code, data.get("code"), message):
+                _mark_ai33_primary_depleted(task_key)
+                raise AI33CreditsExhausted(
+                    "ai33 task failed because account credits are exhausted")
+            raise RuntimeError(f"ai33 task failed: {message}")
         cancel.sleep(interval)
+    _forget_ai33_task(task_id)
     raise RuntimeError(f"ai33 task {task_id} timed out after {timeout_s}s")
 
 

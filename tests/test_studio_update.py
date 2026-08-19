@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import app
 from docx import Document
-from pipeline import (config, delivery_doc, identity, llm, operations, orchestrator,
-                      render, research, script, storage, thumbnail)
+from pipeline import (clients, config, delivery_doc, identity, llm, operations,
+                      orchestrator, render, research, script, storage, thumbnail)
 
 
 class IdentityTests(unittest.TestCase):
@@ -42,6 +42,93 @@ class VideoGroupTests(unittest.TestCase):
         }, "A title")
         self.assertTrue(inputs["spotify_popup"])
         self.assertEqual(inputs["spotify_popup_style"], "geistmeister")
+
+
+class AI33FallbackTests(unittest.TestCase):
+    @staticmethod
+    def response(status: int, data: dict):
+        text = json.dumps(data)
+        return SimpleNamespace(status_code=status, headers={}, text=text,
+                               json=lambda: data)
+
+    def setUp(self):
+        with clients._AI33_KEY_LOCK:
+            clients._AI33_TASK_KEYS.clear()
+            clients._AI33_PRIMARY_DEPLETED = False
+
+    def tearDown(self):
+        with clients._AI33_KEY_LOCK:
+            clients._AI33_TASK_KEYS.clear()
+            clients._AI33_PRIMARY_DEPLETED = False
+
+    def test_credit_exhaustion_switches_and_pins_tasks_to_backup(self):
+        exhausted = self.response(
+            402, {"success": False, "message": "Insufficient credits"})
+        first_ok = self.response(
+            200, {"success": True, "task_id": "backup-task-1"})
+        second_ok = self.response(
+            200, {"success": True, "task_id": "backup-task-2"})
+        done = self.response(200, {"success": True, "status": "done"})
+        with patch.object(config, "AI33_API_KEY", "primary-test-key"), \
+                patch.object(config, "AI33_API_KEY_BACKUP", "backup-test-key"), \
+                patch.object(clients.requests, "post",
+                             side_effect=[exhausted, first_ok, second_ok]) as post, \
+                patch.object(clients.requests, "get", return_value=done) as get:
+            task_id = clients.ai33_submit_json("/tts", {"text": "hello"})
+            second_id = clients.ai33_submit_json("/tts", {"text": "again"})
+            result = clients.ai33_poll(task_id, interval=0)
+        self.assertEqual(task_id, "backup-task-1")
+        self.assertEqual(second_id, "backup-task-2")
+        self.assertEqual(result["status"], "done")
+        used = [call.kwargs["headers"]["xi-api-key"]
+                for call in post.call_args_list]
+        self.assertEqual(used, ["primary-test-key", "backup-test-key",
+                                "backup-test-key"])
+        self.assertEqual(get.call_args.kwargs["headers"]["xi-api-key"],
+                         "backup-test-key")
+
+    def test_invalid_primary_key_does_not_switch_to_backup(self):
+        invalid = self.response(
+            401, {"success": False, "message": "Invalid API key"})
+        with patch.object(config, "AI33_API_KEY", "primary-test-key"), \
+                patch.object(config, "AI33_API_KEY_BACKUP", "backup-test-key"), \
+                patch.object(clients.requests, "post", return_value=invalid) as post:
+            with self.assertRaisesRegex(RuntimeError, "Invalid API key"):
+                clients.ai33_submit_json("/tts", {"text": "hello"})
+        post.assert_called_once()
+        self.assertFalse(clients._AI33_PRIMARY_DEPLETED)
+
+    def test_ordinary_rate_limit_does_not_switch_to_backup(self):
+        limited = self.response(
+            429, {"success": False, "message": "Too many requests"})
+
+        def rate_limited(call):
+            call()
+            raise RuntimeError("HTTP 429: Too many requests")
+
+        with patch.object(config, "AI33_API_KEY", "primary-test-key"), \
+                patch.object(config, "AI33_API_KEY_BACKUP", "backup-test-key"), \
+                patch.object(clients, "_retrying", side_effect=rate_limited), \
+                patch.object(clients.requests, "post", return_value=limited) as post:
+            with self.assertRaisesRegex(RuntimeError, "Too many requests"):
+                clients.ai33_submit_json("/tts", {"text": "hello"})
+        post.assert_called_once()
+        self.assertEqual(post.call_args.kwargs["headers"]["xi-api-key"],
+                         "primary-test-key")
+        self.assertFalse(clients._AI33_PRIMARY_DEPLETED)
+
+    def test_wrapped_credit_code_also_uses_backup(self):
+        wrapped = self.response(
+            200, {"success": False, "code": 402,
+                  "message": "Account balance is insufficient"})
+        ok = self.response(200, {"success": True, "task_id": "backup-task"})
+        with patch.object(config, "AI33_API_KEY", "primary-test-key"), \
+                patch.object(config, "AI33_API_KEY_BACKUP", "backup-test-key"), \
+                patch.object(clients.requests, "post",
+                             side_effect=[wrapped, ok]) as post:
+            task_id = clients.ai33_submit_form("/tts", {"text": "hello"})
+        self.assertEqual(task_id, "backup-task")
+        self.assertEqual(len(post.call_args_list), 2)
 
 
 class ResearchProfileTests(unittest.TestCase):

@@ -18,7 +18,8 @@ from . import clients, config
 
 def submit_music(prompt: str, n_tracks: int = 5) -> List[str]:
     """Kick off `n_tracks` Suno instrumental generations; return task_ids."""
-    if not (prompt or "").strip() or not config.AI33_API_KEY:
+    if (not (prompt or "").strip()
+            or not (config.AI33_API_KEY or config.AI33_API_KEY_BACKUP)):
         return []
     task_ids: List[str] = []
     for _ in range(max(1, n_tracks)):

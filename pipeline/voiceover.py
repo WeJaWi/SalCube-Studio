@@ -31,7 +31,7 @@ def generate_voiceover(
 ) -> Tuple[Optional[Path], Optional[Path], Optional[str]]:
     """Synthesize `text`; save MP3 to `dest` and .srt next to it."""
     text = (text or "").strip()
-    if not text or not config.AI33_API_KEY:
+    if not text or not (config.AI33_API_KEY or config.AI33_API_KEY_BACKUP):
         return None, None, None
 
     task_id = clients.ai33_submit_form("/v3/text-to-speech", {

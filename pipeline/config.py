@@ -387,6 +387,7 @@ HEYGEN_UPLOAD_URL = get("HEYGEN_UPLOAD_URL", "https://upload.heygen.com").rstrip
 
 # ── ai33.pro (music, voice, subtitles) ──────────────────────────
 AI33_API_KEY = get("AI33_API_KEY")
+AI33_API_KEY_BACKUP = get("AI33_API_KEY_BACKUP")
 AI33_BASE_URL = get("AI33_BASE_URL", "https://api.ai33.pro").rstrip("/")
 AI33_VOICE_ID = get("AI33_VOICE_ID", "elevenlabs_21m00Tcm4TlvDq8ikWAM")
 AI33_TTS_SPEED = get("AI33_TTS_SPEED", "1")
@@ -462,7 +463,7 @@ def missing_keys() -> list[str]:
         "LLM_API_KEY": LLM_API_KEY,
         "LLM_BASE_URL": LLM_BASE_URL,
         "KIE_API_KEY": KIE_API_KEY,
-        "AI33_API_KEY": AI33_API_KEY,
+        "AI33_API_KEY": AI33_API_KEY or AI33_API_KEY_BACKUP,
         "PIXABAY_API_KEY": PIXABAY_API_KEY,
     }
     return [k for k, v in required.items() if not v]

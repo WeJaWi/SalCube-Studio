@@ -38,9 +38,9 @@ Profile-driven channel formats, one tool — pick the profile in the UI:
 - **cars-old** — researched pre-2000 classic/vintage vehicles, period engineering,
   model history, preservation, restoration, and original-versus-modified details.
 
-The four car profiles accept an English topic, build an accuracy-bounded research
-brief with source material, and present exactly three truthful titles before the
-normal Small (32k–47k character) production job starts.
+The four car profiles accept the exact English title to publish and send it
+straight into the normal Small (32k–47k character) production queue, while
+retaining their profile-specific automotive accuracy and safety rules.
 
 A local web app that turns a title into a complete Grandma Hannah
 senior-health video: Sonnet 5 writes an outline + 4 hooks, **you approve at
@@ -61,17 +61,24 @@ Sibling project of `~/video-studio` (same kie/ai33/Pixabay keys).
 | Operations observer, chat, reports | OpenRouter | `qwen/qwen3.7-flash` (`/chat/completions`) | `OPENROUTER_API_KEY` |
 | Thumbnail words | existing GPT provider | GPT-5.6 Terra (`/codex/v1/responses`) | `LLM_GPT_API_KEY` |
 | Host on camera | HeyGen (your avatar) | `POST /v2/video/generate`, audio-driven | `HEYGEN_API_KEY` + `HEYGEN_AVATAR_ID` |
-| Voice + subtitles | ai33.pro | `POST /v3/text-to-speech` (`with_transcript`) | `AI33_API_KEY` |
+| Voice + subtitles | ai33.pro | `POST /v3/text-to-speech` (`with_transcript`) | `AI33_API_KEY` + optional `AI33_API_KEY_BACKUP` |
 | AI b-roll | kie.ai Grok Imagine (cheapest; swappable) | `grok-imagine/text-to-video`, exact 6-30s | `KIE_VIDEO_API_KEY` |
 | Stock photos | Pixabay images API | relevance-scored, Ken Burns | `PIXABAY_IMAGE_API_KEY` |
 | Fallback AI images | kie.ai Z-Image | `z-image` | `KIE_API_KEY` |
-| Music | ai33.pro Suno | `POST /v1s/task/music-generation` | `AI33_API_KEY` |
+| Music | ai33.pro Suno | `POST /v1s/task/music-generation` | `AI33_API_KEY` + optional `AI33_API_KEY_BACKUP` |
 | Stock b-roll | Pixabay | videos API | `PIXABAY_API_KEY` |
 | Animations | **local** (headless Chromium + FFmpeg) | `anim_templates/*.html` | — |
 
 The **entire narration is voiced by ai33** (one consistent voice). HeyGen
 only lip-syncs the on-camera segments from that same audio — so a 30-minute
 video needs only ~3 minutes of HeyGen credits, not 30.
+
+Set `AI33_API_KEY_BACKUP` to a second ai33 key to keep voice and music jobs
+running when the primary explicitly reports exhausted credits, balance, or
+quota. Authentication errors, network failures, and ordinary rate limits do
+not trigger key switching. Each submitted task is polled with the same key
+that created it. After a credit failover, new tasks stay on the backup until
+the app restarts; restart after topping up the primary to probe it again.
 
 ## Run
 
