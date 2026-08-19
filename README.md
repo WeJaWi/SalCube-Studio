@@ -58,7 +58,7 @@ Sibling project of `~/video-studio` (same kie/ai33/Pixabay keys).
 | Stage | Provider | Model / endpoint | Key (.env) |
 |-------|----------|------------------|------------|
 | Outline, hooks, script, beat plan | kie.ai (Claude Sonnet 5) | `POST /claude/v1/messages` | `LLM_API_KEY` |
-| Operations observer, chat, reports | OpenRouter | `qwen/qwen3.7-flash` (`/chat/completions`) | `OPENROUTER_API_KEY` |
+| Operations observer, chat, reports | OpenRouter | `qwen/qwen3.8-27b` (`/chat/completions`, reasoning enabled) | `OPENROUTER_API_KEY` |
 | Thumbnail words | existing GPT provider | GPT-5.6 Terra (`/codex/v1/responses`) | `LLM_GPT_API_KEY` |
 | Host on camera | HeyGen (your avatar) | `POST /v2/video/generate`, audio-driven | `HEYGEN_API_KEY` + `HEYGEN_AVATAR_ID` |
 | Voice + subtitles | ai33.pro | `POST /v3/text-to-speech` (`with_transcript`) | `AI33_API_KEY` + optional `AI33_API_KEY_BACKUP` |
@@ -169,12 +169,18 @@ Outline, hooks, and the final script are saved in the job folder
 
 ## Read-only AI operations center
 
-The right side of the studio contains a read-only Qwen 3.7 Flash observer via
+The right side of the studio contains a read-only Qwen 3.8 27B observer via
 OpenRouter, with GPT-5.6 Terra as its explicit fallback. Neither provider can
 fall through to the local Claude CLI. Once per
 minute it receives a sanitized snapshot of queue states, recent job events,
 worker heartbeats/capacity, Drive readiness, encoder information, and free
 disk space. It writes a quiet update to `output/operations_log.jsonl`.
+
+Watcher requests enable OpenRouter reasoning with a small private reasoning
+budget, exclude reasoning details from the response/log, and use non-streaming
+responses because each health tick must produce one complete JSON object.
+Ticks and owner questions are independent one-turn requests, so there is no
+cross-turn reasoning state to persist or replay.
 
 The observer has no mutation tools or secret/environment access. It cannot
 stop/retry jobs, edit settings/files, restart workers, or send messages. Ask
