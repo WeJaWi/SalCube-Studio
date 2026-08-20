@@ -10,7 +10,8 @@ from unittest.mock import patch
 import app
 from docx import Document
 from pipeline import (clients, config, delivery_doc, identity, llm, operations,
-                      orchestrator, render, research, script, storage, thumbnail)
+                      orchestrator, render, research, script, storage, thumbnail,
+                      voiceover)
 
 
 class IdentityTests(unittest.TestCase):
@@ -129,6 +130,74 @@ class AI33FallbackTests(unittest.TestCase):
             task_id = clients.ai33_submit_form("/tts", {"text": "hello"})
         self.assertEqual(task_id, "backup-task")
         self.assertEqual(len(post.call_args_list), 2)
+
+
+class VoiceoverCacheTests(unittest.TestCase):
+    def test_invalid_cached_beat_is_resliced_from_valid_raw_audio(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "tts_raw_000.mp3"
+            raw.write_bytes(b"raw" * 200)
+            for i in range(2):
+                (root / f"vo_{i:03d}.mp3").write_bytes(b"beat" * 100)
+            beats = [{"text": "first narration"}, {"text": "second narration"}]
+
+            def valid(path, min_duration=0.04):
+                del min_duration
+                return Path(path).name != "vo_001.mp3"
+
+            with patch.object(render, "is_valid_audio", side_effect=valid), \
+                    patch.object(voiceover, "_slice_group") as sliced:
+                voiceover.generate_voiceover_grouped(
+                    beats, [(0, [0, 1])], root)
+            sliced.assert_called_once()
+
+    def test_collapsed_final_cue_uses_text_proportional_boundary(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "tts_raw_000.mp3"
+            raw.write_bytes(b"raw" * 200)
+            (root / "tts_raw_000.srt").write_text("placeholder")
+            beats = [{"text": "aaaa"}, {"text": "bbbb"}]
+
+            def fake_run(cmd, **_kwargs):
+                Path(cmd[-1]).write_bytes(b"audio" * 100)
+
+            cues = [
+                SimpleNamespace(start=0.0, end=10.0, text="aaaa"),
+                SimpleNamespace(start=10.0, end=10.0, text="bbbb"),
+            ]
+            with patch.object(render, "_run", side_effect=fake_run), \
+                    patch.object(render, "probe_duration", return_value=10.0), \
+                    patch.object(render, "is_valid_audio", return_value=True), \
+                    patch.object(voiceover.captions, "parse_srt",
+                                 return_value=cues):
+                voiceover._slice_group(
+                    beats, [0, 1], raw, raw.with_suffix(".srt"), root)
+
+            self.assertGreater(beats[1]["duration"], 4.0)
+            self.assertTrue((root / "vo_001.mp3").exists())
+
+    def test_header_only_narration_is_not_a_valid_audio_cache(self):
+        with TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "vo_102.mp3"
+            audio.write_bytes(b"header" * 60)
+            with patch.object(render, "probe_stream_duration", return_value=0):
+                self.assertFalse(render.is_valid_audio(audio))
+
+    def test_render_rejects_invalid_narration_before_ffmpeg(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "vo_102.mp3"
+            audio.write_bytes(b"header" * 60)
+            beat = {"kind": "blank", "duration": 12.0, "audio": audio}
+            with patch.object(render, "is_valid_audio", return_value=False), \
+                    patch.object(render, "_run") as ffmpeg:
+                with self.assertRaisesRegex(
+                        RuntimeError, "invalid narration audio asset"):
+                    render.render_beat(
+                        beat, root / "beat_102.mp4", 320, 180, 30, False)
+            ffmpeg.assert_not_called()
 
 
 class ResearchProfileTests(unittest.TestCase):

@@ -141,6 +141,22 @@ def probe_stream_duration(path: Path, stream: str) -> float:
         return 0.0
 
 
+def is_valid_audio(path: Path, min_duration: float = 0.04) -> bool:
+    """True only when ``path`` contains a probeable audio stream.
+
+    Existence is not enough for cached narration.  An interrupted or
+    zero-length MP3 can contain only FFmpeg's muxer header; FFprobe may then
+    guess that the tiny payload is raw VVC video.  Reusing that file later
+    produces the misleading ``[1:a] matches no streams`` render failure.
+    """
+    try:
+        return (path.is_file() and path.stat().st_size > 256
+                and probe_stream_duration(path, "audio")
+                >= float(min_duration))
+    except OSError:
+        return False
+
+
 def is_valid_video(path: Path, min_duration: float = 1.0) -> bool:
     """True only for a finalized, probeable video container.
 
@@ -873,6 +889,10 @@ def render_beat_classic(b: Dict[str, Any], out: Path, width: int, height: int,
         n_in += 1
 
     audio = b.get("audio")
+    if audio and Path(audio).exists() and not is_valid_audio(Path(audio)):
+        raise RuntimeError(
+            f"invalid narration audio asset: {Path(audio).name} has no "
+            "probeable audio stream")
     have_audio = bool(audio and Path(audio).exists())
     if have_audio:
         # Waveform is PRECOMPUTED into a finite clip (see _precompute_wave_clip)
@@ -1065,6 +1085,10 @@ def render_beat(b: Dict[str, Any], out: Path, width: int, height: int,
 
     audio = b.get("audio")
     if audio and Path(audio).exists():
+        if not is_valid_audio(Path(audio)):
+            raise RuntimeError(
+                f"invalid narration audio asset: {Path(audio).name} has no "
+                "probeable audio stream")
         inputs += ["-i", str(audio)]
         a = f"[{n_in}:a]aresample=44100"
         if pad_head > 0:

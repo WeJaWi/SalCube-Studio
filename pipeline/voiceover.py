@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import bisect
 import time as _time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -46,7 +47,20 @@ def generate_voiceover(
     audio_url = meta.get("audio_url")
     if not audio_url:
         raise RuntimeError(f"ai33 tts: no audio_url in metadata: {str(meta)[:200]}")
-    clients.download(audio_url, dest)
+    # Never expose a partially downloaded/header-only file at the canonical
+    # cache path.  A Stop, network loss, or provider returning the wrong
+    # payload must leave the group resumable rather than poisoning every
+    # later retry through an existence-only cache hit.
+    audio_tmp = dest.with_name(
+        f".{dest.stem}.{uuid.uuid4().hex}.download.mp3")
+    try:
+        clients.download(audio_url, audio_tmp)
+        if not render.is_valid_audio(audio_tmp, min_duration=0.25):
+            raise RuntimeError(
+                "ai33 tts: downloaded payload has no valid audio stream")
+        audio_tmp.replace(dest)
+    finally:
+        audio_tmp.unlink(missing_ok=True)
 
     srt_path = None
     srt_url = meta.get("srt_url")
@@ -115,7 +129,8 @@ def generate_voiceover_grouped(
     """
     total_groups = total_groups or len(groups)
     for g, idxs in groups:
-        if all((assets_dir / f"vo_{i:03d}.mp3").exists() for i in idxs):
+        beat_audio = [assets_dir / f"vo_{i:03d}.mp3" for i in idxs]
+        if all(render.is_valid_audio(path) for path in beat_audio):
             for i in idxs:
                 dest = assets_dir / f"vo_{i:03d}.mp3"
                 srt = dest.with_suffix(".srt")
@@ -126,10 +141,19 @@ def generate_voiceover_grouped(
         group_text = " ".join(beats[i]["text"] for i in idxs)
         raw_audio = assets_dir / f"tts_raw_{g:03d}.mp3"
         raw_srt = raw_audio.with_suffix(".srt")
-        if raw_audio.exists():
+        if raw_audio.exists() and render.is_valid_audio(
+                raw_audio, min_duration=0.25):
             emit(f"Group {g+1}/{total_groups}: reusing existing raw TTS "
                  f"(beats {idxs[0]+1}-{idxs[-1]+1})")
         else:
+            if raw_audio.exists():
+                emit(f"Group {g+1}/{total_groups}: discarding invalid raw "
+                     "TTS cache")
+                raw_audio.unlink(missing_ok=True)
+                raw_srt.unlink(missing_ok=True)
+            elif any(path.exists() for path in beat_audio):
+                emit(f"Group {g+1}/{total_groups}: rebuilding invalid "
+                     "narration slice(s) from raw TTS")
             for attempt in range(3):  # a flaky group must not kill the whole run
                 try:
                     generate_voiceover(group_text, raw_audio, voice_id=voice_id)
@@ -176,6 +200,9 @@ def _slice_group(beats: List[Dict[str, Any]], idxs: List[int], raw_audio: Path,
     cues = captions.parse_srt(raw_srt.read_text(encoding="utf-8", errors="ignore")) \
         if raw_srt.exists() else []
     total_dur = render.probe_duration(pcm)
+    if total_dur <= 0:
+        raise RuntimeError(
+            f"tts group audio is unprobeable after PCM decode: {raw_audio.name}")
 
     # Beat-side offsets: cumulative length of each beat's OWN text, joined
     # with a single space — the exact same normalization used to build
@@ -237,22 +264,48 @@ def _slice_group(beats: List[Dict[str, Any]], idxs: List[int], raw_audio: Path,
         bounds.append(max(bounds[-1], min(total_dur, t)))
     bounds.append(total_dur)
 
-    # _time_at can clip an intermediate boundary to exactly total_dur (an
-    # offset past the last SRT cue), which combined with the unconditional
-    # final total_dur bound gives ffmpeg an inverted/zero-length -ss/-to
-    # range on the last beat and crashes the whole group. Walk backward and
-    # pull any colliding boundary down just enough to keep every segment a
-    # non-zero length.
-    MIN_SEG = 0.05
-    for k in range(len(bounds) - 1, 0, -1):
-        if bounds[k] - bounds[k - 1] < MIN_SEG:
-            bounds[k - 1] = max(0.0, bounds[k] - MIN_SEG)
+    # Bad provider cue timestamps can map the final beat start to the exact
+    # end of the group.  A tiny fixed adjustment technically made the MP3
+    # probeable but discarded that beat's speech.  If any mapped segment is
+    # implausibly short for its text, fall back to character-proportional
+    # boundaries across the known-good full narration instead.
+    def _minimum_plausible(i: int) -> float:
+        expected = len(beats[i]["text"]) / script.CHARS_PER_SEC
+        return min(0.25, max(0.05, expected * 0.10))
+
+    if any(bounds[k + 1] - bounds[k] < _minimum_plausible(i)
+           for k, i in enumerate(idxs)):
+        bounds = [0.0]
+        bounds.extend(
+            total_dur * beat_bounds[k][0] / group_norm_len
+            for k in range(1, len(idxs)))
+        bounds.append(total_dur)
+
+    # Maintain a strict positive interval even for an accidentally empty
+    # beat.  The dynamic ceiling makes this feasible for every group length.
+    min_seg = min(0.05, total_dur / max(2, len(idxs) * 2))
+    for k in range(1, len(bounds) - 1):
+        bounds[k] = max(bounds[k], bounds[k - 1] + min_seg)
+    for k in range(len(bounds) - 2, 0, -1):
+        bounds[k] = min(bounds[k], bounds[k + 1] - min_seg)
 
     for k, i in enumerate(idxs):
         start, end = bounds[k], bounds[k + 1]
         dest = assets_dir / f"vo_{i:03d}.mp3"
-        render._run(["ffmpeg", "-y", "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
-                    "-i", str(pcm), "-c:a", "libmp3lame", "-q:a", "2", str(dest)])
+        tmp = dest.with_name(
+            f".{dest.stem}.{uuid.uuid4().hex}.slice.mp3")
+        try:
+            render._run(["ffmpeg", "-y", "-ss", f"{start:.3f}",
+                        "-to", f"{end:.3f}", "-i", str(pcm),
+                        "-c:a", "libmp3lame", "-q:a", "2", str(tmp)])
+            min_valid = min(0.25, max(0.04, (end - start) * 0.25))
+            if not render.is_valid_audio(tmp, min_duration=min_valid):
+                raise RuntimeError(
+                    f"tts beat {i}: sliced audio is invalid "
+                    f"({start:.3f}s-{end:.3f}s)")
+            tmp.replace(dest)
+        finally:
+            tmp.unlink(missing_ok=True)
         beat_cues = [captions.Segment(max(0.0, c.start - start),
                                       min(end - start, c.end - start), c.text)
                     for c in cues if c.end > start and c.start < end]
