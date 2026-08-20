@@ -15,7 +15,7 @@ from pathlib import Path
 from flask import (Flask, Response, g, jsonify, make_response, redirect,
                    render_template, request, send_file, abort)
 
-from pipeline import (animation, cancel, config, delivery_doc, fleet, identity,
+from pipeline import (animation, cancel, clients, config, delivery_doc, fleet, identity,
                       jobs, llm, operations, orchestrator, render as video_render,
                       research, scheduler, stats, storage, thumbnail)
 
@@ -2283,6 +2283,7 @@ def _ops_snapshot() -> dict:
                           "h264_encoder": config.gpu_encoder() or "libx264"},
         "disk": operations.disk_snapshot(),
         "drive": {"configured": DRIVE.configured, "authorized": DRIVE.authorized},
+        "ai33": clients.ai33_key_status(),
     }
 
 
@@ -2307,6 +2308,27 @@ def ops_chat():
         return jsonify(_ops_center().chat(question))
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/ops/ai33-key", methods=["GET", "POST"])
+def ops_ai33_key():
+    """Owner control for AI33 account preference; never returns key values."""
+    if request.method == "GET":
+        return jsonify(clients.ai33_key_status())
+    mode = str((request.get_json(silent=True) or {}).get("mode") or "").strip()
+    try:
+        status = clients.set_ai33_key_mode(mode, "owner API request")
+        _ops_center()._append({
+            "kind": "action", "model": "owner",
+            "severity": "info", "headline": "AI33 account preference changed",
+            "message": f"New AI33 tasks now prefer the {status['active']} account.",
+            "root_cause_risk": "low", "report_recommended": False,
+            "evidence": [f"mode={status['mode']}", f"active={status['active']}"],
+            "ai33": status,
+        })
+        return jsonify(status)
+    except (ValueError, RuntimeError) as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/api/ops/report", methods=["POST"])

@@ -1,7 +1,9 @@
-"""Read-only AI operations center for the local render fleet.
+"""AI operations center for the local render fleet.
 
-The model never receives mutation tools. It can summarize sanitized state,
-answer questions about that state, and write reports for the owner to export.
+The model never receives mutation tools or credentials. The host grants one
+deterministic, narrowly scoped action: prefer the configured AI33 backup only
+after explicit credit/quota-exhaustion evidence. Everything else stays
+read-only.
 """
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from . import config, identity, llm
+from . import clients, config, identity, llm
 
 
 _MODEL = "openrouter-monitor"
@@ -22,10 +24,13 @@ _FALLBACK_MODEL = "gpt-5.6-terra"
 _FALLBACK_DISPLAY_MODEL = "gpt-5.6-terra"
 _MODEL_CHAIN = f"{_DISPLAY_MODEL} → {_FALLBACK_DISPLAY_MODEL} fallback"
 _SYSTEM = (
-    "You are Dmiqwi Operations, a read-only production observer. You inspect "
+    "You are Dmiqwi Operations, a production observer. You inspect "
     "sanitized video-job, queue, storage, and worker health. Never claim you "
     "changed, restarted, stopped, retried, edited, or contacted anything. "
-    "You have no mutation tools. Separate evidence from inference. Be concise. "
+    "You have no mutation tools or credential access. The host may perform "
+    "one deterministic action outside the model: prefer the configured AI33 "
+    "backup after explicit credit/quota exhaustion. Separate evidence from "
+    "inference. Be concise. "
     "If evidence suggests a broad or uncertain root cause, recommend a report."
 )
 
@@ -174,10 +179,48 @@ class OperationsCenter:
             triggers.append("low_main_storage")
         return triggers
 
+    @staticmethod
+    def _ai33_credit_evidence(snapshot: dict) -> list[str]:
+        """Return job IDs with explicit AI33 credit exhaustion evidence."""
+        evidence = []
+        for job in snapshot.get("jobs", []):
+            texts = [str(job.get("error") or "")]
+            texts.extend(str(event.get("message") or "")
+                         for event in (job.get("recent_events") or [])
+                         if isinstance(event, dict))
+            if any(clients.ai33_credit_exhaustion_in_text(text) for text in texts):
+                evidence.append(str(job.get("video_id") or job.get("job_id")
+                                    or job.get("id") or "unknown"))
+        return evidence
+
+    def _maybe_switch_ai33(self, snapshot: dict) -> Optional[dict]:
+        """Apply the observer's sole mutation behind a deterministic gate."""
+        evidence = self._ai33_credit_evidence(snapshot)
+        status = clients.ai33_key_status()
+        if (not evidence or not status["backup_configured"]
+                or status["active"] == "backup"):
+            return None
+        new_status = clients.set_ai33_key_mode(
+            "backup", "observer detected explicit AI33 credit exhaustion")
+        return self._append({
+            "kind": "action", "model": "deterministic",
+            "severity": "warning",
+            "headline": "AI33 switched to backup account",
+            "message": ("Explicit credit exhaustion was reported for job(s) "
+                        + ", ".join(evidence[:4])
+                        + ". New AI33 tasks now use the configured backup; "
+                          "existing task polls remain pinned to their creator account."),
+            "root_cause_risk": "low", "report_recommended": False,
+            "evidence": [f"ai33 credit exhaustion: {jid}"
+                         for jid in evidence[:4]],
+            "ai33": new_status,
+        })
+
     def tick(self) -> dict:
         try:
             snapshot = self.snapshot_provider()
             self._last_snapshot = snapshot
+            self._maybe_switch_ai33(snapshot)
             health = self._deterministic_health(snapshot)
             report_triggers = self._automatic_report_triggers(snapshot)
             prompt = (
@@ -312,7 +355,7 @@ class OperationsCenter:
                             "url": f"/api/ops/report/{path.stem}"})
         return {"running": self.running, "interval_seconds": self.interval,
                 "model": _MODEL_CHAIN, "entries": entries,
-                "reports": reports}
+                "reports": reports, "ai33": clients.ai33_key_status()}
 
 
 def disk_snapshot() -> dict:

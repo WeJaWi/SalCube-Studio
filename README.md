@@ -167,9 +167,9 @@ awake during multi-hour renders without forcing the display to stay on.
 Outline, hooks, and the final script are saved in the job folder
 (`output/<job>/outline.txt`, `hooks.json`, `script.txt`).
 
-## Read-only AI operations center
+## AI operations center
 
-The right side of the studio contains a read-only Qwen 3.8 27B observer via
+The right side of the studio contains a Qwen 3.8 27B observer via
 OpenRouter, with GPT-5.6 Terra as its explicit fallback. Neither provider can
 fall through to the local Claude CLI. Once per
 minute it receives a sanitized snapshot of queue states, recent job events,
@@ -182,11 +182,14 @@ responses because each health tick must produce one complete JSON object.
 Ticks and owner questions are independent one-turn requests, so there is no
 cross-turn reasoning state to persist or replay.
 
-The observer has no mutation tools or secret/environment access. It cannot
-stop/retry jobs, edit settings/files, restart workers, or send messages. Ask
-it questions in the side panel; every proposed change is labeled as needing
-owner approval. Broad/uncertain failures cause a local Markdown report to be
-prepared under `output/reports/`; reports are downloadable but never sent.
+The model has no mutation tools or secret/environment access. The host grants
+the operations center one deterministic exception: when a sanitized job error
+explicitly reports AI33 credit/quota exhaustion, it may persistently prefer the
+configured backup AI33 account for new tasks. It never receives either key,
+and task polling stays pinned to the account that created each task. It cannot
+stop/retry jobs, edit any other setting/file, restart workers, or send messages.
+Broad/uncertain failures cause a local Markdown report under `output/reports/`;
+reports are downloadable but never sent.
 
 Description generation is intentionally parked in `waiting_for_rules` until
 the channel-specific description template, links, CTA, disclosure, language,

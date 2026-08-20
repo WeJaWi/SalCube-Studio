@@ -53,6 +53,9 @@ class AI33FallbackTests(unittest.TestCase):
                                json=lambda: data)
 
     def setUp(self):
+        self.mode_patch = patch.object(clients, "ai33_key_mode",
+                                       return_value="auto")
+        self.mode_patch.start()
         with clients._AI33_KEY_LOCK:
             clients._AI33_TASK_KEYS.clear()
             clients._AI33_PRIMARY_DEPLETED = False
@@ -61,6 +64,7 @@ class AI33FallbackTests(unittest.TestCase):
         with clients._AI33_KEY_LOCK:
             clients._AI33_TASK_KEYS.clear()
             clients._AI33_PRIMARY_DEPLETED = False
+        self.mode_patch.stop()
 
     def test_credit_exhaustion_switches_and_pins_tasks_to_backup(self):
         exhausted = self.response(
@@ -130,6 +134,19 @@ class AI33FallbackTests(unittest.TestCase):
             task_id = clients.ai33_submit_form("/tts", {"text": "hello"})
         self.assertEqual(task_id, "backup-task")
         self.assertEqual(len(post.call_args_list), 2)
+
+    def test_forced_backup_is_first_without_exposing_key_values(self):
+        self.mode_patch.stop()
+        self.mode_patch = patch.object(clients, "ai33_key_mode",
+                                       return_value="backup")
+        self.mode_patch.start()
+        with patch.object(config, "AI33_API_KEY", "primary-test-key"), \
+                patch.object(config, "AI33_API_KEY_BACKUP", "backup-test-key"):
+            self.assertEqual(clients._ai33_keys(),
+                             ["backup-test-key", "primary-test-key"])
+            status = clients.ai33_key_status()
+        self.assertEqual(status["active"], "backup")
+        self.assertNotIn("key", status)
 
 
 class VoiceoverCacheTests(unittest.TestCase):
@@ -999,6 +1016,39 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(
             operations.OperationsCenter._automatic_report_triggers(snapshot),
             ["job_errors:job-1"])
+
+    def test_observer_switches_ai33_only_on_explicit_credit_exhaustion(self):
+        with TemporaryDirectory() as tmp:
+            center = operations.OperationsCenter(
+                lambda: {}, interval=60)
+            center.log_file = Path(tmp) / "ops.jsonl"
+            snapshot = {"jobs": [{
+                "video_id": "job-1", "status": "error",
+                "error": "ai33: insufficient credits",
+            }]}
+            current = {"mode": "auto", "active": "primary",
+                       "backup_configured": True,
+                       "primary_configured": True,
+                       "primary_depleted_this_process": False}
+            changed = {**current, "mode": "backup", "active": "backup"}
+            with patch.object(clients, "ai33_key_status",
+                              side_effect=[current, changed]), \
+                    patch.object(clients, "set_ai33_key_mode",
+                                 return_value=changed) as switch:
+                result = center._maybe_switch_ai33(snapshot)
+        switch.assert_called_once()
+        self.assertEqual(result["kind"], "action")
+        self.assertEqual(result["ai33"]["active"], "backup")
+
+    def test_observer_does_not_switch_on_ordinary_ai33_failure(self):
+        center = operations.OperationsCenter(lambda: {}, interval=60)
+        snapshot = {"jobs": [{
+            "video_id": "job-1", "status": "error",
+            "error": "ai33 network timeout",
+        }]}
+        with patch.object(clients, "set_ai33_key_mode") as switch:
+            self.assertIsNone(center._maybe_switch_ai33(snapshot))
+        switch.assert_not_called()
 
 
 class ThumbnailApprovalTests(unittest.TestCase):

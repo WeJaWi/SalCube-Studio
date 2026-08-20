@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -86,20 +87,77 @@ def _ai33_headers(api_key: Optional[str] = None) -> dict:
 def _ai33_keys() -> list[str]:
     """Configured keys in selection order, without duplicates.
 
-    Once the primary explicitly reports exhausted credits, keep new work on
-    the backup for the life of this process. A restart probes the primary
-    again, which is useful after its balance has been topped up.
+    ``ai33_key_mode`` is live and persisted in settings.json: ``backup``
+    immediately prefers the secondary account, ``primary`` explicitly
+    prefers the primary, and ``auto`` preserves the original credit-aware
+    process-sticky behavior.
     """
     with _AI33_KEY_LOCK:
         depleted = _AI33_PRIMARY_DEPLETED
     primary = (config.AI33_API_KEY or "").strip()
     backup = (config.AI33_API_KEY_BACKUP or "").strip()
-    ordered = ([backup] if depleted and backup else [primary, backup])
+    mode = ai33_key_mode()
+    if mode == "backup" and backup:
+        ordered = [backup, primary]
+    elif mode == "primary":
+        ordered = [primary, backup]
+    else:
+        ordered = [backup, primary] if depleted and backup else [primary, backup]
     keys: list[str] = []
     for key in ordered:
         if key and key not in keys:
             keys.append(key)
     return keys
+
+
+def ai33_key_mode() -> str:
+    """Return the persisted account preference without exposing credentials."""
+    mode = str(config.load_settings().get("ai33_key_mode") or "auto").strip().lower()
+    return mode if mode in ("auto", "primary", "backup") else "auto"
+
+
+def ai33_key_status() -> dict:
+    """Secret-free AI33 account-selection state for the owner/observer."""
+    mode = ai33_key_mode()
+    primary = (config.AI33_API_KEY or "").strip()
+    backup = (config.AI33_API_KEY_BACKUP or "").strip()
+    with _AI33_KEY_LOCK:
+        depleted = _AI33_PRIMARY_DEPLETED
+    active = "backup" if backup and (mode == "backup" or (
+        mode == "auto" and depleted)) else "primary"
+    if active == "primary" and not primary and backup:
+        active = "backup"
+    return {
+        "mode": mode,
+        "active": active,
+        "primary_configured": bool(primary),
+        "backup_configured": bool(backup),
+        "primary_depleted_this_process": bool(depleted),
+    }
+
+
+def set_ai33_key_mode(mode: str, reason: str = "") -> dict:
+    """Persist a secret-free account preference and apply it to new tasks.
+
+    Existing provider task IDs remain pinned to the exact account that
+    created them, so a live switch cannot strand an in-flight poll.
+    """
+    global _AI33_PRIMARY_DEPLETED
+    mode = str(mode or "").strip().lower()
+    if mode not in ("auto", "primary", "backup"):
+        raise ValueError("AI33 key mode must be auto, primary, or backup")
+    if mode == "backup" and not (config.AI33_API_KEY_BACKUP or "").strip():
+        raise RuntimeError("AI33 backup key is not configured")
+    config.save_settings({
+        "ai33_key_mode": mode,
+        "ai33_key_mode_updated_at": datetime.now(timezone.utc).isoformat(
+            timespec="seconds"),
+        "ai33_key_mode_reason": str(reason or "owner request")[:240],
+    })
+    if mode in ("auto", "primary"):
+        with _AI33_KEY_LOCK:
+            _AI33_PRIMARY_DEPLETED = False
+    return ai33_key_status()
 
 
 def _ai33_credit_error(status_code: Optional[int], provider_code: Any,
@@ -118,6 +176,11 @@ def _ai33_credit_error(status_code: Optional[int], provider_code: Any,
         "quota exhausted", "quota exceeded", "insufficient quota",
     )
     return any(marker in text for marker in direct)
+
+
+def ai33_credit_exhaustion_in_text(message: str) -> bool:
+    """Public, credential-free detector used by the operations observer."""
+    return _ai33_credit_error(None, None, message)
 
 
 def _mark_ai33_primary_depleted(api_key: str) -> None:
@@ -151,7 +214,7 @@ def _ai33_submit(request_fn) -> str:
             _mark_ai33_primary_depleted(api_key)
             if index + 1 >= len(keys):
                 raise
-            print("[ai33] primary credits exhausted — switching to backup key")
+            print("[ai33] selected account credits exhausted — switching account")
             continue
         except RuntimeError as exc:
             # A final 429 from _retrying is raised before _ai33_check sees the
@@ -163,7 +226,7 @@ def _ai33_submit(request_fn) -> str:
             if index + 1 >= len(keys):
                 raise AI33CreditsExhausted(
                     "ai33 credits are exhausted for every configured key") from exc
-            print("[ai33] primary credits exhausted — switching to backup key")
+            print("[ai33] selected account credits exhausted — switching account")
             continue
         task_id = str(data.get("task_id") or "").strip()
         if not task_id:
