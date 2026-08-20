@@ -342,7 +342,7 @@ OPENROUTER_API_KEY = get("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = get(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
 OPENROUTER_MONITOR_MODEL = get(
-    "OPENROUTER_MONITOR_MODEL", "qwen/qwen3.8-27b")
+    "OPENROUTER_MONITOR_MODEL", "qwen/qwen3.7-flash")
 
 # ── Grok 4.5 via kie (alternative script model) ──────────────────
 # Own key so this model's spend is tracked apart from the others; falls

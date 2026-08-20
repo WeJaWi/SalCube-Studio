@@ -952,16 +952,16 @@ class OperationsTests(unittest.TestCase):
                           return_value="healthy") as mocked:
             result, model = operations._chat_with_fallback("inspect")
         self.assertEqual(result, "healthy")
-        self.assertEqual(model, "qwen/qwen3.8-27b")
+        self.assertEqual(model, "qwen/qwen3.7-flash")
         mocked.assert_called_once()
 
     def test_openrouter_monitor_payload_uses_qwen_reasoning(self):
         spec = {
-            "format": "openai", "model": "qwen/qwen3.8-27b",
+            "format": "openai", "model": "qwen/qwen3.7-flash",
             "reasoning": True, "reasoning_max_tokens": 256,
         }
         payload = llm._payload(spec, "inspect this", 650)
-        self.assertEqual(payload["model"], "qwen/qwen3.8-27b")
+        self.assertEqual(payload["model"], "qwen/qwen3.7-flash")
         self.assertEqual(payload["reasoning"], {
             "enabled": True, "max_tokens": 256, "exclude": True,
         })

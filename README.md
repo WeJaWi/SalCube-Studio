@@ -58,7 +58,7 @@ Sibling project of `~/video-studio` (same kie/ai33/Pixabay keys).
 | Stage | Provider | Model / endpoint | Key (.env) |
 |-------|----------|------------------|------------|
 | Outline, hooks, script, beat plan | kie.ai (Claude Sonnet 5) | `POST /claude/v1/messages` | `LLM_API_KEY` |
-| Operations observer, chat, reports | OpenRouter | `qwen/qwen3.8-27b` (`/chat/completions`, reasoning enabled) | `OPENROUTER_API_KEY` |
+| Operations observer, chat, reports | OpenRouter | `qwen/qwen3.7-flash` (`/chat/completions`, reasoning enabled) | `OPENROUTER_API_KEY` |
 | Thumbnail words | existing GPT provider | GPT-5.6 Terra (`/codex/v1/responses`) | `LLM_GPT_API_KEY` |
 | Host on camera | HeyGen (your avatar) | `POST /v2/video/generate`, audio-driven | `HEYGEN_API_KEY` + `HEYGEN_AVATAR_ID` |
 | Voice + subtitles | ai33.pro | `POST /v3/text-to-speech` (`with_transcript`) | `AI33_API_KEY` + optional `AI33_API_KEY_BACKUP` |
