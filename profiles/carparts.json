@@ -34,7 +34,7 @@
     "music_style": "light technical documentary underscore, controlled pulse, soft percussion and restrained electronics, focused and unobtrusive, no vocals"
   },
   "music": {"enabled": true, "tracks": "auto", "minutes_per_track": 18, "min_tracks": 2, "max_tracks": 5},
-  "voices": {"English": "elevenlabs_CwhRBWXzGAHq8TQ4Fs17"},
+  "voices": {"English": "elevenlabs_ZyYWFWAQ8NqzJGWzpBvJ"},
   "writing_sections": [
     {"name": "symptom_or_question", "weight": 0.1, "hint": "Open with the practical question, symptom pattern, or purchasing decision while making clear that symptoms can have multiple causes."},
     {"name": "part_and_system", "weight": 0.25, "hint": "Identify the component, its variants, where it sits in the larger system, what it does, and how operation differs across vehicle designs."},
