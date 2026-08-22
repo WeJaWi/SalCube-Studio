@@ -34,7 +34,7 @@
     "music_style": "clean contemporary technology-documentary score, subtle electronic pulse, precise percussion and warm low synths, optimistic but neutral, no vocals"
   },
   "music": {"enabled": true, "tracks": "auto", "minutes_per_track": 18, "min_tracks": 2, "max_tracks": 5},
-  "voices": {"English": "elevenlabs_CwhRBWXzGAHq8TQ4Fs17"},
+  "voices": {"English": "elevenlabs_3TjmPnYoHIxExxqTpara"},
   "writing_sections": [
     {"name": "modern_tension", "weight": 0.1, "hint": "Open with the verified capability, limitation, or ownership tradeoff that makes this modern-car topic matter now."},
     {"name": "system_context", "weight": 0.23, "hint": "Define the technology, model years, markets, trims, hardware and software versions, and regulatory context needed to understand the topic."},
