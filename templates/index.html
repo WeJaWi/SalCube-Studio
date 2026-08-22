@@ -1245,7 +1245,7 @@ async function refreshQueue() {
       : `${list.length} recent`;
     qList.innerHTML = list.map(j => {
       const pos = j.queue_pos ? `#${j.queue_pos} · ` : "";
-      const canCancel = ["researching","awaiting_title","queued","paused","error"].includes(j.status);
+      const canCancel = ["researching","awaiting_title","queued","retry_wait","paused","error","done"].includes(j.status);
       const canRetry = j.status === "error";
       const canSendToWorker = j.status === "queued";
       const canStop = !!j.stoppable;
@@ -1319,7 +1319,14 @@ async function refreshQueue() {
     qList.querySelectorAll(".qcancel").forEach(btn => {
       btn.addEventListener("click", async e => {
         e.stopPropagation();
-        await fetch("/api/queue/" + btn.dataset.id, {method: "DELETE"});
+        btn.disabled = true;
+        const r = await fetch("/api/queue/" + btn.dataset.id, {method: "DELETE"});
+        const data = await r.json();
+        if (!r.ok || data.error) {
+          alert(data.error || "Couldn't remove the job.");
+          btn.disabled = false;
+          return;
+        }
         refreshQueue();
         if (currentJob === btn.dataset.id) {
           currentJob = null;

@@ -1655,6 +1655,27 @@ def fleet_heartbeat():
             state = str(report.get("status") or "running")
             if state not in ("running", "awaiting_approval", "done", "error"):
                 continue
+            # A fleet worker reports a deliberate stop through its terminal
+            # error channel ("stopped by user"). Preserve the owner's
+            # requested destination instead of turning that acknowledgement
+            # back into a failed/running job on later heartbeats.
+            stop_target = str(job.get("_stop_target") or "")
+            if stop_target in ("paused", "cancelled") and state in ("done", "error"):
+                job["status"] = stop_target
+                job["step"] = stop_target
+                job.pop("_stop_target", None)
+                job.pop("error", None)
+                job.pop("awaiting", None)
+                job.pop("dispatched_to", None)
+                job.pop("dispatched_at", None)
+                job.setdefault("log", []).append({
+                    "t": now.strftime("%H:%M:%S"), "step": "queue",
+                    "message": ("Worker stopped; cached work is ready to resume"
+                                if stop_target == "paused"
+                                else "Worker stopped and job removed"),
+                })
+                job["updated_at"] = now.isoformat(timespec="seconds")
+                continue
             job["status"] = state
             job["step"] = str(report.get("step") or state)
             job["updated_at"] = now.isoformat(timespec="seconds")
@@ -1878,7 +1899,8 @@ def cancel_queued(job_id: str):
         if not job:
             return jsonify({"error": "unknown job"}), 404
         if job.get("status") not in (
-                "researching", "awaiting_title", "queued", "paused", "error"):
+                "researching", "awaiting_title", "queued", "retry_wait",
+                "paused", "error", "done"):
             return jsonify({
                 "error": f"can only remove inactive jobs (status={job.get('status')})"
             }), 409

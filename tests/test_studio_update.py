@@ -786,6 +786,48 @@ class QueueRepairTests(unittest.TestCase):
         rows = self.client.get("/api/jobs").get_json()
         self.assertNotIn(job_id, {row["job_id"] for row in rows})
 
+    def test_completed_job_can_be_removed(self):
+        job_id = "completed-job"
+        app.JOBS[job_id] = {
+            "status": "done", "step": "done", "title": "Finished video",
+            "profile": "reddit", "inputs": {}, "log": [],
+        }
+        with patch.object(app, "_persist_queue") as persist:
+            response = self.client.delete(f"/api/queue/{job_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(app.JOBS[job_id]["status"], "cancelled")
+        persist.assert_called_once()
+        rows = self.client.get("/api/jobs").get_json()
+        self.assertNotIn(job_id, {row["job_id"] for row in rows})
+
+    def test_fleet_stop_confirmation_preserves_cancelled_target(self):
+        job_id = "remote-remove"
+        worker_id = "worker-one"
+        app.JOBS[job_id] = {
+            "status": "running", "step": "render", "progress_pct": 40,
+            "title": "Remote video", "profile": "classic", "inputs": {},
+            "log": [], "dispatched_to": worker_id,
+            "_stop_target": "cancelled",
+        }
+        app.FLEET_WORKERS[worker_id] = {"approvals": [], "dispatch": {}}
+        with patch.object(app.config, "FLEET_ROLE", "main"), \
+                patch.object(app.config, "FLEET_PAIRING_TOKEN", "token"), \
+                patch.object(app, "_persist_queue"), \
+                patch.object(app, "_fleet_dispatch_for", return_value=[]):
+            response = self.client.post(
+                "/api/fleet/heartbeat",
+                headers={"Authorization": "Bearer token"},
+                json={"worker_id": worker_id, "capacity": {"free": 1},
+                      "jobs": [{"job_id": job_id, "status": "error",
+                                "step": "error", "progress_pct": 40,
+                                "error": "stopped by user"}]},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(app.JOBS[job_id]["status"], "cancelled")
+        self.assertNotIn("dispatched_to", app.JOBS[job_id])
+        self.assertNotIn("_stop_target", app.JOBS[job_id])
+        self.assertNotIn("error", app.JOBS[job_id])
+
     def test_healthy_fleet_report_clears_stale_job_error(self):
         job_id = "recovered-job"
         worker_id = "worker-one"
