@@ -34,7 +34,7 @@
     "music_style": "slow celestial ambient score, glass harmonics, soft low strings and distant piano, mysterious but reassuring, no vocals"
   },
   "music": {"enabled": true, "tracks": "auto", "minutes_per_track": 18, "min_tracks": 2, "max_tracks": 6},
-  "voices": {"English": "elevenlabs_CwhRBWXzGAHq8TQ4Fs17"},
+  "voices": {"English": "elevenlabs_N2lVS1w4EtoT3dr4eOWO"},
   "writing_sections": [
     {"name": "opening_window", "weight": 0.12, "hint": "Open with the theme's emotional relevance and a truthful curiosity gap. Never invent a rare date, transit, portal, or guaranteed event."},
     {"name": "symbolic_foundation", "weight": 0.25, "hint": "Explain only the astrological symbols, archetypes, houses, signs, or planetary meanings directly relevant to the submitted title. Distinguish tradition and interpretation from astronomy or science."},
