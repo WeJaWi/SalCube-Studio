@@ -317,9 +317,15 @@ def generate(template_path: Path, character_path: Optional[Path], dest: Path, *,
     last_error: Exception = RuntimeError("thumbnail task was not attempted")
     for task_model, key, task_payload in task_attempts:
         try:
+            key_label = ("thumbnail" if key == dedicated_key else
+                         "video" if key == config.KIE_VIDEO_API_KEY else "main")
+            context = f"thumbnail:{dest.stem}"
             task_id = clients.kie_create_task(
-                task_model, task_payload, api_key=key)
-            urls = clients.kie_poll(task_id, timeout_s=timeout_s, api_key=key)
+                task_model, task_payload, api_key=key, context=context,
+                key_label=key_label)
+            urls = clients.kie_poll(
+                task_id, timeout_s=timeout_s, api_key=key, model=task_model,
+                context=context, key_label=key_label)
             if not urls:
                 raise RuntimeError("thumbnail model returned no image URL")
             return clients.download(urls[0], dest)

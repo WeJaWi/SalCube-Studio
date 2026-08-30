@@ -339,32 +339,189 @@ def ai33_poll(task_id: str, timeout_s: int = 1200, interval: float = 5.0,
 
 
 # ───────────────────────── kie.ai ───────────────────────────────
+class KieSubmissionUncertain(RuntimeError):
+    """Kie may have accepted a createTask request whose response was lost.
+
+    createTask is billable and Kie does not document an idempotency key, so
+    callers must not blindly replay this failure.  The orchestrator persists
+    an intent before submission and will use a free fallback on resume.
+    """
+
+
+class KieTaskFailed(RuntimeError):
+    """A Kie task reached the provider's terminal failure state."""
+
+
+class KieTaskTimeout(RuntimeError):
+    """A Kie task is still non-terminal after the local polling window."""
+
+
+_KIE_AUDIT_LOCK = threading.Lock()
+_KIE_TASK_META: Dict[str, Dict[str, str]] = {}
+_KIE_TERMINAL_TASKS: set[str] = set()
+_KIE_TERMINAL_LOG_PATH = ""
+
+
+def _kie_key_label(api_key: Optional[str], requested: Optional[str] = None) -> str:
+    """Return a secret-free account label for usage records."""
+    if requested:
+        return requested
+    key = api_key or config.KIE_API_KEY
+    candidates = (
+        ("thumbnail", config.KIE_THUMBNAIL_API_KEY),
+        ("video", config.KIE_VIDEO_API_KEY),
+        ("main", config.KIE_API_KEY),
+        ("script-gpt", config.LLM_GPT_API_KEY),
+        ("script-grok", config.LLM_GROK_API_KEY),
+    )
+    labels = [label for label, known in candidates if key and known and key == known]
+    return "+".join(labels) if labels else "custom"
+
+
+def _kie_credits(data: Dict[str, Any]) -> Any:
+    """Extract the task-detail credit field without guessing a price."""
+    for key in ("creditsConsumed", "credits_consumed"):
+        if key in data:
+            return data.get(key)
+    return None
+
+
+def _record_kie_event(event: str, *, task_id: str = "", model: str = "",
+                      api_key: Optional[str] = None, key_label: str = "",
+                      context: str = "", credits: Any = None,
+                      message: str = "") -> None:
+    """Append a credential-free Kie billing/audit event as JSONL."""
+    row: Dict[str, Any] = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "event": event,
+        "task_id": task_id,
+        "model": model,
+        "account": _kie_key_label(api_key, key_label),
+    }
+    if context:
+        row["context"] = str(context)[:160]
+    if credits is not None:
+        row["credits_consumed"] = credits
+    if message:
+        row["message"] = str(message)[:300]
+    global _KIE_TERMINAL_LOG_PATH
+    path = config.OUTPUT_DIR / "kie_usage.jsonl"
+    try:
+        with _KIE_AUDIT_LOCK:
+            path_key = str(path.resolve())
+            if path_key != _KIE_TERMINAL_LOG_PATH:
+                _KIE_TERMINAL_TASKS.clear()
+                if path.exists():
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        try:
+                            prior = json.loads(line)
+                        except (ValueError, TypeError):
+                            continue
+                        if (prior.get("event") in ("succeeded", "failed")
+                                and prior.get("task_id")):
+                            _KIE_TERMINAL_TASKS.add(str(prior["task_id"]))
+                _KIE_TERMINAL_LOG_PATH = path_key
+            if (event in ("succeeded", "failed") and task_id
+                    and task_id in _KIE_TERMINAL_TASKS):
+                return
+            with path.open("a", encoding="utf-8") as out:
+                out.write(json.dumps(row, ensure_ascii=False) + "\n")
+            if event in ("succeeded", "failed") and task_id:
+                _KIE_TERMINAL_TASKS.add(task_id)
+    except OSError:
+        # Audit logging must never turn a completed paid task into a retry.
+        pass
+
+
+def kie_stop_error_in_text(message: str) -> bool:
+    """Whether more paid submissions should stop for the rest of a job."""
+    text = str(message or "").casefold()
+    markers = (
+        "insufficient credit", "credits insufficient", "credit exhausted",
+        "out of credit", "insufficient balance", "payment required",
+        "invalid api key", "unauthorized", "forbidden", "authentication",
+        "status 401", "status 403", "http 401", "http 403",
+    )
+    return any(marker in text for marker in markers)
+
+
 def _kie_headers() -> dict:
     return {"Authorization": f"Bearer {config.KIE_API_KEY}", "Content-Type": "application/json"}
 
 
-def kie_create_task(model: str, inp: dict, api_key: Optional[str] = None) -> str:
-    """POST /api/v1/jobs/createTask, return taskId."""
+def kie_create_task(model: str, inp: dict, api_key: Optional[str] = None,
+                    *, context: str = "", key_label: str = "") -> str:
+    """POST /api/v1/jobs/createTask once and return its task ID.
+
+    Unlike downloads and read-only polling, this billable POST is deliberately
+    not wrapped in ``_retrying``.  A read timeout can happen after the server
+    accepted the task; replaying it would create a second charged task.
+    """
     url = f"{config.KIE_BASE_URL}/api/v1/jobs/createTask"
-    headers = {"Authorization": f"Bearer {api_key or config.KIE_API_KEY}",
+    selected_key = api_key or config.KIE_API_KEY
+    headers = {"Authorization": f"Bearer {selected_key}",
                "Content-Type": "application/json"}
-    r = _retrying(lambda: requests.post(url, headers=headers,
-                                        json={"model": model, "input": inp},
-                                        timeout=60))
-    data = r.json()
-    if data.get("code") != 200:
-        raise RuntimeError(f"kie createTask error: {data.get('msg')} ({r.status_code})")
-    return data["data"]["taskId"]
+    try:
+        r = requests.post(url, headers=headers,
+                          json={"model": model, "input": inp}, timeout=60)
+    except requests.RequestException as exc:
+        _record_kie_event(
+            "submission_uncertain", model=model, api_key=selected_key,
+            key_label=key_label, context=context, message=str(exc))
+        raise KieSubmissionUncertain(
+            "Kie submission outcome is unknown after a network failure; "
+            "it was not retried to avoid a duplicate charged task") from exc
+    try:
+        data = r.json()
+    except ValueError as exc:
+        _record_kie_event(
+            "submission_uncertain", model=model, api_key=selected_key,
+            key_label=key_label, context=context,
+            message=f"non-JSON HTTP {r.status_code}")
+        raise KieSubmissionUncertain(
+            "Kie submission returned an unreadable response; it was not "
+            "retried to avoid a duplicate charged task") from exc
+    if r.status_code >= 400 or data.get("code") != 200:
+        message = str(data.get("msg") or data.get("message") or r.text[:300])
+        _record_kie_event(
+            "submission_rejected", model=model, api_key=selected_key,
+            key_label=key_label, context=context, message=message)
+        raise RuntimeError(f"kie createTask error: {message} ({r.status_code})")
+    task_id = str((data.get("data") or {}).get("taskId") or "").strip()
+    if not task_id:
+        _record_kie_event(
+            "submission_uncertain", model=model, api_key=selected_key,
+            key_label=key_label, context=context, message="response omitted taskId")
+        raise KieSubmissionUncertain(
+            "Kie accepted a submission but returned no task ID; it was not "
+            "retried to avoid a duplicate charged task")
+    with _KIE_AUDIT_LOCK:
+        _KIE_TASK_META[task_id] = {
+            "model": model,
+            "account": _kie_key_label(selected_key, key_label),
+            "context": str(context or "")[:160],
+        }
+    _record_kie_event(
+        "submitted", task_id=task_id, model=model, api_key=selected_key,
+        key_label=key_label, context=context)
+    return task_id
 
 
 def kie_poll(task_id: str, timeout_s: int = 600, interval: float = 4.0,
-             api_key: Optional[str] = None) -> list:
+             api_key: Optional[str] = None, *, model: str = "",
+             context: str = "", key_label: str = "") -> list:
     """Poll recordInfo until success. Returns list of result URLs."""
     url = f"{config.KIE_BASE_URL}/api/v1/jobs/recordInfo"
+    selected_key = api_key or config.KIE_API_KEY
+    with _KIE_AUDIT_LOCK:
+        meta = dict(_KIE_TASK_META.get(task_id) or {})
+    model = model or meta.get("model", "")
+    context = context or meta.get("context", "")
+    key_label = key_label or meta.get("account", "")
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
-            r = requests.get(url, headers={"Authorization": f"Bearer {api_key or config.KIE_API_KEY}"},
+            r = requests.get(url, headers={"Authorization": f"Bearer {selected_key}"},
                              params={"taskId": task_id}, timeout=60)
         except requests.RequestException:
             cancel.sleep(interval)  # transient — keep polling
@@ -383,14 +540,32 @@ def kie_poll(task_id: str, timeout_s: int = 600, interval: float = 4.0,
         data = body.get("data") or {}
         state = data.get("state")
         if state == "success":
+            _record_kie_event(
+                "succeeded", task_id=task_id, model=model,
+                api_key=selected_key, key_label=key_label, context=context,
+                credits=_kie_credits(data))
             result = data.get("resultJson")
             if isinstance(result, str):
                 result = json.loads(result)
+            with _KIE_AUDIT_LOCK:
+                _KIE_TASK_META.pop(task_id, None)
             return (result or {}).get("resultUrls", [])
         if state == "fail":
-            raise RuntimeError(f"kie task failed: {data.get('failMsg')}")
+            message = str(data.get("failMsg") or "unknown provider failure")
+            _record_kie_event(
+                "failed", task_id=task_id, model=model,
+                api_key=selected_key, key_label=key_label, context=context,
+                credits=_kie_credits(data), message=message)
+            with _KIE_AUDIT_LOCK:
+                _KIE_TASK_META.pop(task_id, None)
+            raise KieTaskFailed(f"kie task failed: {message}")
         cancel.sleep(interval)
-    raise RuntimeError(f"kie task {task_id} timed out after {timeout_s}s")
+    _record_kie_event(
+        "poll_timeout", task_id=task_id, model=model, api_key=selected_key,
+        key_label=key_label, context=context)
+    raise KieTaskTimeout(
+        f"kie task {task_id} timed out after {timeout_s}s; task ID was "
+        "retained and will be polled again on resume")
 
 
 def kie_upload(path: Path, upload_dir: str = "health-studio",

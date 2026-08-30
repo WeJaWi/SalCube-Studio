@@ -74,12 +74,14 @@ def _migrate_settings(raw: dict) -> dict:
     if raw.get("version") == _SETTINGS_VERSION:
         raw.setdefault("queue", {})
         raw.setdefault("profiles", {})
+        raw.setdefault("fleet_workers", {})
         return raw
     return {
         "version": _SETTINGS_VERSION,
         "gpu_encode": bool(raw.get("gpu_encode", False)),
         "queue": {},
         "profiles": {},
+        "fleet_workers": {},
     }
 
 
@@ -96,17 +98,17 @@ def save_settings(patch: dict) -> dict:
 
     A shallow dict.update() (the old behavior) would let a single-field
     POST like {"queue": {"max_planning_jobs": 3}} silently wipe every other
-    key already set under "queue" — deep-merge only the two nested blocks
-    that are ever partially patched; everything else stays a plain
-    top-level overwrite, matching how `gpu_encode` already worked.
+    key already set under "queue" — deep-merge the nested blocks that are
+    partially patched (queue, profiles, and per-worker policy); everything
+    else stays a plain top-level overwrite, matching how `gpu_encode` worked.
     """
     with _SETTINGS_LOCK:
         cur = load_settings()
         for key, val in patch.items():
-            if key in ("queue", "profiles") and isinstance(val, dict):
+            if key in ("queue", "profiles", "fleet_workers") and isinstance(val, dict):
                 merged = dict(cur.get(key, {}))
                 for pk, pv in val.items():
-                    if key == "profiles" and isinstance(pv, dict):
+                    if key in ("profiles", "fleet_workers") and isinstance(pv, dict):
                         merged[pk] = {**merged.get(pk, {}), **pv}
                     else:
                         merged[pk] = pv
@@ -368,6 +370,10 @@ KIE_IMAGE_MODEL = get("KIE_IMAGE_MODEL", "z-image")
 KIE_VIDEO_MODEL = get("KIE_VIDEO_MODEL", "grok-imagine/text-to-video")
 # dedicated key for the video model (falls back to the main kie key)
 KIE_VIDEO_API_KEY = get("KIE_VIDEO_API_KEY") or get("KIE_API_KEY")
+# Last-resort AI stills are useful, but an outage in both stock providers must
+# not turn every beat in a long video into an uncapped paid Kie task. Profiles
+# may override this with video.kie_fallback_image_limit.
+KIE_FALLBACK_IMAGE_LIMIT = get_int("KIE_FALLBACK_IMAGE_LIMIT", 3)
 
 # ── Thumbnail tool (standalone — separate from the video pipeline) ──
 # Own API key so its spend is tracked apart from video-gen kie credits.
@@ -433,6 +439,7 @@ FLEET_STALE_SECONDS = max(30, get_int("FLEET_STALE_SECONDS", 120))
 # the local `claude` CLI under this machine's own subscription — for when
 # kie.ai's proxy itself is the thing that's unreliable, not just occasional
 # hiccups a retry can heal.
+DEFAULT_SCRIPT_MODEL = get("DEFAULT_SCRIPT_MODEL", "gpt-5.6-luna")
 SCRIPT_MODELS = {
     "sonnet-5": {"format": "anthropic", "base": LLM_BASE_URL,
                  "path": LLM_CHAT_PATH, "model": LLM_MODEL, "key": LLM_API_KEY},

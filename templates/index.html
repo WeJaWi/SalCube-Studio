@@ -353,6 +353,7 @@
     text-transform: lowercase;
   }
   .badge.running { background: rgba(94,200,216,0.1); color: var(--cyan); border: 1px solid rgba(94,200,216,0.22); }
+  .badge.dispatched { background: rgba(94,200,216,0.08); color: var(--cyan); border: 1px solid rgba(94,200,216,0.18); }
   .badge.researching { background: rgba(94,200,216,0.1); color: var(--cyan); border: 1px solid rgba(94,200,216,0.22); }
   .badge.queued { background: rgba(148,156,168,0.12); color: #a8aeb8; border: 1px solid rgba(148,156,168,0.22); }
   .badge.awaiting_approval,
@@ -458,6 +459,34 @@
   .dot.busy   { background: var(--warn); box-shadow: 0 0 6px rgba(201,168,106,0.6); }
   .dot.offline{ background: var(--muted-2); box-shadow: none; }
   #goWorker:disabled { opacity: .45; cursor: not-allowed; }
+
+  .worker-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+  .worker-card { border:1px solid var(--border-soft); border-radius:var(--radius-sm);
+    background:rgba(0,0,0,.13); padding:14px; min-width:0; }
+  .worker-head { display:flex; align-items:center; gap:8px; }
+  .worker-head strong { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .worker-head .badge { margin-left:auto; }
+  .worker-meta { color:var(--muted-2); font-size:11.5px; line-height:1.55; margin-top:8px; }
+  .worker-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:7px; margin-top:10px; }
+  .worker-stat { border:1px solid var(--border-soft); border-radius:8px; padding:7px 8px; }
+  .worker-stat span { display:block; color:var(--muted-2); font-size:9px;
+    text-transform:uppercase; letter-spacing:.06em; }
+  .worker-stat strong { display:block; font-size:12px; margin-top:2px; }
+  .worker-jobs { margin-top:10px; }
+  .worker-job { display:flex; align-items:center; gap:7px; padding:7px 0;
+    border-top:1px solid var(--border-soft); font-size:11.5px; }
+  .worker-job-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .worker-job button { padding:4px 8px; font-size:10px; }
+  .worker-controls { display:flex; gap:6px; align-items:center; margin-top:11px; flex-wrap:wrap; }
+  .worker-controls button { margin:0; padding:6px 10px; font-size:10.5px; }
+  .worker-controls button.selected { color:var(--cyan); border-color:rgba(94,200,216,.38); }
+  .worker-controls select, .qworker { width:auto; min-width:92px; padding:6px 28px 6px 9px;
+    background-position:right 9px center; font-size:11px; border-radius:999px; }
+  .worker-empty { color:var(--muted-2); font-size:12px; line-height:1.5; padding:4px 0; }
+  .badge.available { color:var(--ok); border:1px solid rgba(107,191,150,.25); background:rgba(107,191,150,.1); }
+  .badge.busy, .badge.draining { color:var(--warn); border:1px solid rgba(201,168,106,.28); background:rgba(201,168,106,.1); }
+  .badge.offline, .badge.worker-paused { color:var(--muted-2); border:1px solid var(--border); background:#292d34; }
+  @media (max-width:720px) { .worker-grid { grid-template-columns:1fr; } }
 
   #queuePanel .qrow {
     display: flex;
@@ -624,8 +653,8 @@
         <select id="script_model">
           <option value="claude-cli">Claude CLI (this machine's subscription)</option>
           <option value="sonnet-5">Claude Sonnet 5 (via kie.ai)</option>
-          <option value="gpt-5.6-terra" selected>GPT 5.6 Terra</option>
-          <option value="gpt-5.6-luna">GPT 5.6 Luna</option>
+          <option value="gpt-5.6-terra">GPT 5.6 Terra</option>
+          <option value="gpt-5.6-luna" selected>GPT 5.6 Luna</option>
           <option value="gpt-5.6-sol">GPT 5.6 Sol</option>
           <option value="grok-4-5">Grok 4.5 (via kie.ai)</option>
         </select>
@@ -726,6 +755,14 @@
       <span class="hint" id="queueSummary"></span>
     </div>
     <div id="queueList"></div>
+  </div>
+
+  <div id="workersPanel" class="panel hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:12px">
+      <div class="panel-title" style="margin:0">Worker control</div>
+      <span class="hint" id="workersSummary">Checking fleet…</span>
+    </div>
+    <div id="workersList" class="worker-grid"></div>
   </div>
 
   <div id="jobPanel" class="panel hidden">
@@ -830,7 +867,7 @@
 <script>
 const $ = s => document.querySelector(s);
 let timer = null, queueTimer = null, currentJob = null;
-let selectedHook = null, gateShown = false, lastJobs = [], videoFor = null;
+let selectedHook = null, gateShown = false, lastJobs = [], lastWorkers = [], videoFor = null;
 
 const PROFILE_THEMES = {{ profile_theme_defaults | tojson }};
 function applyProfileThemes() {
@@ -975,10 +1012,9 @@ let workerOnline = false;
 function applyWorkerLight(workers) {
   const dot = $("#workerDot"), btn = $("#goWorker"), label = $("#goWorkerLabel");
   const live = (workers || []).filter(w => !w.stale);
-  const ready = live.filter(w => w.online);
-  const free = ready.filter(w => (w.capacity || {}).free > 0);
-  workerOnline = ready.length > 0;
-  dot.className = "dot " + (free.length ? "online" : (ready.length ? "busy" : "offline"));
+  const free = live.filter(w => w.available);
+  workerOnline = free.length > 0;
+  dot.className = "dot " + (free.length ? "online" : (live.length ? "busy" : "offline"));
   btn.disabled = !workerOnline;
   if (!live.length) {
     label.textContent = "No worker connected";
@@ -988,19 +1024,115 @@ function applyWorkerLight(workers) {
     label.textContent = "Send to worker";
     btn.title = `${w.name} — ${(w.hardware||{}).cpu_cores || "?"} cores, `
       + `${(w.hardware||{}).hw_encoder || "no hw encoder"}, `
-      + `${(w.capacity||{}).free} slot(s) free`;
+      + `${(w.capacity||{}).effective_free} slot(s) free`;
   } else {
-    label.textContent = "Worker busy";
-    btn.title = "The worker is connected but has no free slot — it will pick this up when it frees.";
+    label.textContent = live.some(w => (w.policy||{}).mode !== "active") ? "Worker paused" : "Worker busy";
+    btn.title = "No worker is currently accepting a new job. Use Worker control below.";
   }
 }
-async function refreshWorkerLight() {
-  try {
-    applyWorkerLight(await (await fetch("/api/workers")).json());
-  } catch (e) { applyWorkerLight([]); }
+
+function workerAge(seconds) {
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  return `${Math.round(seconds / 60)}m ago`;
 }
-refreshWorkerLight();
-setInterval(refreshWorkerLight, 5000);
+
+function renderWorkers(workers) {
+  const panel = $("#workersPanel"), list = $("#workersList"), summary = $("#workersSummary");
+  panel.classList.remove("hidden");
+  const live = workers.filter(w => !w.stale);
+  const free = live.reduce((n,w) => n + ((w.capacity||{}).effective_free || 0), 0);
+  summary.textContent = workers.length
+    ? `${live.length}/${workers.length} connected · ${free} free slot${free===1?"":"s"}`
+    : "No registered workers";
+  if (!workers.length) {
+    list.innerHTML = `<div class="worker-empty">No worker has checked in yet. Start a worker with <code>FLEET_ROLE=worker</code>, the main URL, and the shared pairing token.</div>`;
+    return;
+  }
+  list.innerHTML = workers.map(w => {
+    const hw = w.hardware || {}, cap = w.capacity || {}, policy = w.policy || {};
+    const metrics = w.metrics || {}, disk = metrics.disk || {};
+    const mode = policy.mode || "active", max = cap.max_jobs || 1;
+    const slotOptions = [`<option value=""${policy.max_jobs==null?" selected":""}>Auto (${max})</option>`]
+      .concat(Array.from({length:max}, (_,i) => `<option value="${i+1}"${policy.max_jobs===i+1?" selected":""}>${i+1} slot${i?"s":""}</option>`)).join("");
+    const healthLabel = w.health === "available" ? "ready" : (w.health === "paused" ? "paused" : w.health);
+    const dotState = w.stale ? "offline" : (w.available ? "online" : "busy");
+    const jobs = (w.jobs || []).map(j => `<div class="worker-job">
+      <span class="worker-job-title" title="${escapeHtml(j.title)}">${escapeHtml(j.title)}</span>
+      <span>${Math.max(0,Math.min(100,j.progress_pct||0))}%</span>
+      ${j.dispatch_pending
+        ? `<button class="secondary worker-release" data-job="${escapeHtml(j.job_id)}">Release</button>`
+        : (["running","awaiting_approval","dispatched"].includes(j.status)
+          ? `<button class="danger worker-stop" data-job="${escapeHtml(j.job_id)}">Stop</button>` : "")}
+    </div>`).join("");
+    const diskText = disk.free_gb == null ? "—" : `${disk.free_gb} GB`;
+    return `<div class="worker-card" data-worker="${escapeHtml(w.worker_id)}">
+      <div class="worker-head"><span class="dot ${dotState}"></span>
+        <strong title="${escapeHtml(w.worker_id)}">${escapeHtml(w.name)}</strong>
+        <span class="badge ${w.health === "paused" ? "worker-paused" : w.health}">${escapeHtml(healthLabel)}</span>
+      </div>
+      <div class="worker-meta">${escapeHtml(hw.platform || "Worker")} · ${hw.cpu_cores || "?"} cores · ${hw.ram_gb || "?"} GB RAM<br>${escapeHtml(hw.hw_encoder || "software H.264")} · seen ${workerAge(w.age_seconds || 0)}</div>
+      <div class="worker-stats">
+        <div class="worker-stat"><span>Active</span><strong>${cap.active||0} / ${cap.effective_max_jobs||0}</strong></div>
+        <div class="worker-stat"><span>Pending</span><strong>${cap.pending||0}</strong></div>
+        <div class="worker-stat"><span>Disk free</span><strong>${diskText}</strong></div>
+      </div>
+      ${jobs ? `<div class="worker-jobs">${jobs}</div>` : `<div class="worker-empty">No assigned jobs.</div>`}
+      <div class="worker-controls">
+        <button class="secondary worker-mode${mode==="active"?" selected":""}" data-mode="active">Active</button>
+        <button class="secondary worker-mode${mode==="draining"?" selected":""}" data-mode="draining">Drain</button>
+        <button class="secondary worker-mode${mode==="paused"?" selected":""}" data-mode="paused">Pause</button>
+        <select class="worker-slots" title="Controller slot limit">${slotOptions}</select>
+      </div>
+    </div>`;
+  }).join("");
+
+  list.querySelectorAll(".worker-mode").forEach(btn => btn.addEventListener("click", async e => {
+    const card = e.target.closest(".worker-card");
+    e.target.disabled = true;
+    const r = await fetch(`/api/workers/${encodeURIComponent(card.dataset.worker)}/policy`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({mode:e.target.dataset.mode})
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) alert(data.error || "Could not change worker mode");
+    refreshWorkers(); refreshQueue();
+  }));
+  list.querySelectorAll(".worker-slots").forEach(sel => sel.addEventListener("change", async e => {
+    const card = e.target.closest(".worker-card");
+    const value = e.target.value ? Number(e.target.value) : null;
+    const r = await fetch(`/api/workers/${encodeURIComponent(card.dataset.worker)}/policy`, {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({max_jobs:value})
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) alert(data.error || "Could not change worker slots");
+    refreshWorkers(); refreshQueue();
+  }));
+  list.querySelectorAll(".worker-stop").forEach(btn => btn.addEventListener("click", async e => {
+    e.target.disabled = true;
+    const r = await fetch(`/api/queue/${encodeURIComponent(e.target.dataset.job)}/stop`, {method:"POST"});
+    const data = await r.json();
+    if (!r.ok || data.error) alert(data.error || "Could not stop the job");
+    refreshWorkers(); refreshQueue();
+  }));
+  list.querySelectorAll(".worker-release").forEach(btn => btn.addEventListener("click", async e => {
+    e.target.disabled = true;
+    const r = await fetch(`/api/dispatch/${encodeURIComponent(e.target.dataset.job)}/release`, {method:"POST"});
+    const data = await r.json();
+    if (!r.ok || data.error) alert(data.error || "Could not release the job");
+    refreshWorkers(); refreshQueue();
+  }));
+}
+
+async function refreshWorkers() {
+  try {
+    lastWorkers = await (await fetch("/api/workers")).json();
+    applyWorkerLight(lastWorkers);
+    renderWorkers(lastWorkers);
+  } catch (e) { lastWorkers = []; applyWorkerLight([]); }
+}
+refreshWorkers();
+setInterval(refreshWorkers, 5000);
 
 $("#goWorker").addEventListener("click", async () => {
   const title = $("#title").value.trim();
@@ -1031,7 +1163,7 @@ $("#goWorker").addEventListener("click", async () => {
       : `Sent ${sent} to the worker.`;
     selectJob(ids[0]);
     refreshQueue();
-    refreshWorkerLight();
+    refreshWorkers();
   } catch (e) {
     alert("Can't reach the server. Is it running?");
   }
@@ -1130,6 +1262,7 @@ function statusLabel(st) {
   if (st === "awaiting_title") return "your turn (title)";
   if (st === "awaiting_approval") return "your turn (hook)";
   if (st === "retry_wait") return "retrying soon";
+  if (st === "dispatched") return "sending to worker";
   if (st === "paused") return "stopped";
   return st;
 }
@@ -1207,6 +1340,11 @@ function jobMeta(j) {
   return bits.length ? ` <span class="qeta">· ${bits.join(" · ")}</span>` : "";
 }
 
+function workerName(workerId) {
+  const worker = lastWorkers.find(w => w.worker_id === workerId);
+  return worker ? worker.name : workerId;
+}
+
 async function refreshQueue() {
   try {
     const r = await fetch("/api/jobs");
@@ -1224,7 +1362,7 @@ async function refreshQueue() {
             <span class="rtitle" title="${escapeHtml(j.title || j.job_id)}">${escapeHtml(j.title || j.job_id)}</span>
             <span class="rpct">${pct}%</span>
           </div>
-          <div class="rmeta">${escapeHtml(j.profile || "")}${j.step ? ' · '+escapeHtml(j.step) : ''}${sizeBadge(j)}${jobMeta(j)}</div>
+          <div class="rmeta">${escapeHtml(j.profile || "")}${j.step ? ' · '+escapeHtml(j.step) : ''}${j.dispatched_to ? ' · '+escapeHtml(workerName(j.dispatched_to)) : ' · this Mac'}${sizeBadge(j)}${jobMeta(j)}</div>
           <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
         </div>`;
       }).join("");
@@ -1234,7 +1372,7 @@ async function refreshQueue() {
 
     const qList = $("#queueList");
     const activeN = list.filter(j =>
-      ["researching","awaiting_title","queued","running","awaiting_approval"].includes(j.status)).length;
+      ["researching","awaiting_title","queued","dispatched","running","awaiting_approval"].includes(j.status)).length;
     if (!list.length) {
       $("#queuePanel").classList.add("hidden");
       return;
@@ -1248,23 +1386,31 @@ async function refreshQueue() {
       const canCancel = ["researching","awaiting_title","queued","retry_wait","paused","error","done"].includes(j.status);
       const canRetry = j.status === "error";
       const canSendToWorker = j.status === "queued";
-      const canStop = !!j.stoppable;
+      const canRelease = j.status === "dispatched" && j.dispatch_pending;
+      const canStop = !!j.stoppable && !canRelease;
       const canResume = j.status === "paused";
+      const availableWorkers = lastWorkers.filter(w => w.available);
+      const workerPicker = canSendToWorker && availableWorkers.length
+        ? `<select class="qworker" aria-label="Worker">${availableWorkers.map(w => `<option value="${escapeHtml(w.worker_id)}">${escapeHtml(w.name)} · ${(w.capacity||{}).effective_free} free</option>`).join("")}</select>`
+        : "";
+      const assignment = j.dispatched_to ? ` · ${escapeHtml(workerName(j.dispatched_to))}` : "";
       return `<div class="qrow${j.job_id===currentJob?' sel':''}" data-id="${j.job_id}">
         <span class="badge ${j.status}">${statusLabel(j.status)}</span>
         <span class="qtitle" title="${escapeHtml(j.title || j.job_id)}">${escapeHtml(j.title || j.job_id)}</span>
-        <span class="qmeta">${pos}${escapeHtml(j.profile || "")}${j.step && j.status==='running' ? ' · '+escapeHtml(j.step) : ''}${jobMeta(j)}</span>
+        <span class="qmeta">${pos}${escapeHtml(j.profile || "")}${j.step && j.status==='running' ? ' · '+escapeHtml(j.step) : ''}${assignment}${jobMeta(j)}</span>
         ${sizeBadge(j)}
         ${canCancel ? `<button class="danger qcancel" data-id="${j.job_id}">Remove</button>` : ""}
         ${canResume ? `<button class="secondary qresume" data-id="${j.job_id}" title="Continue from where it stopped" style="margin:0;padding:6px 12px;font-size:12px">Resume</button>` : ""}
+        ${canRelease ? `<button class="secondary qrelease" data-id="${j.job_id}" title="Return this unstarted dispatch to the queue" style="margin:0;padding:6px 12px;font-size:12px">Release</button>` : ""}
         ${canStop ? `<button class="danger qstop" data-id="${j.job_id}" title="Stop now and put it back in the queue — work already done is kept and reused" style="margin:0;padding:6px 12px;font-size:12px">Stop</button>` : ""}
-        ${canSendToWorker ? `<button class="secondary qdispatch" data-id="${j.job_id}" style="margin:0;padding:6px 12px;font-size:12px">Send to worker</button>` : ""}
+        ${workerPicker}
+        ${canSendToWorker ? `<button class="secondary qdispatch" data-id="${j.job_id}"${availableWorkers.length?"":" disabled"} style="margin:0;padding:6px 12px;font-size:12px">Assign</button>` : ""}
         ${canRetry ? `<button class="secondary qretry" data-id="${j.job_id}" style="margin:0;padding:6px 12px;font-size:12px">Retry</button>` : ""}
       </div>`;
     }).join("");
     qList.querySelectorAll(".qrow").forEach(el => {
       el.addEventListener("click", e => {
-        if (e.target.closest(".qcancel") || e.target.closest(".qretry") || e.target.closest(".qdispatch") || e.target.closest(".qstop") || e.target.closest(".qresume")) return;
+        if (e.target.closest(".qcancel") || e.target.closest(".qretry") || e.target.closest(".qdispatch") || e.target.closest(".qworker") || e.target.closest(".qrelease") || e.target.closest(".qstop") || e.target.closest(".qresume")) return;
         selectJob(el.dataset.id);
       });
     });
@@ -1316,6 +1462,18 @@ async function refreshQueue() {
         refreshQueue();
       });
     });
+    qList.querySelectorAll(".qrelease").forEach(btn => {
+      btn.addEventListener("click", async e => {
+        e.stopPropagation();
+        btn.disabled = true;
+        try {
+          const r = await fetch("/api/dispatch/" + btn.dataset.id + "/release", {method:"POST"});
+          const data = await r.json();
+          if (!r.ok || data.error) alert(data.error || "Couldn't release the dispatch.");
+        } catch (err) { alert("Couldn't reach the fleet main."); }
+        refreshQueue(); refreshWorkers();
+      });
+    });
     qList.querySelectorAll(".qcancel").forEach(btn => {
       btn.addEventListener("click", async e => {
         e.stopPropagation();
@@ -1339,7 +1497,11 @@ async function refreshQueue() {
         e.stopPropagation();
         btn.disabled = true;
         try {
-          const r = await fetch("/api/dispatch/" + btn.dataset.id, {method: "POST"});
+          const picker = btn.closest(".qrow").querySelector(".qworker");
+          const r = await fetch("/api/dispatch/" + btn.dataset.id, {
+            method: "POST", headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({worker_id:picker ? picker.value : ""})
+          });
           const data = await r.json();
           if (data.error) alert(data.error);
           else selectJob(btn.dataset.id);
@@ -1349,7 +1511,7 @@ async function refreshQueue() {
     });
     if (!currentJob) {
       const active = list.find(j =>
-        ["researching","awaiting_title","running","awaiting_approval","queued"].includes(j.status));
+        ["researching","awaiting_title","running","awaiting_approval","dispatched","queued"].includes(j.status));
       if (active) selectJob(active.job_id);
     }
   } catch (e) { /* server not ready */ }

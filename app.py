@@ -56,6 +56,139 @@ FLEET_WORKERS: dict[str, dict] = {}
 _FLEET_LOCK = threading.Lock()
 FLEET_WORKER: fleet.FleetWorker | None = None
 OPS: operations.OperationsCenter | None = None
+_FLEET_MODES = frozenset({"active", "draining", "paused"})
+
+
+def _fleet_policy(worker_id: str, settings: dict | None = None) -> dict:
+    """Return one worker's persisted, sanitized controller policy."""
+    settings = settings if settings is not None else config.load_settings()
+    fleet_settings = settings.get("fleet_workers", {}) or {}
+    if not isinstance(fleet_settings, dict):
+        fleet_settings = {}
+    raw = fleet_settings.get(worker_id, {}) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    mode = str(raw.get("mode") or "active")
+    if mode not in _FLEET_MODES:
+        mode = "active"
+    max_jobs = raw.get("max_jobs")
+    try:
+        max_jobs = max(1, min(8, int(max_jobs))) if max_jobs is not None else None
+    except (TypeError, ValueError):
+        max_jobs = None
+    return {"mode": mode, "max_jobs": max_jobs}
+
+
+def _fleet_capacity(worker: dict, policy: dict | None = None) -> dict:
+    """Capacity the controller may actually assign, including in-flight work.
+
+    A heartbeat's reported free count does not include dispatches that have
+    been sent but not acknowledged yet. Subtracting those pending deliveries
+    prevents the controller from overfilling a worker on consecutive polls.
+    """
+    policy = policy or _fleet_policy(str(worker.get("worker_id") or ""))
+    reported = worker.get("capacity") if isinstance(worker.get("capacity"), dict) else {}
+    try:
+        physical_max = max(0, min(8, int(reported.get("max_jobs") or 0)))
+    except (TypeError, ValueError):
+        physical_max = 0
+    try:
+        reported_free = max(0, min(physical_max, int(reported.get("free") or 0)))
+    except (TypeError, ValueError):
+        reported_free = 0
+    reported_jobs = worker.get("jobs") if isinstance(worker.get("jobs"), list) else []
+    active = sum(
+        1 for row in reported_jobs
+        if isinstance(row, dict)
+        and row.get("status") in ("running", "awaiting_approval")
+    )
+    # v2 workers report this directly; keep the job-list count as a fallback
+    # for old workers and use the larger value when a partial list arrives.
+    try:
+        active = max(active, max(0, int(reported.get("active") or 0)))
+    except (TypeError, ValueError):
+        pass
+    pending = len(worker.get("dispatch") or {})
+    override = policy.get("max_jobs")
+    effective_max = min(physical_max, override) if override is not None else physical_max
+    effective_free = min(reported_free, max(0, effective_max - active))
+    effective_free = max(0, effective_free - pending)
+    if policy.get("mode") != "active":
+        effective_free = 0
+    return {
+        "max_jobs": physical_max,
+        "reported_free": reported_free,
+        "effective_max_jobs": effective_max,
+        "active": active,
+        "pending": pending,
+        "free": effective_free,
+        "effective_free": effective_free,
+    }
+
+
+def _fleet_worker_rows() -> list[dict]:
+    """Secret-free, UI-ready fleet view with job assignments and health."""
+    now = datetime.now().timestamp()
+    with LOCK:
+        assignments: dict[str, list[dict]] = {}
+        for jid, job in JOBS.items():
+            wid = job.get("dispatched_to")
+            if not wid or job.get("status") == "cancelled":
+                continue
+            assignments.setdefault(str(wid), []).append({
+                "job_id": jid,
+                "title": job.get("publication_title") or job.get("title") or jid,
+                "profile": job.get("profile") or "",
+                "status": job.get("status") or "unknown",
+                "step": job.get("step") or "",
+                "progress_pct": job.get("progress_pct") or 0,
+            })
+    settings = config.load_settings()
+    rows: list[dict] = []
+    with _FLEET_LOCK:
+        for wid, worker in FLEET_WORKERS.items():
+            policy = _fleet_policy(wid, settings)
+            capacity = _fleet_capacity(worker, policy)
+            try:
+                age = max(0, now - datetime.fromisoformat(worker["last_seen"]).timestamp())
+            except Exception:  # noqa: BLE001
+                age = config.FLEET_STALE_SECONDS + 1
+            stale = age > config.FLEET_STALE_SECONDS
+            online = not stale and capacity["max_jobs"] > 0
+            available = online and capacity["effective_free"] > 0
+            if stale:
+                health = "offline"
+            elif policy["mode"] == "draining":
+                health = "draining"
+            elif policy["mode"] == "paused":
+                health = "paused"
+            elif available:
+                health = "available"
+            else:
+                health = "busy"
+            pending_ids = set((worker.get("dispatch") or {}).keys())
+            worker_jobs = [
+                {**job, "dispatch_pending": job["job_id"] in pending_ids}
+                for job in assignments.get(wid, [])
+            ]
+            rows.append({
+                "worker_id": wid,
+                "name": str(worker.get("name") or wid),
+                "protocol_version": int(worker.get("protocol_version") or 1),
+                "hardware": worker.get("hardware") if isinstance(worker.get("hardware"), dict) else {},
+                "metrics": worker.get("metrics") if isinstance(worker.get("metrics"), dict) else {},
+                "capacity": capacity,
+                "policy": policy,
+                "last_seen": worker.get("last_seen"),
+                "age_seconds": round(age),
+                "stale": stale,
+                "online": online,
+                "available": available,
+                "health": health,
+                "jobs": worker_jobs,
+            })
+    rows.sort(key=lambda row: (row["stale"], row["name"].lower()))
+    return rows
 
 # Phase-weighted progress (0-100), keyed by the real `step` names emitted
 # from pipeline/orchestrator.py's emit() calls — each value is that phase's
@@ -626,6 +759,15 @@ def _fleet_dispatch_for(worker_id: str, free: int) -> list[dict]:
     """Claim queued jobs only after this main has filled its own render slots."""
     if config.FLEET_ROLE != "main" or free <= 0:
         return []
+    # Re-evaluate against controller policy and unacknowledged deliveries.
+    # The free count passed by an old worker can otherwise remain unchanged
+    # for several polls and cause multiple jobs to be assigned to one slot.
+    with _FLEET_LOCK:
+        worker = FLEET_WORKERS.get(worker_id)
+        if worker is not None:
+            free = min(free, _fleet_capacity(worker)["effective_free"])
+    if free <= 0:
+        return []
     with LOCK:
         if _active_slot_count() < config.max_concurrent_jobs():
             return []  # overflow policy: main keeps its own compute busy first
@@ -1192,7 +1334,8 @@ def _build_inputs(data: dict, title: str) -> dict:
         "cited_philosophers": (data.get("cited_philosophers") or "").strip(),
         "custom_script": (data.get("custom_script") or "").strip(),
         "auto_hook": (data.get("auto_hook") or "").strip(),
-        "script_model": (data.get("script_model") or "").strip(),
+        "script_model": (data.get("script_model")
+                         or config.DEFAULT_SCRIPT_MODEL).strip(),
         "broll": broll or ["stock"],
         "mindmap": bool(data.get("mindmap", False)),
         "anim_templates": anim_templates if isinstance(anim_templates, list) else None,
@@ -1558,7 +1701,7 @@ def start_render():
                 except Exception:  # noqa: BLE001
                     continue
                 if age <= config.FLEET_STALE_SECONDS:
-                    remote_free += max(0, int((w.get("capacity") or {}).get("free") or 0))
+                    remote_free += _fleet_capacity(w)["effective_free"]
         # _enqueue_job() drains the queue before returning. If this retry is
         # already running, it has its slot and must not preempt a different
         # running retry merely because capacity is now full.
@@ -1635,20 +1778,30 @@ def fleet_heartbeat():
     except (TypeError, ValueError):
         free = 0
     reported = data.get("jobs") if isinstance(data.get("jobs"), list) else []
+    try:
+        protocol_version = max(1, min(99, int(data.get("protocol_version") or 1)))
+    except (TypeError, ValueError):
+        protocol_version = 1
     now = datetime.now()
     with _FLEET_LOCK:
         worker = FLEET_WORKERS.setdefault(worker_id, {"approvals": [], "dispatch": {}})
         worker.update({"worker_id": worker_id, "name": str(data.get("name") or worker_id),
+                       "protocol_version": protocol_version,
                        "hardware": data.get("hardware") if isinstance(data.get("hardware"), dict) else {},
-                       "capacity": capacity, "last_seen": now.isoformat(timespec="seconds")})
+                       "capacity": capacity,
+                       "metrics": data.get("metrics") if isinstance(data.get("metrics"), dict) else {},
+                       "jobs": reported,
+                       "last_seen": now.isoformat(timespec="seconds")})
         approvals = list(worker.get("approvals") or [])
         worker["approvals"] = []
-        pending_dispatch = dict(worker.get("dispatch") or {})
+    acknowledged_jobs: list[str] = []
     with LOCK:
         for report in reported:
             if not isinstance(report, dict):
                 continue
             job_id = str(report.get("job_id") or "")
+            if report.get("status") in ("done", "error") and job_id:
+                acknowledged_jobs.append(job_id)
             job = JOBS.get(job_id)
             if not job or job.get("dispatched_to") != worker_id:
                 continue
@@ -1701,7 +1854,8 @@ def fleet_heartbeat():
                 worker.get("dispatch", {}).pop(str(report.get("job_id") or ""), None)
     # Do not hold _FLEET_LOCK while claiming queue work: approval requests
     # acquire LOCK then _FLEET_LOCK, so reversing that order would deadlock.
-    new_dispatch = _fleet_dispatch_for(worker_id, free)
+        allowed_free = _fleet_capacity(worker)["effective_free"]
+    new_dispatch = _fleet_dispatch_for(worker_id, min(free, allowed_free))
     with _FLEET_LOCK:
         worker = FLEET_WORKERS[worker_id]
         for spec in new_dispatch:
@@ -1711,36 +1865,77 @@ def fleet_heartbeat():
         # resulting state change comes back as an ordinary status report.
         aborts = list(worker.get("aborts") or [])
         worker["aborts"] = []
+        policy = _fleet_policy(worker_id)
     _persist_queue()
     return jsonify({"dispatch": dispatch, "approvals": approvals,
-                    "aborts": aborts})
+                    "aborts": aborts, "policy": policy,
+                    "acknowledged_jobs": sorted(set(acknowledged_jobs))})
 
 
 @app.route("/api/workers")
 def fleet_workers():
-    now = datetime.now().timestamp()
+    return jsonify(_fleet_worker_rows())
+
+
+@app.route("/api/workers/<worker_id>/policy", methods=["POST"])
+def set_fleet_worker_policy(worker_id: str):
+    """Change lifecycle/capacity without killing active render processes."""
+    if config.FLEET_ROLE != "main":
+        return jsonify({"error": "this machine is not configured as fleet main"}), 409
     with _FLEET_LOCK:
-        rows = []
-        for wid, worker in FLEET_WORKERS.items():
-            row = {k: v for k, v in worker.items()
-                   if k not in ("approvals", "dispatch", "aborts")}
+        if worker_id not in FLEET_WORKERS:
+            return jsonify({"error": "unknown worker"}), 404
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not ({"mode", "max_jobs"} & set(data)):
+        return jsonify({"error": "send mode and/or max_jobs"}), 400
+    patch: dict = {}
+    if "mode" in data:
+        mode = str(data.get("mode") or "")
+        if mode not in _FLEET_MODES:
+            return jsonify({"error": "mode must be active, draining, or paused"}), 400
+        patch["mode"] = mode
+    if "max_jobs" in data:
+        if data.get("max_jobs") is None or data.get("max_jobs") == "":
+            patch["max_jobs"] = None
+        else:
             try:
-                age = max(0, now - datetime.fromisoformat(row["last_seen"]).timestamp())
-            except Exception:  # noqa: BLE001
-                age = config.FLEET_STALE_SECONDS + 1
-            # Defaults so a half-populated record can never break the panel.
-            row.setdefault("worker_id", wid)
-            row.setdefault("name", wid)
-            row.setdefault("hardware", {})
-            row.setdefault("capacity", {})
-            row["stale"] = age > config.FLEET_STALE_SECONDS
-            row["age_seconds"] = round(age)
-            # "online" is what the UI's green light keys off: heard from
-            # recently AND actually able to take work.
-            row["online"] = (not row["stale"]
-                             and int((row.get("capacity") or {}).get("max_jobs") or 0) > 0)
-            rows.append(row)
-    return jsonify(rows)
+                patch["max_jobs"] = max(1, min(8, int(data["max_jobs"])))
+            except (TypeError, ValueError):
+                return jsonify({"error": "max_jobs must be 1-8 or null"}), 400
+
+    settings = config.save_settings({"fleet_workers": {worker_id: patch}})
+    policy = _fleet_policy(worker_id, settings)
+    released: list[str] = []
+    # Enforce the new policy against deliveries the worker has not accepted
+    # yet. Active reports are never interrupted by a policy change.
+    with LOCK:
+        with _FLEET_LOCK:
+            worker = FLEET_WORKERS.get(worker_id)
+            if worker is None:
+                return jsonify({"error": "worker disconnected"}), 409
+            capacity = _fleet_capacity(worker, policy)
+            pending_ids = list((worker.get("dispatch") or {}).keys())
+            allowed_pending = (max(0, capacity["effective_max_jobs"] - capacity["active"])
+                               if policy["mode"] == "active" else 0)
+            for jid in pending_ids[allowed_pending:]:
+                job = JOBS.get(jid)
+                if (job and job.get("status") == "dispatched"
+                        and job.get("dispatched_to") == worker_id):
+                    job.update(status="queued", step="queued")
+                    job.pop("dispatched_to", None)
+                    job.pop("dispatched_at", None)
+                    job.setdefault("log", []).append({
+                        "t": datetime.now().strftime("%H:%M:%S"),
+                        "step": "fleet",
+                        "message": f"Released before start because {worker_id} policy changed",
+                    })
+                    released.append(jid)
+                worker.get("dispatch", {}).pop(jid, None)
+    _persist_queue()
+    if released:
+        _kick_queue()
+    row = next((r for r in _fleet_worker_rows() if r["worker_id"] == worker_id), None)
+    return jsonify({"ok": True, "worker": row, "released_jobs": released})
 
 
 @app.route("/api/dispatch/<job_id>", methods=["POST"])
@@ -1750,23 +1945,9 @@ def dispatch_to_worker(job_id: str):
         abort(403)
     if config.FLEET_ROLE != "main":
         return jsonify({"error": "this machine is not configured as fleet main"}), 409
-    requested = (request.get_json(silent=True) or {}).get("worker_id")
+    requested = str((request.get_json(silent=True) or {}).get("worker_id") or "").strip()
     now = datetime.now().timestamp()
-    with _FLEET_LOCK:
-        choices = []
-        for worker in FLEET_WORKERS.values():
-            try:
-                age = now - datetime.fromisoformat(worker.get("last_seen", "")).timestamp()
-            except Exception:  # noqa: BLE001
-                continue
-            free = int((worker.get("capacity") or {}).get("free") or 0)
-            if age <= config.FLEET_STALE_SECONDS and free > 0:
-                if not requested or requested == worker.get("worker_id"):
-                    choices.append(worker)
-        if not choices:
-            return jsonify({"error": "no connected worker has a free render slot"}), 409
-        worker = choices[0]
-        worker_id = worker["worker_id"]
+    settings = config.load_settings()
     with LOCK:
         job = JOBS.get(job_id)
         if not job:
@@ -1777,15 +1958,63 @@ def dispatch_to_worker(job_id: str):
             profile_data = orchestrator.load_profile(job["profile"])
         except Exception as e:  # noqa: BLE001
             return jsonify({"error": f"profile snapshot failed: {e}"}), 500
-        job.update(status="dispatched", step="fleet", dispatched_to=worker_id,
-                   dispatched_at=datetime.now().isoformat(timespec="seconds"),
-                   local_only=False)
         spec = {"job_id": job_id, "inputs": job["inputs"],
                 "profile": job["profile"], "profile_data": profile_data}
-    with _FLEET_LOCK:
-        FLEET_WORKERS[worker_id].setdefault("dispatch", {})[job_id] = spec
+        # Choose and reserve while holding the fleet lock, so two simultaneous
+        # manual sends cannot both consume the same last free slot.
+        with _FLEET_LOCK:
+            choices: list[tuple[int, str, dict]] = []
+            for worker in FLEET_WORKERS.values():
+                wid = str(worker.get("worker_id") or "")
+                try:
+                    age = now - datetime.fromisoformat(worker.get("last_seen", "")).timestamp()
+                except Exception:  # noqa: BLE001
+                    continue
+                capacity = _fleet_capacity(worker, _fleet_policy(wid, settings))
+                if (age <= config.FLEET_STALE_SECONDS and capacity["effective_free"] > 0
+                        and (not requested or requested == wid)):
+                    choices.append((capacity["effective_free"], wid, worker))
+            if not choices:
+                return jsonify({"error": "selected worker is unavailable, paused, or full"}), 409
+            choices.sort(key=lambda item: (-item[0], item[1]))
+            _, worker_id, worker = choices[0]
+            job.update(status="dispatched", step="fleet", dispatched_to=worker_id,
+                       dispatched_at=datetime.now().isoformat(timespec="seconds"),
+                       local_only=False)
+            worker.setdefault("dispatch", {})[job_id] = spec
     _persist_queue()
     return jsonify({"ok": True, "worker_id": worker_id})
+
+
+@app.route("/api/dispatch/<job_id>/release", methods=["POST"])
+def release_worker_dispatch(job_id: str):
+    """Return an unacknowledged dispatch to the queue without duplication."""
+    if not _allowed_profile(_job_profile(job_id) or ""):
+        abort(403)
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "unknown job"}), 404
+        worker_id = str(job.get("dispatched_to") or "")
+        if job.get("status") != "dispatched" or not worker_id:
+            return jsonify({"error": "job is no longer waiting for a worker"}), 409
+        with _FLEET_LOCK:
+            worker = FLEET_WORKERS.get(worker_id)
+            if not worker or job_id not in (worker.get("dispatch") or {}):
+                return jsonify({
+                    "error": "worker already accepted this job; use Stop to halt it safely"
+                }), 409
+            worker["dispatch"].pop(job_id, None)
+        job.update(status="queued", step="queued")
+        job.pop("dispatched_to", None)
+        job.pop("dispatched_at", None)
+        job.setdefault("log", []).append({
+            "t": datetime.now().strftime("%H:%M:%S"), "step": "fleet",
+            "message": f"Released from {worker_id} before it started",
+        })
+    _persist_queue()
+    _kick_queue()
+    return jsonify({"ok": True, "job_id": job_id, "released_from": worker_id})
 
 
 @app.route("/api/jobs")
@@ -1795,6 +2024,11 @@ def api_jobs():
     Queued jobs are ordered FIFO (oldest first); others newest first after."""
     with LOCK:
         items = list(JOBS.items())
+    with _FLEET_LOCK:
+        pending_dispatches = {
+            jid for worker in FLEET_WORKERS.values()
+            for jid in (worker.get("dispatch") or {})
+        }
     # Queue position among still-queued jobs (1-based)
     queued_ordered = sorted(
         [(jid, j) for jid, j in items if j.get("status") == "queued"],
@@ -1846,6 +2080,8 @@ def api_jobs():
                 stats.estimate_cost_usd(chars, beats, _host_enabled(profile))
                 if chars else None),
             "retries": j.get("retries", 0),
+            "dispatched_to": j.get("dispatched_to"),
+            "dispatch_pending": jid in pending_dispatches,
             # Drives the Stop button: only a job with a live cancel token
             # can actually be stopped, and retry_wait can be pulled out of
             # its wait.
@@ -1931,6 +2167,7 @@ def stop_running(job_id: str):
     # deadlocks the whole app permanently. Decide under the lock, act after.
     token = None
     remote = None
+    pending_release = False
     with LOCK:
         job = JOBS.get(job_id)
         if not job:
@@ -1940,14 +2177,33 @@ def stop_running(job_id: str):
             job["status"] = target
             job["step"] = target
         elif job.get("dispatched_to") and job.get("_cancel") is None:
-            # Running on a fleet worker: there is no local ffmpeg to kill,
-            # so ask that machine to stop it. The worker reports the result
-            # back through its normal heartbeat.
             remote = job["dispatched_to"]
-            job["_stop_target"] = target
-            job["log"].append({
-                "t": datetime.now().strftime("%H:%M:%S"), "step": "queue",
-                "message": f"Stop requested — telling {remote} to halt it"})
+            with _FLEET_LOCK:
+                worker = FLEET_WORKERS.get(remote)
+                not_started = bool(
+                    worker and job_id in (worker.get("dispatch") or {}))
+                if not_started:
+                    worker["dispatch"].pop(job_id, None)
+            if not_started:
+                # No process exists yet, so an abort would never receive a
+                # terminal acknowledgement and leave this job stuck. Apply
+                # the requested destination immediately instead.
+                job.update(status=target, step=target)
+                job.pop("dispatched_to", None)
+                job.pop("dispatched_at", None)
+                job["log"].append({
+                    "t": datetime.now().strftime("%H:%M:%S"), "step": "queue",
+                    "message": f"Stopped before {remote} accepted the dispatch"})
+                remote = None
+                pending_release = True
+            else:
+                # Running on a fleet worker: there is no local ffmpeg to kill,
+                # so ask that machine to stop it. The worker reports the result
+                # back through its normal heartbeat.
+                job["_stop_target"] = target
+                job["log"].append({
+                    "t": datetime.now().strftime("%H:%M:%S"), "step": "queue",
+                    "message": f"Stop requested — telling {remote} to halt it"})
         else:
             token = job.get("_cancel")
             if token is None:
@@ -1959,6 +2215,10 @@ def stop_running(job_id: str):
             job["_stop_target"] = target
 
     # --- everything below runs WITHOUT LOCK held ---
+    if pending_release:
+        _persist_queue()
+        return jsonify({"ok": True, "job_id": job_id,
+                        "paused": target == "paused", "not_started": True})
     if remote is not None:
         with _FLEET_LOCK:
             # Only queue an abort for a worker that has actually registered.
@@ -2270,20 +2530,7 @@ def _ops_snapshot() -> dict:
                 for x in (job.get("log") or [])[-3:] if isinstance(x, dict)
             ],
         })
-    with _FLEET_LOCK:
-        worker_copy = [dict(w) for w in FLEET_WORKERS.values()]
-    workers = []
-    for worker in worker_copy:
-        try:
-            age = max(0.0, (now - datetime.fromisoformat(worker["last_seen"])).total_seconds())
-        except (KeyError, TypeError, ValueError):
-            age = config.FLEET_STALE_SECONDS + 1
-        workers.append({
-            "worker_id": worker.get("worker_id"), "name": worker.get("name"),
-            "age_seconds": round(age), "stale": age > config.FLEET_STALE_SECONDS,
-            "hardware": worker.get("hardware") or {},
-            "capacity": worker.get("capacity") or {},
-        })
+    workers = _fleet_worker_rows()
     counts: dict[str, int] = {}
     for row in job_rows:
         counts[row["status"]] = counts.get(row["status"], 0) + 1

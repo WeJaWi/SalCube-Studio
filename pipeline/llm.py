@@ -22,9 +22,16 @@ _WRITER_INSTRUCTIONS = ("You are a world-class long-form scriptwriter and "
                         "exactly and completely.")
 
 
+class LLMSubmissionUncertain(RuntimeError):
+    """A billable synchronous LLM request may have completed remotely."""
+
+
 def resolve_model(name: Optional[str]) -> str:
-    """Validate a requested script model, falling back to sonnet-5."""
-    return name if name in config.SCRIPT_MODELS else "sonnet-5"
+    """Validate a requested script model, falling back to the app default."""
+    if name in config.SCRIPT_MODELS:
+        return name
+    default = config.DEFAULT_SCRIPT_MODEL
+    return default if default in config.SCRIPT_MODELS else "gpt-5.6-luna"
 
 
 def _payload(spec: Dict[str, str], content: str, max_tokens: int) -> dict:
@@ -144,10 +151,13 @@ def chat(user: str, model: str, system: Optional[str] = None,
                 text = _parse(spec, body_json if body_json is not None else {})
                 if text:
                     return text
-                # 200 with empty content happens on provider hiccups — retry
+                # A 200 means the paid request reached the provider. Replaying
+                # an empty response can charge the same prompt twice, so move
+                # to the non-Kie fallback below instead of submitting again.
                 last_err = RuntimeError(
                     f"LLM ({model}) returned empty content: "
                     f"{r.text[:300]}")
+                break
             elif r.status_code == 429:
                 # Rate-limited — retryable, and more likely to happen with
                 # several videos hitting this same key concurrently. Honor
@@ -164,9 +174,13 @@ def chat(user: str, model: str, system: Optional[str] = None,
                 is_5xx = True
                 retry_after = None
         except requests.RequestException as e:
-            last_err = e
-            is_5xx = True  # treat network blips like 5xx for backoff
-            retry_after = None
+            # A read timeout can occur after Kie completed and billed the
+            # request. Without a documented idempotency key, retrying the POST
+            # is unsafe; use Claude CLI (when enabled) or surface the error.
+            last_err = LLMSubmissionUncertain(
+                f"LLM ({model}) response was lost; request was not retried "
+                f"to avoid duplicate Kie usage: {e}")
+            break
         if attempt < retries:
             # 5xx/429: 8s, 16s, 32s, 64s, 90s… — give the provider time to
             # recover; a Retry-After header (429) wins if it asks for longer.
@@ -186,7 +200,7 @@ def chat(user: str, model: str, system: Optional[str] = None,
 
     if allow_cli_fallback and config.CLAUDE_CLI_FALLBACK:
         try:
-            print(f"[llm] {model}: kie.ai retry budget exhausted "
+            print(f"[llm] {model}: kie.ai request unavailable "
                   f"({last_err}) — falling back to local Claude CLI "
                   f"({config.CLAUDE_CLI_MODEL})…", flush=True)
             return _claude_cli_chat(content_for_cli=user, system=system)
@@ -259,10 +273,14 @@ def chat_json(user: str, model: str, max_tokens: int = 8000, attempts: int = 3,
     prompt = user
     last: Exception = RuntimeError("no attempt made")
     for a in range(attempts):
+        # Keep transport/provider errors outside the format-retry handler.
+        # chat() already applies its safe retry policy and optional CLI
+        # fallback; repeating the entire paid request here multiplied outages.
+        text = chat(
+            prompt, model, max_tokens=max_tokens,
+            allow_cli_fallback=allow_cli_fallback, **kw)
         try:
-            return extract_json(chat(
-                prompt, model, max_tokens=max_tokens,
-                allow_cli_fallback=allow_cli_fallback, **kw))
+            return extract_json(text)
         except (json.JSONDecodeError, RuntimeError) as e:
             last = e
             prompt = (user + "\n\nIMPORTANT: your previous reply was not "

@@ -22,6 +22,11 @@ class IdentityTests(unittest.TestCase):
 
 
 class VideoGroupTests(unittest.TestCase):
+    def test_new_jobs_default_to_luna_script_generation(self):
+        inputs = app._build_inputs({}, "A title")
+        self.assertEqual(inputs["script_model"], "gpt-5.6-luna")
+        self.assertEqual(llm.resolve_model(None), "gpt-5.6-luna")
+
     def test_small_group_is_inside_requested_range(self):
         for _ in range(100):
             inputs = app._build_inputs({"video_group": "small"}, "A title")
@@ -974,6 +979,159 @@ class QueueRepairTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200)
         preempt.assert_called_once_with(retry_id)
+
+
+class FleetControlTests(unittest.TestCase):
+    def setUp(self):
+        self.old_access = app.ACCESS
+        app.ACCESS = []
+        app.JOBS.clear()
+        app.FLEET_WORKERS.clear()
+        self.tmp = TemporaryDirectory()
+        self.settings_patch = patch.object(
+            config, "SETTINGS_FILE", Path(self.tmp.name) / "settings.json")
+        self.settings_patch.start()
+        self.client = app.app.test_client()
+
+    def tearDown(self):
+        app.JOBS.clear()
+        app.FLEET_WORKERS.clear()
+        app.ACCESS = self.old_access
+        self.settings_patch.stop()
+        self.tmp.cleanup()
+
+    @staticmethod
+    def worker(worker_id="worker-one", free=2, max_jobs=2):
+        return {
+            "worker_id": worker_id, "name": "Render PC",
+            "last_seen": "2099-01-01T00:00:00",
+            "hardware": {"cpu_cores": 12, "ram_gb": 32,
+                         "hw_encoder": "h264_nvenc"},
+            "capacity": {"max_jobs": max_jobs, "free": free, "active": 0},
+            "metrics": {"disk": {"free_gb": 80, "free_percent": 40}},
+            "jobs": [], "approvals": [], "aborts": [], "dispatch": {},
+        }
+
+    def test_pending_dispatch_consumes_reported_free_slot(self):
+        worker = self.worker(free=1, max_jobs=1)
+        worker["dispatch"]["already-sent"] = {"job_id": "already-sent"}
+        self.assertEqual(app._fleet_capacity(worker)["effective_free"], 0)
+
+    def test_drain_releases_unstarted_dispatch_but_not_active_work(self):
+        worker_id = "worker-one"
+        app.FLEET_WORKERS[worker_id] = self.worker(worker_id)
+        app.FLEET_WORKERS[worker_id]["dispatch"]["pending-job"] = {
+            "job_id": "pending-job"}
+        app.FLEET_WORKERS[worker_id]["jobs"] = [{
+            "job_id": "active-job", "status": "running"}]
+        app.FLEET_WORKERS[worker_id]["capacity"]["active"] = 1
+        app.JOBS.update({
+            "pending-job": {"status": "dispatched", "step": "fleet",
+                            "title": "Pending", "profile": "classic",
+                            "inputs": {}, "log": [],
+                            "dispatched_to": worker_id},
+            "active-job": {"status": "running", "step": "render",
+                           "title": "Active", "profile": "classic",
+                           "inputs": {}, "log": [],
+                           "dispatched_to": worker_id},
+        })
+        with patch.object(config, "FLEET_ROLE", "main"), \
+                patch.object(app, "_persist_queue"), \
+                patch.object(app, "_kick_queue"):
+            response = self.client.post(
+                f"/api/workers/{worker_id}/policy", json={"mode": "draining"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(app.JOBS["pending-job"]["status"], "queued")
+        self.assertEqual(app.JOBS["active-job"]["status"], "running")
+        self.assertEqual(config.load_settings()["fleet_workers"][worker_id]["mode"],
+                         "draining")
+
+    def test_paused_worker_rejects_manual_assignment(self):
+        worker_id = "worker-one"
+        app.FLEET_WORKERS[worker_id] = self.worker(worker_id)
+        config.save_settings({"fleet_workers": {
+            worker_id: {"mode": "paused", "max_jobs": None}}})
+        app.JOBS["queued-job"] = {
+            "status": "queued", "step": "queued", "title": "Queued",
+            "profile": "classic", "inputs": {}, "log": [],
+        }
+        with patch.object(config, "FLEET_ROLE", "main"), \
+                patch.object(app.orchestrator, "load_profile", return_value={}):
+            response = self.client.post(
+                "/api/dispatch/queued-job", json={"worker_id": worker_id})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(app.JOBS["queued-job"]["status"], "queued")
+
+    def test_release_only_succeeds_before_worker_acknowledges(self):
+        worker_id = "worker-one"
+        app.FLEET_WORKERS[worker_id] = self.worker(worker_id)
+        app.FLEET_WORKERS[worker_id]["dispatch"]["pending-job"] = {
+            "job_id": "pending-job"}
+        app.JOBS["pending-job"] = {
+            "status": "dispatched", "step": "fleet", "title": "Pending",
+            "profile": "classic", "inputs": {}, "log": [],
+            "dispatched_to": worker_id,
+        }
+        with patch.object(app, "_persist_queue"), patch.object(app, "_kick_queue"):
+            response = self.client.post("/api/dispatch/pending-job/release")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(app.JOBS["pending-job"]["status"], "queued")
+        self.assertNotIn("dispatched_to", app.JOBS["pending-job"])
+
+        app.JOBS["accepted-job"] = {
+            "status": "dispatched", "step": "fleet", "title": "Accepted",
+            "profile": "classic", "inputs": {}, "log": [],
+            "dispatched_to": worker_id,
+        }
+        response = self.client.post("/api/dispatch/accepted-job/release")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(app.JOBS["accepted-job"]["status"], "dispatched")
+
+    def test_stop_on_unstarted_dispatch_does_not_wait_for_impossible_ack(self):
+        worker_id = "worker-one"
+        app.FLEET_WORKERS[worker_id] = self.worker(worker_id)
+        app.FLEET_WORKERS[worker_id]["dispatch"]["pending-job"] = {
+            "job_id": "pending-job"}
+        app.JOBS["pending-job"] = {
+            "status": "dispatched", "step": "fleet", "title": "Pending",
+            "profile": "classic", "inputs": {}, "log": [],
+            "dispatched_to": worker_id,
+        }
+        with patch.object(app, "_persist_queue"):
+            response = self.client.post("/api/queue/pending-job/stop")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["not_started"])
+        self.assertEqual(app.JOBS["pending-job"]["status"], "paused")
+        self.assertNotIn("dispatched_to", app.JOBS["pending-job"])
+        self.assertNotIn("pending-job", app.FLEET_WORKERS[worker_id]["dispatch"])
+
+    def test_worker_prunes_terminal_report_only_after_main_ack(self):
+        worker = app.fleet.FleetWorker(lambda _spec, _reporter: None)
+        reporter = app.fleet.FleetReporter("done-job")
+        reporter.complete({})
+        worker._jobs["done-job"] = reporter
+        worker._handle({
+            "policy": {"mode": "paused", "max_jobs": 1},
+            "acknowledged_jobs": ["done-job"], "dispatch": [],
+        })
+        self.assertNotIn("done-job", worker._jobs)
+        self.assertEqual(worker._policy, {"mode": "paused", "max_jobs": 1})
+
+    def test_worker_api_exposes_effective_control_state_without_dispatch_specs(self):
+        worker_id = "worker-one"
+        app.FLEET_WORKERS[worker_id] = self.worker(worker_id, free=1, max_jobs=2)
+        app.FLEET_WORKERS[worker_id]["dispatch"]["pending-job"] = {
+            "job_id": "pending-job", "profile_data": {"secret": "not public"}}
+        app.JOBS["pending-job"] = {
+            "status": "dispatched", "title": "Pending", "profile": "classic",
+            "inputs": {}, "log": [], "dispatched_to": worker_id,
+        }
+        response = self.client.get("/api/workers")
+        self.assertEqual(response.status_code, 200)
+        row = response.get_json()[0]
+        self.assertEqual(row["capacity"]["effective_free"], 0)
+        self.assertTrue(row["jobs"][0]["dispatch_pending"])
+        self.assertNotIn("profile_data", json.dumps(row))
 
 
 class OperationsTests(unittest.TestCase):

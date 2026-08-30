@@ -1,11 +1,13 @@
 """Worker-side polling client for the private Dmiqwi render fleet."""
 from __future__ import annotations
 
+import os
+import platform
+import shutil
 import socket
 import threading
 import time
 import traceback
-import uuid
 from typing import Any, Callable, Dict
 
 import requests
@@ -75,6 +77,12 @@ class FleetWorker:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._started_at = time.monotonic()
+        # Controller policy is mirrored locally as a second safety rail. An
+        # older controller can omit it and the worker retains legacy active
+        # behavior; a current controller can drain/pause or lower capacity
+        # without restarting this process.
+        self._policy: dict = {"mode": "active", "max_jobs": None}
 
     def start(self) -> None:
         if self._thread is None:
@@ -85,14 +93,49 @@ class FleetWorker:
     def _payload(self) -> dict:
         with self._lock:
             jobs = [r.snapshot() for r in self._jobs.values()]
-        active = sum(1 for j in jobs if j["status"] in ("running", "awaiting_approval"))
+            policy = dict(self._policy)
+        active = sum(
+            1 for j in jobs
+            if j["status"] in ("running", "awaiting_approval")
+        )
+        physical_max = max(1, min(8, int(config.FLEET_MAX_JOBS)))
+        try:
+            override = (int(policy.get("max_jobs"))
+                        if policy.get("max_jobs") is not None else None)
+        except (TypeError, ValueError):
+            override = None
+        effective_max = (min(physical_max, max(1, override))
+                         if override is not None else physical_max)
+        accepting = policy.get("mode") == "active"
+        try:
+            disk = shutil.disk_usage(config.OUTPUT_DIR)
+            disk_metrics = {
+                "free_gb": round(disk.free / 1_000_000_000, 1),
+                "free_percent": round(100 * disk.free / disk.total, 1),
+            }
+        except OSError:
+            disk_metrics = {}
+        try:
+            load_1m = round(os.getloadavg()[0], 2)
+        except (AttributeError, OSError):
+            load_1m = None
         return {
             "worker_id": self.worker_id, "name": self.name,
+            "protocol_version": 2,
             "hardware": {"cpu_cores": config._detect_cpu_count(),
                          "ram_gb": round(config._detect_ram_gb(), 1),
-                         "hw_encoder": config.gpu_encoder()},
-            "capacity": {"max_jobs": config.FLEET_MAX_JOBS,
-                         "free": max(0, config.FLEET_MAX_JOBS - active)},
+                         "hw_encoder": config.gpu_encoder(),
+                         "platform": platform.system(),
+                         "platform_release": platform.release(),
+                         "python": platform.python_version()},
+            "capacity": {"max_jobs": physical_max,
+                         "effective_max_jobs": effective_max,
+                         "active": active,
+                         "free": (max(0, effective_max - active)
+                                  if accepting else 0)},
+            "metrics": {"disk": disk_metrics, "load_1m": load_1m,
+                        "uptime_seconds": round(time.monotonic() - self._started_at)},
+            "policy": policy,
             "jobs": jobs,
         }
 
@@ -122,6 +165,28 @@ class FleetWorker:
                 self.aborter(jid)
             except Exception as e:  # noqa: BLE001
                 print(f"[fleet] abort of {jid} failed: {e}")
+        policy = reply.get("policy")
+        if isinstance(policy, dict):
+            mode = str(policy.get("mode") or "active")
+            if mode not in ("active", "draining", "paused"):
+                mode = "active"
+            max_jobs = policy.get("max_jobs")
+            try:
+                max_jobs = max(1, min(8, int(max_jobs))) if max_jobs is not None else None
+            except (TypeError, ValueError):
+                max_jobs = None
+            with self._lock:
+                self._policy = {"mode": mode, "max_jobs": max_jobs}
+        # The main only acknowledges a terminal snapshot after applying and
+        # persisting it. Pruning here keeps days of completed reporters from
+        # bloating every future heartbeat while preserving retry-by-same-ID.
+        for jid in reply.get("acknowledged_jobs") or []:
+            jid = str(jid or "")
+            with self._lock:
+                reporter = self._jobs.get(jid)
+                if (reporter and reporter.snapshot().get("status")
+                        in ("done", "error")):
+                    self._jobs.pop(jid, None)
         for approval in reply.get("approvals") or []:
             with self._lock:
                 reporter = self._jobs.get(str(approval.get("job_id") or ""))
@@ -132,6 +197,16 @@ class FleetWorker:
             if not jid:
                 continue
             with self._lock:
+                mode = self._policy.get("mode") or "active"
+                physical_max = max(1, min(8, int(config.FLEET_MAX_JOBS)))
+                override = self._policy.get("max_jobs")
+                effective_max = min(physical_max, int(override)) if override else physical_max
+                active = sum(
+                    1 for item in self._jobs.values()
+                    if item.snapshot().get("status") in ("running", "awaiting_approval")
+                )
+                if mode != "active" or active >= effective_max:
+                    continue
                 existing = self._jobs.get(jid)
                 if existing:
                     # Repeated delivery while the job is still active is the

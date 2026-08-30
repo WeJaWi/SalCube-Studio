@@ -13,16 +13,120 @@ import json
 import math
 import re
 import shutil
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import (animation, aivideo, cancel, config, footage, heygen, images,
+from . import (animation, aivideo, cancel, clients, config, footage, heygen, images,
                llm, music, render, script, voiceover)
 
 ProgressFn = Callable[[str, str], None]
 GateFn = Callable[[Dict[str, str], str], Tuple[str, str]]
+_PLAN_WRITE_LOCK = threading.Lock()
+
+
+class _KieTaskLedger:
+    """Durable per-job Kie task IDs stored inside plan.json.
+
+    The intent is written before the billable POST. If the app dies in the
+    tiny window between the provider accepting it and returning its task ID,
+    a resume sees ``submitting`` and refuses to create a possible duplicate.
+    """
+
+    def __init__(self, plan_file: Path, tasks: Optional[Dict[str, Any]] = None):
+        self.plan_file = plan_file
+        self.tasks: Dict[str, Dict[str, Any]] = {
+            str(k): dict(v) for k, v in (tasks or {}).items()
+            if isinstance(v, dict)
+        }
+
+    @staticmethod
+    def _key(beat: int, kind: str) -> str:
+        return f"{beat}:{kind}"
+
+    def get(self, beat: int, kind: str) -> Optional[Dict[str, Any]]:
+        value = self.tasks.get(self._key(beat, kind))
+        return dict(value) if value else None
+
+    def _set(self, beat: int, kind: str,
+             value: Optional[Dict[str, Any]]) -> None:
+        key = self._key(beat, kind)
+        with _PLAN_WRITE_LOCK:
+            raw = json.loads(self.plan_file.read_text())
+            current = raw.get("kie_tasks") or {}
+            if not isinstance(current, dict):
+                current = {}
+            if value is None:
+                current.pop(key, None)
+            else:
+                current[key] = value
+            raw["kie_tasks"] = current
+            tmp = self.plan_file.with_name(self.plan_file.name + ".tmp")
+            tmp.write_text(json.dumps(raw, indent=1))
+            tmp.replace(self.plan_file)
+            self.tasks = {str(k): dict(v) for k, v in current.items()
+                          if isinstance(v, dict)}
+
+    def begin(self, beat: int, kind: str, model: str) -> None:
+        self._set(beat, kind, {
+            "beat": beat,
+            "kind": kind,
+            "model": model,
+            "state": "submitting",
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+
+    def submitted(self, beat: int, kind: str, model: str,
+                  task_id: str) -> None:
+        self._set(beat, kind, {
+            "beat": beat,
+            "kind": kind,
+            "model": model,
+            "state": "submitted",
+            "task_id": task_id,
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+
+    def failed(self, beat: int, kind: str, model: str, message: str) -> None:
+        self._set(beat, kind, {
+            "beat": beat,
+            "kind": kind,
+            "model": model,
+            "state": "failed",
+            "message": str(message)[:300],
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+
+    def clear(self, beat: int, kind: str) -> None:
+        self._set(beat, kind, None)
+
+    def count_kind(self, kind: str) -> int:
+        return sum(1 for entry in self.tasks.values()
+                   if entry.get("kind") == kind)
+
+
+class _KieFallbackBudget:
+    """Per-job cap and circuit breaker for last-resort paid AI stills."""
+
+    def __init__(self, limit: int, already_used: int = 0):
+        self.limit = max(0, int(limit))
+        self.used = max(0, int(already_used))
+        self.disabled_reason = ""
+
+    def claim(self) -> Tuple[bool, str]:
+        if self.disabled_reason:
+            return False, self.disabled_reason
+        if self.used >= self.limit:
+            return False, f"per-job limit reached ({self.limit})"
+        self.used += 1
+        return True, ""
+
+    def note_failure(self, error: Exception) -> None:
+        if clients.kie_stop_error_in_text(str(error)):
+            self.disabled_reason = "Kie authentication/credit error"
 
 
 def load_profile(name: str) -> Dict[str, Any]:
@@ -90,7 +194,10 @@ def _spotify_popup_asset(inputs: Dict[str, Any]) -> str:
 def _broll_fallback(b: Dict[str, Any], i: int, assets: Path, width: int,
                     height: int, emit, skip_video: bool = False,
                     used: Optional[Dict[str, int]] = None, smart: str = "off",
-                    max_repeats: int = 2) -> None:
+                    max_repeats: int = 2, *,
+                    kie_ledger: Optional[_KieTaskLedger] = None,
+                    kie_budget: Optional[_KieFallbackBudget] = None,
+                    allow_ai: bool = True) -> None:
     """Fallback chain: stock video → stock image → AI image → blank."""
     query = b.get("query") or " ".join(b["text"].split()[:3])
     if not skip_video:
@@ -106,13 +213,78 @@ def _broll_fallback(b: Dict[str, Any], i: int, assets: Path, width: int,
     if media:
         b["media"], b["media_kind"] = media, "image"
         return
+    if not allow_ai:
+        emit("broll", f"Beat {i+1}: paid AI fallback skipped because an "
+                       f"earlier Kie task may still complete")
+        b["media"], b["media_kind"] = None, "blank"
+        return
+    if kie_ledger is None or kie_budget is None:
+        emit("broll", f"Beat {i+1}: paid AI fallback unavailable — blank card")
+        b["media"], b["media_kind"] = None, "blank"
+        return
+
+    kind = "fallback_image"
+    model = config.KIE_IMAGE_MODEL
+    context = f"{assets.parent.name}:beat-{i+1}:fallback-image"
+    existing = kie_ledger.get(i, kind)
+    if existing:
+        task_id = str(existing.get("task_id") or "")
+        if existing.get("state") == "submitted" and task_id:
+            try:
+                emit("broll", f"Beat {i+1}: resuming saved fallback AI image")
+                b["media"] = images.collect_image(
+                    task_id, assets / f"beat_{i:03d}_fb.png", context=context)
+                b["media_kind"] = "image"
+                kie_ledger.clear(i, kind)
+                return
+            except clients.KieTaskFailed as e:
+                kie_ledger.failed(i, kind, model, str(e))
+                kie_budget.note_failure(e)
+                emit("broll", f"Beat {i+1}: saved AI fallback failed ({e})")
+            except Exception as e:  # noqa: BLE001
+                # Keep the task ID. A timeout or temporary poll failure is not
+                # permission to create another paid task for this beat.
+                kie_budget.note_failure(e)
+                emit("broll", f"Beat {i+1}: saved AI fallback pending ({e})")
+        else:
+            emit("broll", f"Beat {i+1}: prior AI fallback is "
+                           f"{existing.get('state', 'unknown')} — not resubmitting")
+        b["media"], b["media_kind"] = None, "blank"
+        return
+
+    allowed, reason = kie_budget.claim()
+    if not allowed:
+        emit("broll", f"Beat {i+1}: fallback AI image skipped ({reason})")
+        b["media"], b["media_kind"] = None, "blank"
+        return
+
+    prompt = f"{b['text'][:140]}, warm documentary photo"
+    kie_ledger.begin(i, kind, model)
     try:
         emit("broll", f"Beat {i+1}: fallback AI image")
-        b["media"] = images.generate_image(
-            f"{b['text'][:140]}, warm documentary photo",
-            assets / f"beat_{i:03d}_fb.png", width, height)
+        task_id = images.submit_image(prompt, width, height, context=context)
+        kie_ledger.submitted(i, kind, model, task_id)
+        b["media"] = images.collect_image(
+            task_id, assets / f"beat_{i:03d}_fb.png", context=context)
         b["media_kind"] = "image"
+        kie_ledger.clear(i, kind)
+    except clients.KieSubmissionUncertain as e:
+        # Leave the durable ``submitting`` marker in place. The provider may
+        # have charged this request, so neither this run nor a resume retries.
+        emit("broll", f"Beat {i+1}: image submission uncertain ({e}) — blank card")
+        b["media"], b["media_kind"] = None, "blank"
+    except clients.KieTaskFailed as e:
+        kie_ledger.failed(i, kind, model, str(e))
+        kie_budget.note_failure(e)
+        emit("broll", f"Beat {i+1}: image fallback failed ({e}) — blank card")
+        b["media"], b["media_kind"] = None, "blank"
     except Exception as e:  # noqa: BLE001
+        entry = kie_ledger.get(i, kind) or {}
+        if entry.get("state") != "submitted":
+            kie_ledger.failed(i, kind, model, str(e))
+        # A submitted task is retained for resume; only definite pre-task
+        # failures become terminal ledger entries.
+        kie_budget.note_failure(e)
         emit("broll", f"Beat {i+1}: image fallback failed ({e}) — blank card")
         b["media"], b["media_kind"] = None, "blank"
 
@@ -361,10 +533,12 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
     # The plan is persisted so a resumed run works with identical beats.
     plan_file = job_dir / "plan.json"
     mindmap = None
+    saved_kie_tasks: Dict[str, Any] = {}
     if plan_file.exists():
         saved = json.loads(plan_file.read_text())
         beats, music_prompt = saved["beats"], saved["music_prompt"]
         mindmap = saved.get("mindmap")
+        saved_kie_tasks = saved.get("kie_tasks") or {}
         # back-compat: a plan.json from before grouped TTS existed lacks
         # tts_groups — compute it fresh in that one case only (there is
         # nothing to preserve since no grouped TTS ever ran against it yet)
@@ -412,7 +586,9 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
         tts_groups = voiceover.group_beats_for_tts(beats, config.AI33_MAX_TTS_CHARS)
         plan_file.write_text(json.dumps(
             {"beats": beats, "music_prompt": music_prompt,
-             "mindmap": mindmap, "tts_groups": tts_groups}, indent=1))
+             "mindmap": mindmap, "tts_groups": tts_groups,
+             "kie_tasks": {}}, indent=1))
+    kie_ledger = _KieTaskLedger(plan_file, saved_kie_tasks)
     # JSON round-trips dict keys as strings — normalize placement indices
     if mindmap and mindmap.get("placements"):
         mindmap["placements"] = {int(k): int(v)
@@ -611,6 +787,15 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
 
     # 7. Submit AI b-roll (video clips and cheap grok stills)
     mm_places = (mindmap or {}).get("placements", {})
+    try:
+        fallback_limit = int(v.get("kie_fallback_image_limit",
+                                   config.KIE_FALLBACK_IMAGE_LIMIT))
+    except (TypeError, ValueError):
+        fallback_limit = config.KIE_FALLBACK_IMAGE_LIMIT
+    fallback_files = len(list(assets.glob("beat_*_fb.png")))
+    kie_budget = _KieFallbackBudget(
+        fallback_limit,
+        already_used=fallback_files + kie_ledger.count_kind("fallback_image"))
 
     # Resume: reuse b-roll media already on disk from a prior run, so a
     # retried job only generates/fetches what is actually missing (e.g. the
@@ -652,18 +837,63 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
         if i in mm_places or b.get("media"):
             continue  # mind-map slide replaces this beat's visual — no spend
         if b["type"] == "ai_video":
+            kind = "ai_video"
+            model_name = config.KIE_VIDEO_MODEL
+            context = f"{job_dir.name}:beat-{i+1}:ai-video"
+            existing = kie_ledger.get(i, kind)
+            if existing:
+                task_id = str(existing.get("task_id") or "")
+                if existing.get("state") == "submitted" and task_id:
+                    b["task_id"] = task_id
+                    emit("broll", f"Beat {i+1}: resuming saved AI b-roll task")
+                else:
+                    emit("broll", f"Beat {i+1}: prior AI b-roll submission is "
+                                   f"{existing.get('state', 'unknown')} — "
+                                   f"not resubmitting")
+                continue
+            kie_ledger.begin(i, kind, model_name)
             try:
                 b["task_id"] = aivideo.submit_clip(
                     b["prompt"], b["duration"],
-                    resolution=v.get("ai_video_resolution", "720p"))
+                    resolution=v.get("ai_video_resolution", "720p"),
+                    context=context)
+                kie_ledger.submitted(
+                    i, kind, model_name, b["task_id"])
                 emit("broll", f"Beat {i+1}: AI b-roll submitted")
+            except clients.KieSubmissionUncertain as e:
+                # Keep ``submitting``: the unknown task may already be billed.
+                emit("broll", f"Beat {i+1}: submit uncertain ({e})")
             except Exception as e:  # noqa: BLE001
+                kie_ledger.failed(i, kind, model_name, str(e))
+                kie_budget.note_failure(e)
                 emit("broll", f"Beat {i+1}: submit failed ({e})")
         elif b["type"] == "ai_image":
+            kind = "ai_image"
+            model_name = "grok-imagine/text-to-image"
+            context = f"{job_dir.name}:beat-{i+1}:ai-image"
+            existing = kie_ledger.get(i, kind)
+            if existing:
+                task_id = str(existing.get("task_id") or "")
+                if existing.get("state") == "submitted" and task_id:
+                    b["img_task_id"] = task_id
+                    emit("broll", f"Beat {i+1}: resuming saved AI still task")
+                else:
+                    emit("broll", f"Beat {i+1}: prior AI still submission is "
+                                   f"{existing.get('state', 'unknown')} — "
+                                   f"not resubmitting")
+                continue
+            kie_ledger.begin(i, kind, model_name)
             try:
-                b["img_task_id"] = images.submit_grok_image(b["prompt"])
+                b["img_task_id"] = images.submit_grok_image(
+                    b["prompt"], context=context)
+                kie_ledger.submitted(
+                    i, kind, model_name, b["img_task_id"])
                 emit("broll", f"Beat {i+1}: AI still submitted")
+            except clients.KieSubmissionUncertain as e:
+                emit("broll", f"Beat {i+1}: submit uncertain ({e})")
             except Exception as e:  # noqa: BLE001
+                kie_ledger.failed(i, kind, model_name, str(e))
+                kie_budget.note_failure(e)
                 emit("broll", f"Beat {i+1}: submit failed ({e})")
 
     # 8. Local work while providers generate: stock + animations.
@@ -706,7 +936,8 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
             else:
                 _broll_fallback(b, i, assets, width, height, emit,
                                 skip_video=True, used=used_media, smart=smart,
-                                max_repeats=broll_repeats)
+                                max_repeats=broll_repeats,
+                                kie_ledger=kie_ledger, kie_budget=kie_budget)
         elif b["type"] == "stock_image":
             emit("broll", f"Beat {i+1}: stock photo “{b['query']}”")
             media = footage.fetch_stock_image(b["query"],
@@ -719,7 +950,8 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
             else:
                 _broll_fallback(b, i, assets, width, height, emit,
                                 used=used_media, smart=smart,
-                                max_repeats=broll_repeats)
+                                max_repeats=broll_repeats,
+                                kie_ledger=kie_ledger, kie_budget=kie_budget)
         elif b["type"] == "animation":
             theme = themes[anim_count % len(themes)]
             anim_count += 1
@@ -747,7 +979,8 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
             except Exception as e:  # noqa: BLE001
                 emit("anim", f"Beat {i+1}: animation failed ({e})")
                 _broll_fallback(b, i, assets, width, height, emit,
-                                used=used_media, max_repeats=broll_repeats)
+                                used=used_media, max_repeats=broll_repeats,
+                                kie_ledger=kie_ledger, kie_budget=kie_budget)
 
     # 9. Collect AI b-roll (videos + grok stills)
     for i, b in enumerate(beats):
@@ -756,28 +989,60 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
         if b.get("media") and not b.get("task_id") and not b.get("img_task_id"):
             continue  # reused from disk (resume) — nothing to collect
         if b["type"] == "ai_image":
+            planned_kind = "ai_image"
+            model_name = "grok-imagine/text-to-image"
+            context = f"{job_dir.name}:beat-{i+1}:ai-image"
+            allow_paid_fallback = True
             if b.get("img_task_id"):
                 try:
                     b["media"] = images.collect_grok_image(
-                        b["img_task_id"], assets / f"beat_{i:03d}.png")
+                        b["img_task_id"], assets / f"beat_{i:03d}.png",
+                        context=context)
                     b["media_kind"] = "image"
+                    kie_ledger.clear(i, planned_kind)
                     continue
-                except Exception as e:  # noqa: BLE001
+                except clients.KieTaskFailed as e:
+                    kie_ledger.failed(i, planned_kind, model_name, str(e))
+                    kie_budget.note_failure(e)
                     emit("broll", f"Beat {i+1}: AI still failed ({e})")
+                except Exception as e:  # noqa: BLE001
+                    allow_paid_fallback = False
+                    kie_budget.note_failure(e)
+                    emit("broll", f"Beat {i+1}: AI still failed ({e})")
+            elif (kie_ledger.get(i, planned_kind) or {}).get("state") == "submitting":
+                allow_paid_fallback = False
             _broll_fallback(b, i, assets, width, height, emit, used=used_media,
-                            max_repeats=broll_repeats)
+                            max_repeats=broll_repeats,
+                            kie_ledger=kie_ledger, kie_budget=kie_budget,
+                            allow_ai=allow_paid_fallback)
             continue
+        planned_kind = "ai_video"
+        model_name = config.KIE_VIDEO_MODEL
+        context = f"{job_dir.name}:beat-{i+1}:ai-video"
+        allow_paid_fallback = True
         if b.get("task_id"):
             emit("broll", f"Beat {i+1}: waiting for AI b-roll…")
             try:
                 b["media"] = aivideo.collect_clip(b["task_id"],
-                                                  assets / f"beat_{i:03d}.mp4")
+                                                  assets / f"beat_{i:03d}.mp4",
+                                                  context=context)
                 b["media_kind"] = "video"
+                kie_ledger.clear(i, planned_kind)
                 continue
-            except Exception as e:  # noqa: BLE001
+            except clients.KieTaskFailed as e:
+                kie_ledger.failed(i, planned_kind, model_name, str(e))
+                kie_budget.note_failure(e)
                 emit("broll", f"Beat {i+1}: AI b-roll failed ({e})")
+            except Exception as e:  # noqa: BLE001
+                allow_paid_fallback = False
+                kie_budget.note_failure(e)
+                emit("broll", f"Beat {i+1}: AI b-roll failed ({e})")
+        elif (kie_ledger.get(i, planned_kind) or {}).get("state") == "submitting":
+            allow_paid_fallback = False
         _broll_fallback(b, i, assets, width, height, emit, used=used_media,
-                        max_repeats=broll_repeats)
+                        max_repeats=broll_repeats,
+                        kie_ledger=kie_ledger, kie_budget=kie_budget,
+                        allow_ai=allow_paid_fallback)
 
     # 10. Collect HeyGen clips and finalize beat kinds
     still = _host_still(profile, profile_name)
@@ -817,7 +1082,8 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                 emit("host", f"Beat {i+1}: no host visual — falling back to stock")
                 b["query"] = " ".join(inputs["title"].split()[:3])
                 _broll_fallback(b, i, assets, width, height, emit,
-                                used=used_media, max_repeats=broll_repeats)
+                                used=used_media, max_repeats=broll_repeats,
+                                kie_ledger=kie_ledger, kie_budget=kie_budget)
                 b["kind"] = b.get("media_kind", "blank")
         else:  # split
             if host_media is not None:

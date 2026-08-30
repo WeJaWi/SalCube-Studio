@@ -218,6 +218,11 @@ on camera per video)**, `split_every_seconds` (240), `split_max_seconds` (35).
   Swap via `KIE_VIDEO_MODEL` in `.env` — bytedance/wan/kling model IDs are
   auto-adapted. NOTE: the kie key must be authorized for the chosen model
   (kie dashboard → API Keys), or those beats fall back to stock.
+- Kie task IDs are persisted in each job's `plan.json` before collection, so
+  restarts resume polling instead of submitting replacements. Actual provider
+  credit reports are appended to `output/kie_usage.jsonl`. Last-resort paid AI
+  stills are capped at three per video by default; change
+  `KIE_FALLBACK_IMAGE_LIMIT` or a profile's `video.kie_fallback_image_limit`.
 - Animations are free (rendered locally).
 - Test with the `test-short` profile first.
 
@@ -284,6 +289,17 @@ The Mac keeps rendering while it has capacity; when it is full, a waiting job
 is dispatched whole to the Windows worker. Hook approval still appears in the
 Mac UI. The worker needs its own local `.env`, provider keys, and one-time
 Drive authorization.
+
+The **Worker control** panel on the main shows each machine's last heartbeat,
+CPU/RAM/encoder, disk space, active and pending jobs, and effective slots. Use
+**Active** to accept work, **Drain** to finish current work while refusing new
+jobs, or **Pause** for maintenance. The per-worker slot selector is a live
+controller cap and survives main-app restarts. Pending dispatches that have not
+started can be safely released to the queue; after a worker acknowledges a job,
+use **Stop** instead so the same render can never run on two machines. Job rows
+also have a worker picker for explicit placement. Worker protocol v2 mirrors
+the policy locally and prunes acknowledged terminal reports, while the main
+still enforces lifecycle and capacity for older workers.
 
 ## Animation templates (`anim_templates/`)
 
