@@ -48,7 +48,7 @@ the gate**, the full script is written per the channel profile (AI disclosure
 first, medical-safety caveats in Hannah's voice), and the video is assembled
 with **Hannah on camera via your HeyGen avatar** — full-screen for the
 20-50s intro, then split-screen moments spread through the video, all inside
-a hard HeyGen-credit budget. B-roll mixes Pixabay stock, cheap AI video
+a hard HeyGen-credit budget. B-roll mixes Pixabay/Pexels stock, cheap AI video
 (Grok Imagine), and free locally-rendered animation templates.
 
 Sibling project of `~/video-studio` (same kie/ai33/Pixabay keys).
@@ -60,13 +60,14 @@ Sibling project of `~/video-studio` (same kie/ai33/Pixabay keys).
 | Outline, hooks, script, beat plan | kie.ai (Claude Sonnet 5) | `POST /claude/v1/messages` | `LLM_API_KEY` |
 | Operations observer, chat, reports | OpenRouter | `qwen/qwen3.7-flash` (`/chat/completions`, reasoning enabled) | `OPENROUTER_API_KEY` |
 | Thumbnail words | existing GPT provider | GPT-5.6 Terra (`/codex/v1/responses`) | `LLM_GPT_API_KEY` |
+| Thumbnail images | kie.ai | `nano-banana-2-lite` image editing | `KIE_THUMBNAIL_API_KEY` |
 | Host on camera | HeyGen (your avatar) | `POST /v2/video/generate`, audio-driven | `HEYGEN_API_KEY` + `HEYGEN_AVATAR_ID` |
 | Voice + subtitles | ai33.pro | `POST /v3/text-to-speech` (`with_transcript`) | `AI33_API_KEY` + optional `AI33_API_KEY_BACKUP` |
 | AI b-roll | kie.ai Grok Imagine (cheapest; swappable) | `grok-imagine/text-to-video`, exact 6-30s | `KIE_VIDEO_API_KEY` |
 | Stock photos | Pixabay images API | relevance-scored, Ken Burns | `PIXABAY_IMAGE_API_KEY` |
 | Fallback AI images | kie.ai Z-Image | `z-image` | `KIE_API_KEY` |
 | Music | ai33.pro Suno | `POST /v1s/task/music-generation` | `AI33_API_KEY` + optional `AI33_API_KEY_BACKUP` |
-| Stock b-roll | Pixabay | videos API | `PIXABAY_API_KEY` |
+| Stock b-roll | Pixabay + Pexels | parallel, relevance-ranked searches | `PIXABAY_API_KEY` + `PEXELS_API_KEY` |
 | Animations | **local** (headless Chromium + FFmpeg) | `anim_templates/*.html` | — |
 
 The **entire narration is voiced by ai33** (one consistent voice). HeyGen
@@ -143,7 +144,9 @@ awake during multi-hour renders without forcing the display to stay on.
    H.264 High/yuv420p encode, AAC-LC stereo at 192 kbps, zero-based track
    timestamps, duration matching, and MP4 `faststart`. The delivered file is
    validated against that contract before it can be marked complete, which
-   keeps it compatible with Spotify for Creators.
+   keeps it compatible with Spotify for Creators. Repeated metadata checks
+   share a stat-invalidated FFprobe cache, and resumable transition groups are
+   reused only when their exact input/settings manifest still matches.
 5. For thumbnail-enabled profiles, GPT-5.6 Terra proposes thumbnail words in
    parallel. Rendering does not
    wait for thumbnail approval. It resolves the script language from the UI
@@ -152,7 +155,10 @@ awake during multi-hour renders without forcing the display to stay on.
    truthful life-change trigger rules. Approve/edit the title and words first;
    only then is the image generated. Approve that image separately. The
    thumbnail gets its own 20-digit ID and remains visible/downloadable from
-   the video job.
+   the video job. Joseph Murphy thumbnails rotate through the owner-approved
+   examples in `thumbnails/references/joseph-murphy/`; regenerating advances
+   to the next layout and high-resolution portrait in its `portraits/` child
+   folder, while other authors keep the global default template and figure.
    Astrology Search and all four car profiles add an earlier gate: Terra first
    researches the theme and presents exactly three titles. The video enters the
    render queue only after one title is selected. Thumbnail generation is fully
@@ -214,14 +220,15 @@ on camera per video)**, `split_every_seconds` (240), `split_max_seconds` (35).
 
 - **HeyGen credits** are the budget the planner protects — only the intro +
   split moments are generated.
-- AI b-roll uses Grok Imagine (cheapest on kie; exact durations, no looping).
+- AI video b-roll uses Grok Imagine (exact durations, no looping). AI stills
+  and stock-fallback images use Z-Image through `KIE_IMAGE_MODEL`.
   Swap via `KIE_VIDEO_MODEL` in `.env` — bytedance/wan/kling model IDs are
   auto-adapted. NOTE: the kie key must be authorized for the chosen model
   (kie dashboard → API Keys), or those beats fall back to stock.
 - Kie task IDs are persisted in each job's `plan.json` before collection, so
   restarts resume polling instead of submitting replacements. Actual provider
   credit reports are appended to `output/kie_usage.jsonl`. Last-resort paid AI
-  stills are capped at three per video by default; change
+  stills are capped at 15 per video by default; change
   `KIE_FALLBACK_IMAGE_LIMIT` or a profile's `video.kie_fallback_image_limit`.
 - Animations are free (rendered locally).
 - Test with the `test-short` profile first.
@@ -242,11 +249,20 @@ videos/
     Titles and Thumbnails.docx
 ```
 
-Despite its requested filename, `Titles and Thumbnails.docx` contains titles
-only—one plain paragraph per unique finished video, with no images, dates, IDs,
-or metadata. It is updated only after the corresponding video has uploaded and
-verified successfully. A duplicate title in the same profile produces a naming
-error before production; an existing Drive filename is never overwritten.
+The app adds only titles to `Titles and Thumbnails.docx`—one plain paragraph per
+unique finished video. Existing thumbnails, notes, tables, formatting and other
+owner-added contents are preserved. Updates patch only the document body and
+retain every other Word package part byte-for-byte. An existing title is a no-op.
+A rolling local recovery copy is kept at
+`output/profile-documents/<profile>/Titles and Thumbnails.previous.docx`.
+Detected concurrent document edits stop the update for a retry; this is a
+best-effort check, not an atomic lock against editing from another machine.
+Content already lost by older app versions needs restoration from an intact
+copy or an available earlier Drive version.
+
+The document is updated only after the video has uploaded and verified. A
+duplicate video title in the same profile produces a naming error before
+production; existing video files are never silently overwritten.
 
 The first time, after restarting the app, use **Connect** in the Drive status
 panel or open:
@@ -301,6 +317,18 @@ also have a worker picker for explicit placement. Worker protocol v2 mirrors
 the policy locally and prunes acknowledged terminal reports, while the main
 still enforces lifecycle and capacity for older workers.
 
+Worker protocol v4 keeps automatic retries inside the original worker runner.
+During the delay both UIs show **retrying soon**, the worker slot remains
+reserved, and the retry uses the same profile/voice snapshot and reporter.
+Only success, exhausted retries, or Stop releases that reservation. A Stop
+during the delay cancels the pending retry. The controller retains remote
+ownership if it restarts during the wait. Requests whose acceptance is unknown
+still require review instead of an automatic paid resubmission.
+
+Update both machines for this behavior: in the Windows project folder run
+`git pull --ff-only origin main`, then restart with `run.bat`. Existing `.env`
+and generated job files stay local. Let active jobs finish before restarting.
+
 ## Animation templates (`anim_templates/`)
 
 Sixteen templates: `checklist`, `stat`, `compare`, `quote`, `keyword`,
@@ -339,7 +367,10 @@ b-roll of the beats it replaces.
 - **Stock relevance** — searches pull 25 candidates and score tag coverage
   of the query; weak matches are rejected and fall through video → photo →
   AI image → blank. The planner is forced to write concrete, filmable
-  queries. Stock photos get a slow Ken Burns zoom.
+  queries. Pixabay and Pexels are queried concurrently. Provider responses
+  are cached for 24 hours, while validated media originals use a bounded
+  2 GiB/7-day shared cache and are copied independently into each job. Stock
+  photos get a slow Ken Burns zoom.
 - **Beat length cap** — no beat can exceed ~1.6× the target beat length,
   so a single clip never lingers for minutes.
 
@@ -381,7 +412,55 @@ b-roll of the beats it replaces.
 
 Notes:
 - If a job dies (disk, credits, crash), free the blocker and POST
-  `{"resume_job": "<job id>"}` to `/api/render` — everything already
-  generated is reused, nothing is re-billed.
-- Videos are ~1 GB/hour of runtime; old job folders can be deleted
-  once the final is saved elsewhere.
+  `{"resume_job": "<job id>"}` to `/api/render`. Matching cached work and
+  recorded AI33/Kie tasks are reused. Changed inputs or legacy files without
+  manifests may need regeneration. An uncertain paid submission is blocked
+  for reconciliation rather than automatically submitted again.
+- Videos are ~1 GB/hour of runtime; old job folders can be deleted once the
+  final is saved elsewhere.
+
+### Render, B-roll and recovery controls (September 2026)
+
+- `MERGE_POPUP_FINAL_PASS=1` composites popups during final export. Set `0`
+  for the previous separate pass. Final VidForge codec/audio settings remain
+  unchanged. Failed narration extraction now stops delivery instead of
+  generating a silent narrated video.
+- `MAX_ACTIVE_ENCODERS=auto` shares a bounded FFmpeg budget across local jobs;
+  memory availability and reserved final-export disk space are checked too.
+  Preparation slots remain controlled by `MAX_CONCURRENT_JOBS` and worker
+  capacity. Uploading releases a compute slot while Drive transfers stay serial.
+- `STOCK_PREFETCH_BEATS=3` overlaps candidate searches for upcoming beats.
+  Selection remains in beat order. Asset source records restore repeat counts;
+  contextual curator results and previews are cached. The **B-roll** job link
+  lets you inspect local shots; paused/failed local jobs allow query changes
+  and replacement on resume. Finished jobs are read-only.
+- Versioned manifests identify narration, B-roll and render inputs. Old
+  files without matching manifests are not blindly reused. AI33 task ledgers
+  resume known accepted work and block uncertain submissions from replay.
+- **Timings** exposes per-attempt stage durations, cache counters and peak
+  individual FFmpeg RSS. Durations overlap; do not add them as wall-clock time.
+  **AI33 usage** reports newly captured submitted characters and provider
+  credits when returned. It is not historical billing reconstruction or a
+  shared fleet-wide budget. Optional `AI33_DAILY_CHARACTER_LIMIT` and
+  `AI33_JOB_CHARACTER_LIMIT` default to `0` (unlimited); the daily cutoff is UTC.
+- Protocol 3 workers report code revisions, resources and attempt IDs.
+  Acknowledged reports are persisted; old reports cannot complete a newer
+  protocol-3 attempt. Older workers remain compatible but need this code
+  update and a restart to gain these protections and Word-image preservation.
+- Delivery displays confirmed bytes, throughput and ETA. All expected parts
+  must pass final-export checks before a new render is handed off. Interrupted
+  uploads retain outputs and may resume; changed local files invalidate old
+  upload sessions, even when file size is unchanged.
+
+The offline suite includes real short FFmpeg comparisons and fault injection.
+Full-length speed/B-roll-quality comparisons and a two-job Windows rollout are
+still required before claiming an end-to-end speedup. See
+`docs/NEXT_IMPROVEMENTS.md` for the acceptance checklist.
+
+### Tests
+
+Run `.venv/bin/python -m unittest discover -s tests -q`. The test harness
+redirects queue/settings/Drive-token/log writes to a temporary directory and
+blocks every unmocked network request, so regression tests cannot mutate the
+live controller or spend provider credits. The full local FFmpeg delivery
+smoke test is opt-in with `DMIQWI_RENDER_FFMPEG_TESTS=1`.

@@ -1,8 +1,14 @@
-"""Create the cumulative titles-only Word document for a Drive profile."""
+"""Append titles to a profile document without discarding owner-added content."""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable
+from copy import copy
+import os
+import tempfile
+from zipfile import ZipFile
+
+from lxml import etree
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -94,3 +100,72 @@ def create(titles: Iterable[str], dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     doc.save(dest)
     return dest
+
+
+def append_titles(titles: Iterable[str], dest: Path) -> bool:
+    """Append only missing titles, preserving every existing package part.
+
+    Rebuilding from paragraph text drops drawings. A general document
+    round-trip may also rewrite unsupported Word extensions. Update only
+    document.xml and copy images, relationships, comments, styles, headers,
+    embedded objects, and all other entries byte-for-byte.
+    """
+    dest = Path(dest)
+    clean = normalize_titles(titles)
+    if not clean:
+        raise ValueError("at least one video title is required")
+    if not dest.exists():
+        create(clean, dest)
+        return True
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    with ZipFile(dest) as package:
+        original = package.read("word/document.xml")
+        document = etree.fromstring(original, parser)
+        body = document.find(qn("w:body"))
+        if body is None:
+            raise ValueError("Word document has no body; original retained")
+        existing = normalize_titles("".join(p.itertext(qn("w:t")))
+                                    for p in body.iter(qn("w:p")))
+        seen = {title.casefold() for title in existing}
+        additions = [title for title in clean if title.casefold() not in seen]
+        if not additions:
+            return False  # no serialization or upload on an idempotent retry
+        section = body.find(qn("w:sectPr"))
+        for title in additions:
+            paragraph = etree.Element(qn("w:p"))
+            props = etree.SubElement(paragraph, qn("w:pPr"))
+            etree.SubElement(props, qn("w:keepLines"))
+            etree.SubElement(props, qn("w:widowControl"))
+            run = etree.SubElement(paragraph, qn("w:r"))
+            etree.SubElement(run, qn("w:t")).text = title
+            if section is None:
+                body.append(paragraph)
+            else:
+                section.addprevious(paragraph)
+        updated = etree.tostring(document, xml_declaration=True, encoding="UTF-8", standalone=True)
+        fd, name = tempfile.mkstemp(prefix=".docx-append-", suffix=".docx", dir=dest.parent)
+        os.close(fd)
+        temp = Path(name)
+        try:
+            with ZipFile(temp, "w") as result:
+                result.comment = package.comment
+                for info in package.infolist():
+                    # Writing mutates ZipInfo offsets. Keep the source metadata
+                    # intact so verification still reads the original package.
+                    result.writestr(copy(info), updated if info.filename == "word/document.xml"
+                                    else package.read(info.filename))
+            with ZipFile(temp) as result:
+                if result.testzip() is not None:
+                    raise ValueError("Updated Word document failed validation; original retained")
+                for info in package.infolist():
+                    if info.filename != "word/document.xml" and result.read(info.filename) != package.read(info.filename):
+                        raise ValueError("Existing Word content changed unexpectedly; original retained")
+            # Close the input before replace so this is also valid on Windows.
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temp, dest)
+    finally:
+        temp.unlink(missing_ok=True)
+    return True

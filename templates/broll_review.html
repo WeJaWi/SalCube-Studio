@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B-roll review · Dmiqwi</title>
+<style>
+body{font:15px system-ui;background:#171a1f;color:#e5e7eb;margin:30px auto;max-width:1400px;padding:0 20px}a{color:#77d0c3}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:20px}article{background:#252a33;border:1px solid #3b414e;border-radius:12px;padding:16px}img,video,.missing{width:100%;aspect-ratio:16/9;object-fit:contain;background:#101216;border-radius:6px}p{line-height:1.5}small{color:#aab2c0}input{box-sizing:border-box;width:100%;padding:10px;background:#151922;color:inherit;border:1px solid #4e596b;border-radius:6px}button{margin-top:10px;padding:9px 14px;border:0;border-radius:6px;background:#71c6b4;cursor:pointer}button:disabled{opacity:.4;cursor:default}.notice{color:#d5c69a}
+</style></head><body>
+<a href="/">← Studio</a><h1>B-roll review</h1><p>{{ job.title }}</p>
+<p class="notice">Review footage against its narration. To change a stock search, pause the local job, save the query below, then resume it. Completed and remote jobs are view-only.</p>
+<div class="grid">{% for beat in beats %}<article>
+<h3>Beat {{ beat.index + 1 }} · {{ beat.type }}</h3>
+{% if beat.filename %}{% if beat.video %}<video controls preload="none" src="{{ url_for('broll_review_asset',job_id=job_id,filename=beat.filename) }}"></video>{% else %}<img loading="lazy" src="{{ url_for('broll_review_asset',job_id=job_id,filename=beat.filename) }}" alt="Selected footage for beat {{beat.index+1}}">{% endif %}{% else %}<div class="missing">No local visual yet</div>{% endif %}
+<p>{{ beat.text }}</p><small>{{ beat.source }} {{ beat.description }}</small>
+{% if beat.type in ['stock','stock_image'] %}<form data-index="{{beat.index}}"><p><label>Search<input name="query" value="{{beat.query}}" required maxlength="250"></label></p><button {% if job.status not in ['paused','error'] or job.dispatched_to %}disabled{% endif %}>Save / retry this search</button><p role="status"></p></form>{% endif %}
+</article>{% endfor %}</div>
+<script>
+const jobId={{ job_id|tojson }};
+document.querySelectorAll('form').forEach(form=>form.addEventListener('submit',async event=>{
+event.preventDefault(); const button=form.querySelector('button'), message=form.querySelector('[role=status]'); button.disabled=true;
+try {const response=await fetch(`/api/broll/${encodeURIComponent(jobId)}/${form.dataset.index}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:form.elements.query.value})});const data=await response.json();message.textContent=data.error||data.message;}catch(error){message.textContent='Could not save the search. Please try again.';}finally{button.disabled=false;}
+}));
+</script></body></html>

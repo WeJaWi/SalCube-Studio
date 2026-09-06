@@ -10,12 +10,14 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
 import requests
 
-from . import cancel, config
+from . import cancel, config, telemetry
 
 _WRITER_INSTRUCTIONS = ("You are a world-class long-form scriptwriter and "
                         "video planner. Follow the user's instructions "
@@ -24,6 +26,24 @@ _WRITER_INSTRUCTIONS = ("You are a world-class long-form scriptwriter and "
 
 class LLMSubmissionUncertain(RuntimeError):
     """A billable synchronous LLM request may have completed remotely."""
+
+
+# Kie's script endpoints are synchronous and historically timed out when a
+# batch started several requests at once.  Because a timed-out POST has no
+# task ID/idempotency key to reconcile, it must not be replayed.  Queue the
+# local callers instead, so at most the configured number is in flight.
+_LLM_REQUEST_SLOTS = threading.BoundedSemaphore(config.LLM_MAX_CONCURRENT_REQUESTS)
+
+
+@contextmanager
+def _llm_request_slot():
+    """Acquire a cancellable shared Kie/LLM request slot."""
+    while not _LLM_REQUEST_SLOTS.acquire(timeout=0.5):
+        cancel.check()
+    try:
+        yield
+    finally:
+        _LLM_REQUEST_SLOTS.release()
 
 
 def resolve_model(name: Optional[str]) -> str:
@@ -94,7 +114,8 @@ def _parse(spec: Dict[str, str], data: dict) -> str:
     ).strip()
 
 
-def chat(user: str, model: str, system: Optional[str] = None,
+@telemetry.timed("llm")
+def chat(user: Any, model: str, system: Optional[str] = None,
          max_tokens: int = 8000, timeout: int = 300, retries: int = 5,
          allow_cli_fallback: bool = True) -> str:
     """Send one message to `model` (from resolve_model()), return its text.
@@ -121,12 +142,17 @@ def chat(user: str, model: str, system: Optional[str] = None,
 
     last_err: Exception = RuntimeError("LLM: no attempt made")
     for attempt in range(retries + 1):
+        cancel.check()
         is_5xx = False
         try:
-            r = requests.post(url, headers={
-                "Authorization": f"Bearer {spec['key']}",
-                "Content-Type": "application/json",
-            }, json=payload, timeout=timeout)
+            # Do not fan out synchronous billable requests to Kie.  If the
+            # provider response is lost, retrying would risk duplicate spend;
+            # waiting for this slot instead prevents that failure mode.
+            with _llm_request_slot():
+                r = requests.post(url, headers={
+                    "Authorization": f"Bearer {spec['key']}",
+                    "Content-Type": "application/json",
+                }, json=payload, timeout=timeout)
             if r.status_code == 200:
                 # kie.ai sometimes wraps a real, non-transient error in an
                 # HTTP 200 body instead of a proper error status — e.g.
@@ -149,6 +175,9 @@ def chat(user: str, model: str, system: Optional[str] = None,
                         f"LLM ({model}) error {body_json['code']}: "
                         f"{body_json.get('msg') or r.text[:400]}")
                 text = _parse(spec, body_json if body_json is not None else {})
+                for field, amount in (body_json or {}).get("usage", {}).items():
+                    if isinstance(amount, (int, float)):
+                        telemetry.count("llm_" + field, amount)
                 if text:
                     return text
                 # A 200 means the paid request reached the provider. Replaying

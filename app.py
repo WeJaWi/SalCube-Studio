@@ -15,9 +15,9 @@ from pathlib import Path
 from flask import (Flask, Response, g, jsonify, make_response, redirect,
                    render_template, request, send_file, abort)
 
-from pipeline import (animation, cancel, clients, config, delivery_doc, fleet, identity,
+from pipeline import (ai33_tasks, animation, artifacts, cancel, clients, config, delivery_doc, fleet, identity,
                       jobs, llm, operations, orchestrator, render as video_render,
-                      research, scheduler, stats, storage, thumbnail)
+                      research, resources, scheduler, stats, storage, telemetry, thumbnail)
 
 app = Flask(__name__)
 
@@ -100,7 +100,7 @@ def _fleet_capacity(worker: dict, policy: dict | None = None) -> dict:
     active = sum(
         1 for row in reported_jobs
         if isinstance(row, dict)
-        and row.get("status") in ("running", "awaiting_approval")
+        and row.get("status") in fleet.SLOT_STATUSES
     )
     # v2 workers report this directly; keep the job-list count as a fallback
     # for old workers and use the larger value when a partial list arrives.
@@ -114,6 +114,13 @@ def _fleet_capacity(worker: dict, policy: dict | None = None) -> dict:
     effective_free = min(reported_free, max(0, effective_max - active))
     effective_free = max(0, effective_free - pending)
     if policy.get("mode") != "active":
+        effective_free = 0
+    metrics = worker.get("metrics") or {}
+    free_gb = (metrics.get("disk") or {}).get("free_gb")
+    memory_gb = (metrics.get("render") or {}).get("available_memory_gb")
+    if isinstance(free_gb, (int, float)) and free_gb < 3:
+        effective_free = 0
+    if isinstance(memory_gb, (int, float)) and memory_gb < 1:
         effective_free = 0
     return {
         "max_jobs": physical_max,
@@ -329,7 +336,8 @@ def _active_slot_count() -> int:
     # not one of this controller Mac's local slots. Counting remote work here
     # left the Mac idle whenever Windows had MAX_CONCURRENT_JOBS jobs active.
     return sum(1 for j in JOBS.values()
-               if j.get("status") in _SLOT_STATUSES
+               if (j.get("status") in _SLOT_STATUSES
+                   or (j.get("_fleet_reporter") and j.get("status") in fleet.SLOT_STATUSES))
                and not j.get("dispatched_to"))
 
 
@@ -343,7 +351,8 @@ def _next_queued_ids(n: int) -> list[str]:
     """
     if n <= 0:
         return []
-    queued = [(jid, j) for jid, j in JOBS.items() if j.get("status") == "queued"]
+    queued = [(jid, j) for jid, j in JOBS.items() if j.get("status") == "queued"
+              and not j.get("_fleet_reporter") and not j.get("dispatched_to")]
     queued.sort(key=lambda x: (0, x[1]["priority_at"]) if x[1].get("priority_at")
                 else (1, x[1].get("created_at") or ""))
     return [jid for jid, _ in queued[:n]]
@@ -377,7 +386,12 @@ def _persist_queue() -> None:
                 "drive": j.get("drive"),
                 "dispatched_to": j.get("dispatched_to"),
                 "dispatched_at": j.get("dispatched_at"),
+                "attempt_id": j.get("attempt_id"),
+                "export_validation_required": j.get("export_validation_required", False),
+                "performance": j.get("performance"),
                 "retries": j.get("retries", 0),
+                "retry_at": j.get("retry_at"),
+                "retry_limit": j.get("retry_limit"),
                 "priority_at": j.get("priority_at"),
                 "updated_at": j.get("updated_at"),
                 "video_group": j.get("video_group"),
@@ -418,6 +432,7 @@ def _restore_queue() -> None:
     thumbnail_resume: list[tuple[str, str]] = []
     research_resume: list[str] = []
     package_resume: list[str] = []
+    delivery_resume: list[str] = []
     with LOCK:
         for row in rows:
             if not isinstance(row, dict):
@@ -445,6 +460,9 @@ def _restore_queue() -> None:
             drive = row.get("drive") if isinstance(row.get("drive"), dict) else {}
             has_local_deliverable = (video_render.is_valid_video(final)
                                      or video_render.is_valid_video(part1))
+            if row.get("export_validation_required"):
+                has_local_deliverable = bool(_verified_delivery_roles(
+                    final.parent, drive.get("files") or {}))
             drive_complete = drive.get("state") == "uploaded"
             # Threads die with the process — any in-flight job must re-queue
             # unless the final video is already on disk.
@@ -476,13 +494,13 @@ def _restore_queue() -> None:
                 progress_pct = 0
                 log = list(row.get("log") or [])
             elif (row.get("dispatched_to")
-                  and st in ("running", "awaiting_approval", "dispatched")):
+                  and st in ("running", "awaiting_approval", "dispatched", "retry_wait")):
                 # The process is still alive on another machine when only
                 # the controller restarts. Keep ownership remote and wait
                 # for its next heartbeat instead of accidentally starting a
                 # duplicate render on this Mac.
-                st = "dispatched"
-                step = "fleet"
+                st = "retry_wait" if st == "retry_wait" else "dispatched"
+                step = "retry_wait" if st == "retry_wait" else "fleet"
                 progress_pct = row.get("progress_pct", 0)
                 log = list(row.get("log") or [])
                 log.append({
@@ -537,16 +555,21 @@ def _restore_queue() -> None:
                 "inputs": inputs,
                 "created_at": row.get("created_at") or datetime.now().isoformat(
                     timespec="seconds"),
-                "error": row.get("error") if st == "error" else None,
+                "error": row.get("error") if st in ("error", "retry_wait") else None,
                 "result": str(final) if final.exists() else row.get("result"),
                 "drive": drive,
                 "dispatched_to": row.get("dispatched_to"),
                 "dispatched_at": row.get("dispatched_at"),
+                "attempt_id": row.get("attempt_id"),
+                "export_validation_required": row.get("export_validation_required", False),
+                "performance": row.get("performance"),
                 "est_chars": row.get("est_chars"),
                 "chars": row.get("chars"),
                 "est_beats": row.get("est_beats"),
                 "size": row.get("size"),
                 "retries": row.get("retries", 0),
+                "retry_at": row.get("retry_at"),
+                "retry_limit": row.get("retry_limit"),
                 "priority_at": row.get("priority_at"),
                 "updated_at": row.get("updated_at") or row.get("created_at"),
                 "video_group": row.get("video_group") or inputs.get("video_group"),
@@ -563,6 +586,9 @@ def _restore_queue() -> None:
                                 else {"state": "waiting_for_rules"}),
             }
             package_state = (JOBS[jid].get("package") or {}).get("state")
+            if (has_local_deliverable and row.get("status") == "uploading"
+                    and not row.get("dispatched_to") and not drive_complete):
+                delivery_resume.append(jid)
             if (drive_complete and _profile_wants_docx(profile)
                     and package_state != "uploaded"):
                 package_resume.append(jid)
@@ -608,6 +634,10 @@ def _restore_queue() -> None:
             target=_upload_profile_docx,
             args=(jid, config.OUTPUT_DIR / jid), daemon=True,
             name=f"dmiqwi-docx-{jid}").start()
+    for jid in delivery_resume:
+        threading.Thread(target=_upload_job_deliverables,
+                         args=(jid, config.OUTPUT_DIR / jid), daemon=True,
+                         name=f"drive-resume-{jid}").start()
     for jid, thumb_state in thumbnail_resume:
         if thumb_state == "generating_image":
             threading.Thread(target=_thumbnail_image_task, args=(jid,), daemon=True,
@@ -623,6 +653,7 @@ def _schedule_retry(job_id: str) -> None:
     catches are provider outages (kie.ai 5xx), where retrying instantly
     just spends an attempt on a service that is still down. The job sits in
     "retry_wait" meanwhile, which holds no slot, so other work proceeds.
+    Fleet retries stay inside _run_fleet_worker_job and never use this queue.
     """
     delay = float(config.queue_setting("retry_delay_seconds") or 60)
 
@@ -690,6 +721,12 @@ def _abort_local_job(job_id: str) -> None:
         token = job.get("_cancel") if job else None
         if job is not None:
             job["_stop_target"] = "cancelled"  # main owns the requeue decision
+            if token is None and job.get("status") == "retry_wait":
+                job.update(status="cancelled", step="cancelled")
+                reporter = job.get("_fleet_reporter")
+                if reporter:
+                    reporter.fail("stopped by user")
+    _persist_queue()
     if token is not None:
         killed = token.cancel()
         print(f"[fleet] aborted {job_id} on request from main "
@@ -747,16 +784,52 @@ def _run_fleet_worker_job(spec: dict, reporter: fleet.FleetReporter) -> None:
     (job_dir / "inputs.json").write_text(json.dumps({**inputs, "_profile": profile}, indent=1))
     with LOCK:
         JOBS[job_id] = {
+            "_fleet_reporter": reporter,
+            "attempt_id": spec.get("attempt_id"),
             "status": "running", "step": "start", "progress_pct": 0,
             "log": [], "title": inputs.get("title") or job_id, "profile": profile,
             "inputs": inputs, "created_at": datetime.now().isoformat(timespec="seconds"),
         }
-    _run_job(job_id, inputs, profile, profile_data=profile_data,
-             fleet_reporter=reporter)
+    try:
+        while True:
+            _run_job(job_id, inputs, profile, profile_data=profile_data,
+                     fleet_reporter=reporter)
+            if not _wait_for_fleet_retry(job_id, reporter):
+                break
+    finally:
+        with LOCK:
+            job = JOBS.get(job_id)
+            if job and job.get("_fleet_reporter") is reporter:
+                job.pop("_fleet_reporter", None)
+        _persist_queue()
+        _kick_queue()
+
+
+def _wait_for_fleet_retry(job_id: str, reporter: fleet.FleetReporter) -> bool:
+    """Keep the same runner, profile snapshot and reserved slot through retries."""
+    while True:
+        with LOCK:
+            job = JOBS.get(job_id)
+            if (not job or job.get("_fleet_reporter") is not reporter
+                    or job.get("status") != "retry_wait"):
+                return False
+            if job.get("_stop_target"):
+                target = job.pop("_stop_target")
+                job.update(status=target, step=target)
+                reporter.fail("stopped by user")
+                return False
+            remaining = float(job.get("retry_at") or 0) - time.time()
+            if remaining <= 0:
+                job.update(status="running", step="starting")
+                job.pop("error", None)
+                job.pop("retry_at", None)
+                reporter.progress("starting", "Retrying on the same worker", job.get("progress_pct", 0))
+                return True
+        time.sleep(min(0.5, remaining))
 
 
 def _fleet_dispatch_for(worker_id: str, free: int) -> list[dict]:
-    """Claim queued jobs only after this main has filled its own render slots."""
+    """Claim eligible queued jobs up to this worker's available capacity."""
     if config.FLEET_ROLE != "main" or free <= 0:
         return []
     # Re-evaluate against controller policy and unacknowledged deliveries.
@@ -769,14 +842,17 @@ def _fleet_dispatch_for(worker_id: str, free: int) -> list[dict]:
     if free <= 0:
         return []
     with LOCK:
-        if _active_slot_count() < config.max_concurrent_jobs():
-            return []  # overflow policy: main keeps its own compute busy first
+        # Workers may prepare available jobs immediately; encode concurrency
+        # is budgeted per machine independently of preparation slots.
         # A same-ID retry may deliberately be pinned to main so an older
         # terminal reporter on a worker cannot reclaim it and replay its
         # stale error. Scan past pinned rows so they do not block dispatch of
         # other eligible work.
         job_ids = [jid for jid in _next_queued_ids(len(JOBS))
-                   if not JOBS[jid].get("local_only")][:free]
+                   if not JOBS[jid].get("local_only")]
+        cached_jobs = set((worker or {}).get("cached_jobs") or [])
+        job_ids.sort(key=lambda jid: jid not in cached_jobs)
+        job_ids = job_ids[:free]
         dispatch = []
         for job_id in job_ids:
             job = JOBS[job_id]
@@ -787,8 +863,10 @@ def _fleet_dispatch_for(worker_id: str, free: int) -> list[dict]:
                 continue
             job.update(status="dispatched", step="fleet", dispatched_to=worker_id,
                        dispatched_at=datetime.now().isoformat(timespec="seconds"))
+            job["attempt_id"] = secrets.token_hex(12) if int((worker or {}).get("protocol_version", 1)) >= 3 else None
             dispatch.append({"job_id": job_id, "inputs": job["inputs"],
-                             "profile": job["profile"], "profile_data": profile_data})
+                             "profile": job["profile"], "profile_data": profile_data,
+                             "attempt_id": job.get("attempt_id")})
     if dispatch:
         _persist_queue()
     return dispatch
@@ -816,6 +894,35 @@ def _drive_deliverables(job_dir: Path) -> list[tuple[str, Path]]:
                 if video_render.is_valid_video(path)]
     final = job_dir / "final.mp4"
     return [("final", final)] if video_render.is_valid_video(final) else []
+
+
+def _verified_delivery_roles(job_dir: Path, remote_files: dict) -> list[tuple[str, Path]]:
+    """Require a completed render, including BOTH halves of a Patreon split.
+
+    An individual export receipt is insufficient: part one can be valid when
+    part two fails. The render manifest is published only after all exports.
+    Already verified remote roles allow interrupted uploads to finish after
+    their corresponding local files have been cleaned up.
+    """
+    records = artifacts.read(job_dir / "render.manifest.json").get("outputs") or []
+    signatures = {Path(row[0]).name: row for row in records
+                  if isinstance(row, list) and row and isinstance(row[0], str)}
+    if set(signatures) == {"final.mp4"}:
+        roles = [("final", job_dir / "final.mp4")]
+    elif set(signatures) == {"final.mp4", "final_part1.mp4", "final_part2.mp4"}:
+        roles = [("part1", job_dir / "final_part1.mp4"),
+                 ("part2", job_dir / "final_part2.mp4")]
+    else:
+        return []
+    for role, path in roles:
+        if not path.exists() and (remote_files.get(role) or {}).get("id"):
+            continue
+        signature = artifacts.signature(path)
+        if (signature != signatures[path.name]
+                or artifacts.read(path.with_suffix(".export.json")).get("outputs") != [signature]
+                or not video_render.is_valid_video(path)):
+            return []
+    return roles
 
 
 def _profile_uses_thumbnail(profile_name: str) -> bool:
@@ -922,22 +1029,32 @@ def _upload_profile_docx(job_id: str, job_dir: Path) -> None:
             remote = DRIVE.find_file(delivery_doc.DOCX_NAME, folder_id)
             if remote:
                 DRIVE.download_to_path(remote["id"], docx_path)
-                titles = delivery_doc.read_titles(docx_path)
+                # Retain the last downloaded version as a local recovery copy.
+                import shutil
+                shutil.copy2(docx_path, docx_path.with_suffix(".previous.docx"))
+                changed = delivery_doc.append_titles([title], docx_path)
             else:
-                titles = []
-            delivery_doc.create([*titles, title], docx_path)
+                delivery_doc.create([title], docx_path)
+                changed = True
             with LOCK:
                 current = JOBS.get(job_id)
                 if current:
                     current["package"] = {
                         "state": "uploading", "path": str(docx_path)}
-            result = DRIVE.upload(
-                docx_path, dest_name=delivery_doc.DOCX_NAME,
-                state_file=docx_dir / ".gdrive-titles.json",
-                content_type=("application/vnd.openxmlformats-officedocument."
-                              "wordprocessingml.document"),
-                folder_id=folder_id,
-                file_id=(remote or {}).get("id"))
+            if remote and not changed:
+                result = remote
+            else:
+                if remote and remote.get("modifiedTime"):
+                    latest = DRIVE.find_file(delivery_doc.DOCX_NAME, folder_id)
+                    if not latest or latest.get("id") != remote["id"] or latest.get("modifiedTime") != remote["modifiedTime"]:
+                        raise storage.DriveError("Word document changed during this update; retry to include the latest edits")
+                result = DRIVE.upload(
+                    docx_path, dest_name=delivery_doc.DOCX_NAME,
+                    state_file=docx_dir / ".gdrive-titles.json",
+                    content_type=("application/vnd.openxmlformats-officedocument."
+                                  "wordprocessingml.document"),
+                    folder_id=folder_id,
+                    file_id=(remote or {}).get("id"))
         with LOCK:
             job = JOBS.get(job_id)
             if job:
@@ -988,15 +1105,26 @@ def _upload_job_deliverables(job_id: str, job_dir: Path) -> None:
         drive = dict(job.get("drive") or {})
         files = dict(drive.get("files") or {})
         job["drive"] = {"state": "uploading", "files": files}
+        requires_validation = bool(job.get("export_validation_required"))
     _append_job_log(job_id, "drive", "Uploading verified deliverable(s) to Drive…")
     _persist_queue()
 
     try:
         with _DRIVE_UPLOAD_LOCK:
             folder_id = DRIVE.ensure_profile_folder(profile_name)
-        for role, path in _drive_deliverables(job_dir):
+        deliverables = (_verified_delivery_roles(job_dir, files) if requires_validation
+                        else _drive_deliverables(job_dir))
+        if requires_validation and not deliverables:
+            raise storage.DriveError("Render is incomplete or changed; every expected final export must be verified before delivery")
+        if not deliverables and not files:
+            raise storage.DriveError("No local deliverable or verified remote file is available")
+        expected_roles = [role for role, _ in deliverables]
+        for role, path in deliverables:
             if role in files and not path.exists():
                 continue
+            if (requires_validation and
+                    artifacts.read(path.with_suffix(".export.json")).get("outputs") != [artifacts.signature(path)]):
+                raise storage.DriveError(f"{path.name} has no matching verified final export; rerender before delivery")
             dest_name = _video_drive_name(title, role)
             with _DRIVE_UPLOAD_LOCK:
                 existing = DRIVE.find_file(dest_name, folder_id)
@@ -1005,10 +1133,22 @@ def _upload_job_deliverables(job_id: str, job_dir: Path) -> None:
                     raise storage.DriveError(
                         f'naming error: "{dest_name}" already exists in the '
                         f"{profile_name} Drive folder")
+
+                def upload_progress(update):
+                    with LOCK:
+                        current = JOBS.get(job_id)
+                        if current:
+                            current["drive"] = {"state": "uploading", "files": dict(files),
+                                                "current_file": role, "expected_files": expected_roles,
+                                                "progress": update}
+                    reporter = getattr(cancel.current(), "fleet_reporter", None)
+                    if reporter:
+                        reporter.uploading({"state": "uploading", "files": dict(files),
+                                             "current_file": role, "progress": update})
                 result = DRIVE.upload(
                     path, dest_name=dest_name,
                     state_file=job_dir / f".gdrive-{role}.json",
-                    folder_id=folder_id, file_id=known_id)
+                    folder_id=folder_id, file_id=known_id, on_progress=upload_progress)
             files[role] = result
             with LOCK:
                 job = JOBS.get(job_id)
@@ -1038,9 +1178,41 @@ def _upload_job_deliverables(job_id: str, job_dir: Path) -> None:
         _persist_queue()
 
 
+def _submission_outcome_uncertain(error: BaseException) -> bool:
+    """Do not replay a billable submission, even through an error wrapper."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, (llm.LLMSubmissionUncertain,
+                              clients.KieSubmissionUncertain, ai33_tasks.SubmissionUncertain,
+                              ai33_tasks.UsageLimitReached)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 def _run_job(job_id: str, inputs: dict, profile: str, *,
              profile_data: dict | None = None,
              fleet_reporter: fleet.FleetReporter | None = None) -> None:
+    try:
+        return _run_job_impl(job_id, inputs, profile, profile_data=profile_data,
+                             fleet_reporter=fleet_reporter)
+    finally:
+        metrics = telemetry.current()
+        if metrics:
+            try:
+                telemetry.save(config.OUTPUT_DIR / job_id / "performance.json")
+                with LOCK:
+                    if job_id in JOBS:
+                        JOBS[job_id]["performance"] = metrics.snapshot()
+                _persist_queue()
+            except OSError:
+                pass
+        cancel.set_current(None)
+
+
+def _run_job_impl(job_id: str, inputs: dict, profile: str, *,
+                  profile_data=None, fleet_reporter=None) -> None:
     job_dir = config.OUTPUT_DIR / job_id
 
     # Ensure status is running (kick_queue usually set this already), and
@@ -1048,11 +1220,19 @@ def _run_job(job_id: str, inputs: dict, profile: str, *,
     # ffmpeg children. Underscore-prefixed so _persist_queue never tries to
     # serialize it.
     token = cancel.CancelToken(job_id)
+    token.profile = profile
+    token.fleet_reporter = fleet_reporter
+    token.metrics = telemetry.Metrics(job_id=job_id, profile=profile,
+                                      worker=config.FLEET_WORKER_ID or "main",
+                                      revision=fleet.application_revision())
     cancel.set_current(token)
     with LOCK:
         if job_id in JOBS:
             JOBS[job_id]["status"] = "running"
             JOBS[job_id]["_cancel"] = token
+            JOBS[job_id]["export_validation_required"] = True
+            if JOBS[job_id].get("_stop_target"):
+                token.cancel()
 
     # JobManager JSONL logging (Wexilo port) is OPTIONAL: it observes the
     # render, it must never be able to kill it. If setup fails the job runs
@@ -1142,7 +1322,11 @@ def _run_job(job_id: str, inputs: dict, profile: str, *,
             JOBS[job_id]["awaiting"] = {"hooks": hooks, "outline": outline}
             JOBS[job_id]["_gate_event"] = event
         _persist_queue()
-        event.wait()
+        # Stop does not publish an approval. Wake periodically to observe
+        # its token instead of leaving the worker parked here forever.
+        while not event.wait(timeout=0.5):
+            token.check()
+        token.check()  # Stop may race with the approval notification.
         with LOCK:
             approval = JOBS[job_id].pop("approval")
             JOBS[job_id].pop("awaiting", None)
@@ -1193,34 +1377,7 @@ def _run_job(job_id: str, inputs: dict, profile: str, *,
                 })
         _persist_queue()
 
-    try:
-        out = orchestrator.run_pipeline(inputs, profile, job_dir, progress,
-                                        gate, voice_gate, beat_progress,
-                                        on_planned, profile_data)
-        if not video_render.is_valid_video(out):
-            raise RuntimeError(
-                f"render did not produce a valid playable video: {out.name}")
-        with LOCK:
-            JOBS[job_id]["status"] = "uploading"
-            JOBS[job_id]["step"] = "drive"
-            JOBS[job_id]["result"] = str(out)
-            JOBS[job_id]["drive"] = {"state": "uploading", "files": {}}
-        _persist_queue()
-        _upload_job_deliverables(job_id, job_dir)
-        with LOCK:
-            if job_id in JOBS:
-                # A Drive failure is an operational retry, not a failed
-                # render. The verified local render remains playable.
-                JOBS[job_id]["status"] = "done"
-                JOBS[job_id]["step"] = "done"
-                JOBS[job_id]["progress_pct"] = 100
-        _persist_queue()
-        _jm_call("manual_progress", 100)
-        _jm_call("manual_finish", 0)
-        if fleet_reporter:
-            with LOCK:
-                fleet_reporter.complete(dict(JOBS.get(job_id, {}).get("drive") or {}))
-    except cancel.JobCancelled:
+    def _finish_stopped() -> None:
         # Deliberately stopped (Stop button, or preempted by a manual
         # retry) — NOT a failure. Everything generated so far stays on disk,
         # so resuming re-uses it instead of re-billing the provider APIs.
@@ -1236,6 +1393,9 @@ def _run_job(job_id: str, inputs: dict, profile: str, *,
                 job["status"] = target
                 job["step"] = target
                 job.pop("_cancel", None)
+                job.pop("awaiting", None)
+                job.pop("_gate_event", None)
+                job.pop("approval", None)
                 job["log"].append({
                     "t": datetime.now().strftime("%H:%M:%S"), "step": "queue",
                     "message": {
@@ -1249,42 +1409,101 @@ def _run_job(job_id: str, inputs: dict, profile: str, *,
         _jm_call("manual_finish", 1)
         if fleet_reporter:
             fleet_reporter.fail("stopped by user")
+
+    try:
+        token.check()
+        out = orchestrator.run_pipeline(inputs, profile, job_dir, progress,
+                                        gate, voice_gate, beat_progress,
+                                        on_planned, profile_data)
+        token.check()
+        token.metrics.context.update(output_duration_seconds=video_render.probe_duration(out),
+                                     encoder=config.gpu_encoder() or "libx264")
+        if not video_render.is_valid_video(out):
+            raise RuntimeError(
+                f"render did not produce a valid playable video: {out.name}")
+        with LOCK:
+            JOBS[job_id]["status"] = "uploading"
+            JOBS[job_id]["step"] = "drive"
+            JOBS[job_id]["result"] = str(out)
+            JOBS[job_id]["drive"] = {"state": "uploading", "files": {}}
+        _persist_queue()
+        if fleet_reporter:
+            fleet_reporter.uploading({"state": "uploading", "files": {}})
+        _kick_queue()  # upload has its own bounded capacity; release compute now
+        with telemetry.span("upload"):
+            _upload_job_deliverables(job_id, job_dir)
+        with LOCK:
+            if job_id in JOBS:
+                # A Drive failure is an operational retry, not a failed
+                # render. The verified local render remains playable.
+                JOBS[job_id]["status"] = "done"
+                JOBS[job_id]["step"] = "done"
+                JOBS[job_id]["progress_pct"] = 100
+        _persist_queue()
+        _jm_call("manual_progress", 100)
+        _jm_call("manual_finish", 0)
+        if fleet_reporter:
+            with LOCK:
+                fleet_reporter.complete(dict(JOBS.get(job_id, {}).get("drive") or {}),
+                                        token.metrics.snapshot())
+    except cancel.JobCancelled:
+        _finish_stopped()
     except Exception as e:  # noqa: BLE001
-        traceback.print_exc()
-        print(f"[job {job_id}] ✗ pipeline failed: {e}")
         # Auto-retry a genuine failure a couple of times before giving up —
         # most failures here are provider outages, and the on-disk caches
         # mean a retry resumes rather than restarting from scratch. The
         # delay matters: an instant retry into a provider that is down just
         # burns an attempt.
         limit = int(config.queue_setting("job_retry_limit", profile) or 0)
+        retry_delay = max(0.0, float(config.queue_setting("retry_delay_seconds", profile) or 60))
+        uncertain = _submission_outcome_uncertain(e)
         with LOCK:
             job = JOBS.get(job_id)
             attempts = int((job or {}).get("retries", 0))
-            will_retry = job is not None and attempts < limit
-            if job is not None:
+            # Stop may arrive while an HTTP call is in flight. The provider
+            # can then raise an ordinary timeout instead of JobCancelled.
+            # Decide under the same lock as Stop's _stop_target update so
+            # an acknowledged Stop never becomes an automatic retry.
+            stopped = token.cancelled or bool((job or {}).get("_stop_target"))
+            will_retry = (job is not None and not stopped and not uncertain
+                          and attempts < limit)
+            if job is not None and not stopped:
                 job.pop("_cancel", None)
                 if will_retry:
                     job["retries"] = attempts + 1
                     job["status"] = "retry_wait"
                     job["step"] = "retry_wait"
                     job["error"] = str(e)
+                    job["retry_at"] = time.time() + retry_delay
+                    job["retry_limit"] = limit
+                    if fleet_reporter:
+                        fleet_reporter.retry_wait(str(e), attempts + 1, limit, job["retry_at"])
                     job["log"].append({
                         "t": datetime.now().strftime("%H:%M:%S"), "step": "queue",
                         "message": (f"Failed ({str(e)[:120]}) — auto-retry "
                                     f"{attempts + 1}/{limit} shortly")})
                 else:
                     job["status"] = "error"
+                    job["step"] = "error"
                     job["error"] = str(e)
                     job["log"].append({
                         "t": datetime.now().strftime("%H:%M:%S"),
-                        "step": "error", "message": str(e)})
+                        "step": "error", "message": (
+                            f"{e} — automatic retry disabled: the provider may "
+                            "already have accepted this paid request; review "
+                            "its result before retrying manually"
+                            if uncertain else str(e))})
+        if stopped:
+            _finish_stopped()
+            return
+        traceback.print_exc()
+        print(f"[job {job_id}] ✗ pipeline failed: {e}")
         _persist_queue()
         _jm_call("manual_log", f"ERROR: {e}")
         _jm_call("manual_finish", 1)
-        if fleet_reporter:
+        if fleet_reporter and not will_retry:
             fleet_reporter.fail(str(e))
-        if will_retry:
+        if will_retry and not fleet_reporter:
             _schedule_retry(job_id)
 
 
@@ -1324,6 +1543,7 @@ def _build_inputs(data: dict, title: str) -> dict:
         "length_chars": length_chars,
         "video_group": video_group,
         "comment_cta": bool(data.get("comment_cta", True)),
+        "rating_cta": bool(data.get("rating_cta", False)),
         "patreon_split": bool(data.get("patreon_split", False)),
         "patreon_cut_from": data.get("patreon_cut_from"),
         "patreon_cut_to": data.get("patreon_cut_to"),
@@ -1790,6 +2010,8 @@ def fleet_heartbeat():
                        "hardware": data.get("hardware") if isinstance(data.get("hardware"), dict) else {},
                        "capacity": capacity,
                        "metrics": data.get("metrics") if isinstance(data.get("metrics"), dict) else {},
+                       "cached_jobs": [str(jid) for jid in (data.get("cached_jobs") or [])
+                                       if str(jid).isdigit()][:200],
                        "jobs": reported,
                        "last_seen": now.isoformat(timespec="seconds")})
         approvals = list(worker.get("approvals") or [])
@@ -1805,8 +2027,12 @@ def fleet_heartbeat():
             job = JOBS.get(job_id)
             if not job or job.get("dispatched_to") != worker_id:
                 continue
+            if job.get("attempt_id") and report.get("attempt_id") != job["attempt_id"]:
+                continue
+            if job.get("status") in ("done", "error") and report.get("status") in ("running", "awaiting_approval"):
+                continue
             state = str(report.get("status") or "running")
-            if state not in ("running", "awaiting_approval", "done", "error"):
+            if state not in ("running", "awaiting_approval", "retry_wait", "uploading", "done", "error"):
                 continue
             # A fleet worker reports a deliberate stop through its terminal
             # error channel ("stopped by user"). Preserve the owner's
@@ -1837,12 +2063,20 @@ def fleet_heartbeat():
             # continue from its cached assets.  Do not keep presenting that
             # old failure (or feeding it to the monitor) once the worker has
             # reported a healthy state again.
-            if state != "error":
+            if state not in ("error", "retry_wait"):
                 job.pop("error", None)
+                job.pop("retry_at", None)
+            if state == "retry_wait":
+                job["error"] = str(report.get("error") or "remote worker will retry")
+                for field in ("retries", "retry_limit", "retry_at"):
+                    if isinstance(report.get(field), (int, float)):
+                        job[field] = report[field]
             if state == "awaiting_approval" and isinstance(report.get("awaiting"), dict):
                 job["awaiting"] = report["awaiting"]
             if isinstance(report.get("drive"), dict):
                 job["drive"] = report["drive"]
+            if isinstance(report.get("performance"), dict):
+                job["performance"] = report["performance"]
             if state == "error":
                 job["error"] = str(report.get("error") or "remote worker failed")
     # A job appearing in this heartbeat acknowledges receipt of any previous
@@ -1851,7 +2085,10 @@ def fleet_heartbeat():
         worker = FLEET_WORKERS[worker_id]
         for report in reported:
             if isinstance(report, dict):
-                worker.get("dispatch", {}).pop(str(report.get("job_id") or ""), None)
+                jid = str(report.get("job_id") or "")
+                pending = worker.get("dispatch", {}).get(jid, {})
+                if not pending.get("attempt_id") or pending.get("attempt_id") == report.get("attempt_id"):
+                    worker.get("dispatch", {}).pop(jid, None)
     # Do not hold _FLEET_LOCK while claiming queue work: approval requests
     # acquire LOCK then _FLEET_LOCK, so reversing that order would deadlock.
         allowed_free = _fleet_capacity(worker)["effective_free"]
@@ -1869,6 +2106,10 @@ def fleet_heartbeat():
     _persist_queue()
     return jsonify({"dispatch": dispatch, "approvals": approvals,
                     "aborts": aborts, "policy": policy,
+                    "acknowledged_attempts": [{"job_id": str(r.get("job_id") or ""),
+                                               "attempt_id": r.get("attempt_id")}
+                                              for r in reported if isinstance(r, dict)
+                                              and r.get("status") in ("done", "error")],
                     "acknowledged_jobs": sorted(set(acknowledged_jobs))})
 
 
@@ -1973,7 +2214,13 @@ def dispatch_to_worker(job_id: str):
                 capacity = _fleet_capacity(worker, _fleet_policy(wid, settings))
                 if (age <= config.FLEET_STALE_SECONDS and capacity["effective_free"] > 0
                         and (not requested or requested == wid)):
-                    choices.append((capacity["effective_free"], wid, worker))
+                    hardware = worker.get("hardware") or {}
+                    render_metrics = (worker.get("metrics") or {}).get("render") or {}
+                    score = (capacity["effective_free"] * 10 +
+                             (20 if hardware.get("hw_encoder") else 0) +
+                             min(16, int(hardware.get("cpu_cores") or 1)) -
+                             int(render_metrics.get("waiting_encoders") or 0) * 5)
+                    choices.append((score, wid, worker))
             if not choices:
                 return jsonify({"error": "selected worker is unavailable, paused, or full"}), 409
             choices.sort(key=lambda item: (-item[0], item[1]))
@@ -1981,6 +2228,8 @@ def dispatch_to_worker(job_id: str):
             job.update(status="dispatched", step="fleet", dispatched_to=worker_id,
                        dispatched_at=datetime.now().isoformat(timespec="seconds"),
                        local_only=False)
+            job["attempt_id"] = secrets.token_hex(12) if int(worker.get("protocol_version", 1)) >= 3 else None
+            spec["attempt_id"] = job.get("attempt_id")
             worker.setdefault("dispatch", {})[job_id] = spec
     _persist_queue()
     return jsonify({"ok": True, "worker_id": worker_id})
@@ -2015,6 +2264,105 @@ def release_worker_dispatch(job_id: str):
     _persist_queue()
     _kick_queue()
     return jsonify({"ok": True, "job_id": job_id, "released_from": worker_id})
+
+
+@app.route("/api/performance/<job_id>")
+def job_performance(job_id):
+    if not _allowed_profile(_job_profile(job_id) or ""):
+        abort(403)
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            abort(404)
+        metrics = getattr(job.get("_cancel"), "metrics", None)
+        result = metrics.snapshot() if metrics else job.get("performance")
+    return jsonify(result or artifacts.read(config.OUTPUT_DIR / job_id / "performance.json"))
+
+
+@app.route("/api/usage/ai33")
+def ai33_usage():
+    rows = [r for r in ai33_tasks.usage() if _allowed_profile(r.get("profile", ""))]
+    totals = {}
+    for row in rows:
+        key = (str(row.get("at", ""))[:10], row.get("profile", ""), row.get("account", "unknown"))
+        total = totals.setdefault(key, {"date": key[0], "profile": key[1], "account": key[2],
+                                       "submitted_characters": 0, "pending_characters": 0, "tasks": 0})
+        if row.get("event") in ("submitted", "succeeded"):
+            total["submitted_characters"] += int(row.get("characters") or 0)
+            total["tasks"] += 1
+        elif row.get("event") == "reserved":
+            total["pending_characters"] += int(row.get("characters") or 0)
+    return jsonify({"timezone": "UTC", "totals": sorted(totals.values(), key=lambda r: r["date"], reverse=True),
+                    "note": "Characters are submitted request amounts, not invoiced credits. Pending amounts include uncertain acceptance.",
+                    "limits": {"daily_characters": int(config.get("AI33_DAILY_CHARACTER_LIMIT", "0")),
+                               "job_characters": int(config.get("AI33_JOB_CHARACTER_LIMIT", "0"))}})
+
+
+@app.route("/broll/<job_id>")
+def broll_review(job_id):
+    if not _allowed_profile(_job_profile(job_id) or ""):
+        abort(403)
+    with LOCK:
+        job = dict(JOBS.get(job_id) or {})
+    if not job:
+        abort(404)
+    root = config.OUTPUT_DIR / job_id
+    plan = artifacts.read(root / "plan.json")
+    rows = []
+    for i, beat in enumerate(plan.get("beats", [])):
+        found = next((p for ext in ("mp4", "jpg", "png")
+                      for p in (root / "assets" / f"beat_{i:03d}.{ext}", root / "assets" / f"beat_{i:03d}_fb.{ext}")
+                      if p.exists()), None)
+        row = artifacts.read(found.with_suffix(".stock.json")) if found else {}
+        rows.append({"index": i, "text": beat.get("text", ""), "query": beat.get("query", ""),
+                     "type": beat.get("type"), "filename": found.name if found else None,
+                     "video": found.suffix == ".mp4" if found else False,
+                     "source": row.get("nid", ""), "description": row.get("meta", "")})
+    return render_template("broll_review.html", job_id=job_id, job=job, beats=rows)
+
+
+@app.route("/broll/<job_id>/asset/<filename>")
+def broll_review_asset(job_id, filename):
+    if not _allowed_profile(_job_profile(job_id) or ""):
+        abort(403)
+    if not re.fullmatch(r"beat_\d{3,6}(?:_fb)?\.(?:mp4|jpg|png)", filename):
+        abort(404)
+    root = (config.OUTPUT_DIR / job_id / "assets").resolve()
+    path = root / filename
+    if path.is_symlink() or not path.is_file():
+        abort(404)
+    return send_file(path, conditional=True)
+
+
+@app.route("/api/broll/<job_id>/<int:index>", methods=["POST"])
+def broll_replace(job_id, index):
+    if not _allowed_profile(_job_profile(job_id) or ""):
+        abort(403)
+    query = str((request.get_json(silent=True) or {}).get("query") or "").strip()
+    if not query or len(query) > 250:
+        return jsonify({"error": "Enter a search query of 1–250 characters"}), 400
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            abort(404)
+        if job.get("status") not in ("paused", "error") or job.get("dispatched_to"):
+            return jsonify({"error": "Pause the local job before replacing footage"}), 409
+        path = config.OUTPUT_DIR / job_id / "plan.json"
+        plan = artifacts.read(path)
+        beats = plan.get("beats", [])
+        if index >= len(beats) or beats[index].get("type") not in ("stock", "stock_image"):
+            return jsonify({"error": "Only a stock-footage or stock-photo beat can be replaced here"}), 400
+        beats[index]["query"] = query
+        for suffix in (".stock.json", "_fb.stock.json"):
+            previous = artifacts.read(path.parent / "assets" / f"beat_{index:03d}{suffix}")
+            if previous.get("nid"):
+                rejected = beats[index].setdefault("rejected_stock_ids", [])
+                if previous["nid"] not in rejected:
+                    rejected.append(previous["nid"])
+        # A per-beat revision supports retrying the same query deliberately.
+        beats[index]["selection_revision"] = secrets.token_hex(8)
+        artifacts.write(path, plan)
+    return jsonify({"ok": True, "message": "Search saved. Resume the job to replace this beat; narration stays cached."})
 
 
 @app.route("/api/jobs")
@@ -2082,6 +2430,11 @@ def api_jobs():
             "retries": j.get("retries", 0),
             "dispatched_to": j.get("dispatched_to"),
             "dispatch_pending": jid in pending_dispatches,
+            "drive": j.get("drive") or {},
+            "performance": (getattr(j.get("_cancel"), "metrics", None).snapshot()
+                            if getattr(j.get("_cancel"), "metrics", None) else j.get("performance")),
+            "queue_reason": ("Waiting for preparation capacity" if j.get("status") == "queued"
+                             else "Waiting for worker acknowledgement" if jid in pending_dispatches else ""),
             # Drives the Stop button: only a job with a live cancel token
             # can actually be stopped, and retry_wait can be pulled out of
             # its wait.
@@ -2172,10 +2525,13 @@ def stop_running(job_id: str):
         job = JOBS.get(job_id)
         if not job:
             return jsonify({"error": "unknown job"}), 404
-        if job.get("status") == "retry_wait":
+        if job.get("status") == "retry_wait" and not job.get("dispatched_to"):
             # Waiting to auto-retry — no thread to stop, just take it out.
             job["status"] = target
             job["step"] = target
+            reporter = job.get("_fleet_reporter")
+            if reporter:
+                reporter.fail("stopped by user")
         elif job.get("dispatched_to") and job.get("_cancel") is None:
             remote = job["dispatched_to"]
             with _FLEET_LOCK:
@@ -2276,6 +2632,31 @@ def queue_pause():
         if not paused:
             _kick_queue()  # resume immediately rather than waiting for an event
     return jsonify({"paused": bool(config.queue_setting("queue_paused"))})
+
+
+@app.route("/api/queue/profile/<profile>/pause", methods=["POST"])
+def pause_profile_queue(profile: str):
+    """Pause pending work for one profile without halting other channels."""
+    if not _allowed_profile(profile):
+        abort(403)
+    data = request.get_json(silent=True) or {}
+    paused = bool(data.get("paused", True))
+    changed = []
+    with LOCK:
+        for job_id, job in JOBS.items():
+            if job.get("profile") != profile:
+                continue
+            if paused and job.get("status") in ("queued", "retry_wait"):
+                job["status"] = "paused"
+                job["step"] = "paused"
+                job["log"].append({
+                    "t": datetime.now().strftime("%H:%M:%S"),
+                    "step": "queue", "message": "Paused with profile queue",
+                })
+                changed.append(job_id)
+    _persist_queue()
+    return jsonify({"ok": True, "profile": profile, "paused": paused,
+                    "paused_jobs": changed})
 
 
 @app.route("/api/status/<job_id>")
@@ -2626,7 +3007,9 @@ THUMB_DIR = config.ROOT / "thumbnails"
 THUMB_TEMPLATES_DIR = THUMB_DIR / "templates"
 THUMB_OUT_DIR = THUMB_DIR / "generated"
 THUMB_UPLOADS_DIR = THUMB_DIR / "uploads"
-for _d in (THUMB_TEMPLATES_DIR, THUMB_OUT_DIR, THUMB_UPLOADS_DIR):
+THUMB_REFERENCES_DIR = THUMB_DIR / "references"
+for _d in (THUMB_TEMPLATES_DIR, THUMB_OUT_DIR, THUMB_UPLOADS_DIR,
+           THUMB_REFERENCES_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 _IMG_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
@@ -2674,6 +3057,75 @@ def _thumbnail_character(profile_name: str, inputs: dict) -> tuple[Path | None, 
     # Philosophy profiles without a corner figure still get a safe default.
     fallback = config.ROOT / "figures/murphy.png"
     return (fallback if fallback.exists() else None), (cited or "Joseph Murphy")
+
+
+def _thumbnail_reference_folder(character_name: str) -> Path | None:
+    reference_sets = {"joseph murphy": "joseph-murphy"}
+    folder_name = reference_sets.get(" ".join(character_name.casefold().split()))
+    return THUMB_REFERENCES_DIR / folder_name if folder_name else None
+
+
+def _thumbnail_reference_templates(character_name: str) -> list[Path]:
+    """Approved style examples for a specific displayed person.
+
+    These are full thumbnails, not portrait cutouts: the remote editor uses
+    the chosen example as image 1 (composition/style) and the clean figure as
+    image 2 (identity). Keeping the mapping explicit prevents Murphy's visual
+    language from leaking into Jung, Freud, or host thumbnails.
+    """
+    folder = _thumbnail_reference_folder(character_name)
+    if folder is None:
+        return []
+    return sorted(
+        path for path in folder.iterdir()
+        if (path.is_file()
+            and path.suffix.casefold() in (".png", ".jpg", ".jpeg", ".webp"))
+    ) if folder.exists() else []
+
+
+def _thumbnail_reference_portraits(character_name: str) -> list[Path]:
+    """High-resolution identity references, kept separate from layouts."""
+    root = _thumbnail_reference_folder(character_name)
+    folder = root / "portraits" if root is not None else None
+    if folder is None or not folder.exists():
+        return []
+    return sorted(
+        path for path in folder.iterdir()
+        if (path.is_file()
+            and path.suffix.casefold() in (".png", ".jpg", ".jpeg", ".webp"))
+    )
+
+
+def _thumbnail_template_for(job_id: str, generation: int,
+                            character_name: str,
+                            fallback: Path | None) -> tuple[Path | None, str | None]:
+    """Rotate reproducibly through one person's approved reference pool."""
+    references = _thumbnail_reference_templates(character_name)
+    if not references:
+        return fallback, None
+    seed = sum(f"{job_id}:{max(0, generation)}".encode("utf-8"))
+    selected = references[seed % len(references)]
+    try:
+        label = selected.relative_to(config.ROOT).as_posix()
+    except ValueError:
+        label = selected.name
+    return selected, label
+
+
+def _thumbnail_portrait_for(job_id: str, generation: int,
+                            character_name: str,
+                            fallback: Path | None) -> tuple[Path | None, str | None]:
+    """Rotate through approved identity portraits independently of layout."""
+    references = _thumbnail_reference_portraits(character_name)
+    if not references:
+        return fallback, None
+    seed = sum(f"{job_id}:{max(0, generation)}:portrait".encode("utf-8"))
+    selected = references[seed % len(references)]
+    try:
+        label = selected.relative_to(config.ROOT).as_posix()
+    except ValueError:
+        label = selected.name
+    return selected, label
 
 
 def _thumbnail_language(profile_name: str, inputs: dict) -> str:
@@ -2829,9 +3281,17 @@ def _thumbnail_image_task(job_id: str) -> None:
         localized_title = str(thumb_state.get("localized_title") or "").strip()
         language = str(thumb_state.get("language") or
                        _thumbnail_language(profile_name, inputs)).strip()
-    character_path, default_name = _thumbnail_character(profile_name, inputs)
+        try:
+            generation = max(0, int(thumb_state.get("generation") or 0))
+        except (TypeError, ValueError):
+            generation = 0
+    default_character, default_name = _thumbnail_character(profile_name, inputs)
     show_name = _thumbnail_shows_name(profile_name)
-    template_path = next(iter(THUMB_TEMPLATES_DIR.glob("default.*")), None)
+    default_template = next(iter(THUMB_TEMPLATES_DIR.glob("default.*")), None)
+    template_path, reference_template = _thumbnail_template_for(
+        job_id, generation, default_name, default_template)
+    character_path, reference_portrait = _thumbnail_portrait_for(
+        job_id, generation, default_name, default_character)
     try:
         if not template_path:
             raise RuntimeError("save a default thumbnail template on the Thumbnails page")
@@ -2853,6 +3313,9 @@ def _thumbnail_image_task(job_id: str) -> None:
                     "state": "image_ready", "words": words,
                     "localized_title": localized_title,
                     "language": language,
+                    "generation": generation,
+                    "reference_template": reference_template,
+                    "reference_portrait": reference_portrait,
                     "thumbnail_id": thumbnail_id,
                     "url": f"/api/thumbnail/file/{thumbnail_id}",
                 }
@@ -2866,6 +3329,9 @@ def _thumbnail_image_task(job_id: str) -> None:
                                     "words": words,
                                     "localized_title": localized_title,
                                     "language": language,
+                                    "generation": generation,
+                                    "reference_template": reference_template,
+                                    "reference_portrait": reference_portrait,
                                     "error": str(exc)}
     _persist_queue()
 
@@ -2908,6 +3374,7 @@ def approve_thumbnail_words(job_id: str):
         job["thumbnail"] = {
             "state": "generating_image", "words": words,
             "localized_title": localized_title[:220], "language": language,
+            "generation": 0,
             "words_approved_at": datetime.now().isoformat(timespec="seconds"),
         }
     _persist_queue()
@@ -2963,12 +3430,19 @@ def regenerate_thumbnail_image(job_id: str):
         state = dict(job.get("thumbnail") or {})
         if not state.get("words"):
             return jsonify({"error": "approve thumbnail words first"}), 409
+        try:
+            next_generation = max(0, int(state.get("generation") or 0)) + 1
+        except (TypeError, ValueError):
+            next_generation = 1
         job["thumbnail"] = {
             "state": "generating_image", "words": state["words"],
             "localized_title": state.get("localized_title") or
                                job.get("publication_title") or job.get("title"),
             "language": state.get("language") or
                         _thumbnail_language(job["profile"], job.get("inputs") or {}),
+            # Every regeneration deliberately advances to the next approved
+            # reference rather than producing a near-duplicate of the last.
+            "generation": next_generation,
         }
     _persist_queue()
     threading.Thread(target=_thumbnail_image_task, args=(job_id,), daemon=True,

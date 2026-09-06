@@ -335,6 +335,10 @@ LLM_API_KEY = get("LLM_API_KEY")
 LLM_BASE_URL = get("LLM_BASE_URL").rstrip("/")
 LLM_CHAT_PATH = get("LLM_CHAT_PATH", "/v1/chat/completions")
 LLM_MODEL = get("LLM_MODEL", "claude-sonnet-5")
+# Kie script endpoints are synchronous and do not provide an idempotency key.
+# Keep their paid requests serialized by default: a response timeout cannot be
+# safely replayed, whereas a short local wait is harmless and predictable.
+LLM_MAX_CONCURRENT_REQUESTS = max(1, get_int("LLM_MAX_CONCURRENT_REQUESTS", 1))
 
 # ── GPT 5.6 via kie (alternative script model) ──────────────────
 LLM_GPT_API_KEY = get("LLM_GPT_API_KEY")
@@ -373,14 +377,15 @@ KIE_VIDEO_API_KEY = get("KIE_VIDEO_API_KEY") or get("KIE_API_KEY")
 # Last-resort AI stills are useful, but an outage in both stock providers must
 # not turn every beat in a long video into an uncapped paid Kie task. Profiles
 # may override this with video.kie_fallback_image_limit.
-KIE_FALLBACK_IMAGE_LIMIT = get_int("KIE_FALLBACK_IMAGE_LIMIT", 3)
+KIE_FALLBACK_IMAGE_LIMIT = get_int("KIE_FALLBACK_IMAGE_LIMIT", 15)
 
 # ── Thumbnail tool (standalone — separate from the video pipeline) ──
 # Own API key so its spend is tracked apart from video-gen kie credits.
 KIE_THUMBNAIL_API_KEY = get("KIE_THUMBNAIL_API_KEY") or get("KIE_API_KEY")
-KIE_THUMBNAIL_MODEL = get("KIE_THUMBNAIL_MODEL", "gpt-image-2-image-to-image")
-# gpt-image-2 has no "quality" field, only resolution (1K/2K/4K) — "medium"
-# is mapped to 2K here; override via .env if a different tier is wanted.
+KIE_THUMBNAIL_MODEL = get("KIE_THUMBNAIL_MODEL", "nano-banana-2-lite")
+# Legacy thumbnail models such as gpt-image-2 accept a resolution field.
+# Nano Banana 2 Lite is fixed at 1K, so thumbnail.generate omits this setting
+# for that model.
 KIE_THUMBNAIL_RESOLUTION = get("KIE_THUMBNAIL_RESOLUTION", "2K")
 
 # ── HeyGen (the on-camera host) ─────────────────────────────────
@@ -410,6 +415,13 @@ PIXABAY_API_KEY = get("PIXABAY_API_KEY")
 PEXELS_API_KEY = get("PEXELS_API_KEY")
 # separate key for image search (spreads the per-key rate limit)
 PIXABAY_IMAGE_API_KEY = get("PIXABAY_IMAGE_API_KEY") or get("PIXABAY_API_KEY")
+# Private, shared stock cache under output/.stock-cache. Paid/generated
+# assets are not shared here. Search responses survive restarts; Pixabay
+# requires caching repeated searches for at least 24 hours.
+STOCK_CACHE_MAX_BYTES = max(0, get_int("STOCK_CACHE_MAX_BYTES", 2 * 1024 ** 3))
+STOCK_CACHE_TTL_SECONDS = max(0, get_int("STOCK_CACHE_TTL_SECONDS", 7 * 86400))
+STOCK_SEARCH_CACHE_TTL_SECONDS = max(0, get_int("STOCK_SEARCH_CACHE_TTL_SECONDS", 86400))
+STOCK_SEARCH_CACHE_MAX_ENTRIES = max(1, get_int("STOCK_SEARCH_CACHE_MAX_ENTRIES", 1024))
 
 # ── Captions ────────────────────────────────────────────────────
 CAPTION_FONT_FILE = get("CAPTION_FONT_FILE")

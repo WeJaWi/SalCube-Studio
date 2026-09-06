@@ -13,17 +13,19 @@ Beats are concatenated, then the music bed is mixed low underneath.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import cancel, captions, config, waveform
+from . import artifacts, cancel, captions, config, resources, telemetry, waveform
 
 # Hard ceiling for a single ffmpeg call. A normal beat composite uses well
 # under 1 GB; this only exists to catch filtergraph pathologies (a fast
@@ -33,6 +35,19 @@ from . import cancel, captions, config, waveform
 # seconds and gets killed with a clear error instead of taking the OS down.
 _RSS_CEILING_MB = 3072
 _WALLCLOCK_CEILING_S = 1800
+
+# A render asks about the same narration/composite repeatedly (validation,
+# resume, stitching, final export). Share one metadata probe, but never trust
+# cached metadata after a file is rewritten or atomically replaced. Keep this
+# bounded because the controller can stay alive across thousands of jobs.
+_PROBE_CACHE_LIMIT = 512
+_PROBE_CACHE: OrderedDict = OrderedDict()
+_PROBE_CACHE_LOCK = threading.Lock()
+_PROBE_ENTRIES = (
+    "stream=index,codec_name,profile,codec_type,width,height,pix_fmt,"
+    "r_frame_rate,avg_frame_rate,start_time,duration,bit_rate,"
+    "sample_rate,channels:format=nb_streams,start_time,duration"
+)
 
 
 def ensure_ffmpeg() -> None:
@@ -50,6 +65,11 @@ def _rss_mb(pid: int) -> float:
 
 
 def _run(cmd: List[str], *, wallclock_s: Optional[float] = None) -> None:
+    with resources.encode_slot(), telemetry.span("ffmpeg"):
+        return _run_process(cmd, wallclock_s=wallclock_s)
+
+
+def _run_process(cmd: List[str], *, wallclock_s: Optional[float] = None) -> None:
     # -nostats: progress lines would otherwise drown real errors in stderr
     cmd = [cmd[0], "-hide_banner", "-nostats", *cmd[1:]]
     # Cancellation rides a thread-local rather than a parameter, so all ~14
@@ -64,12 +84,17 @@ def _run(cmd: List[str], *, wallclock_s: Optional[float] = None) -> None:
     watchdog_tripped: List[str] = []
     wall_limit = float(wallclock_s if wallclock_s is not None
                        else _WALLCLOCK_CEILING_S)
+    process_finished = threading.Event()
+    metrics = telemetry.current()
 
     def _watch() -> None:
         start = time.monotonic()
-        while proc.poll() is None:
+        while not process_finished.is_set() and proc.poll() is None:
             elapsed = time.monotonic() - start
             rss = _rss_mb(proc.pid)
+            if metrics:
+                with metrics.lock:
+                    metrics.peak_rss_mb = max(metrics.peak_rss_mb, rss)
             if rss > _RSS_CEILING_MB:
                 watchdog_tripped.append(
                     f"memory runaway: {rss:.0f} MB > {_RSS_CEILING_MB} MB "
@@ -83,13 +108,17 @@ def _run(cmd: List[str], *, wallclock_s: Optional[float] = None) -> None:
                     f"{wall_limit:.0f}s ceiling — killed")
                 proc.kill()
                 return
-            time.sleep(1)
+            # Wake immediately when FFmpeg finishes. A fixed sleep plus the
+            # join below used to impose up to a second of idle time after
+            # every short encode/precomputation in a many-beat job.
+            process_finished.wait(1)
 
     t = threading.Thread(target=_watch, daemon=True)
     t.start()
     try:
         _, stderr = proc.communicate()
     finally:
+        process_finished.set()
         if tok is not None:
             tok.unregister(proc)
     t.join(timeout=5)
@@ -112,15 +141,71 @@ def _run(cmd: List[str], *, wallclock_s: Optional[float] = None) -> None:
                            "\n\n" + (stderr or "")[-1600:])
 
 
-def probe_duration(path: Path) -> float:
+def _probe_signature(path: Path) -> Optional[Tuple[int, int, int, int, int]]:
     try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-            capture_output=True, text=True)
-        return float(out.stdout.strip())
-    except Exception:
+        stat = path.stat()
+        return (stat.st_dev, stat.st_ino, stat.st_size,
+                stat.st_mtime_ns, stat.st_ctime_ns)
+    except OSError:
+        return None
+
+
+def _probe_media(path: Path) -> Dict[str, Any]:
+    """Probe stream/container metadata once per unchanged local file.
+
+    Failed probes are not cached: an interrupted download may be retried at
+    the same path. Both before/after signatures must match before publishing
+    a result, so an in-progress writer cannot poison later resume checks.
+    The lock protects only the small LRU, never the subprocess; unrelated
+    parallel beat workers can continue probing independently.
+    """
+    path = Path(path)
+    key = str(path.absolute())
+    signature = _probe_signature(path)
+    if signature is None:
+        return {}
+    with _PROBE_CACHE_LOCK:
+        cached = _PROBE_CACHE.get(key)
+        if cached and cached[0] == signature:
+            _PROBE_CACHE.move_to_end(key)
+            return cached[1]
+        _PROBE_CACHE.pop(key, None)
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", _PROBE_ENTRIES,
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return {}
+        data = json.loads(result.stdout or "{}")
+        if not isinstance(data, dict) or not data:
+            return {}
+        if not isinstance(data.get("format", {}), dict) or not isinstance(
+                data.get("streams", []), list) or any(
+                not isinstance(item, dict) for item in data.get("streams", [])):
+            return {}
+        if _probe_signature(path) != signature:
+            return {}
+        with _PROBE_CACHE_LOCK:
+            _PROBE_CACHE[key] = (signature, data)
+            _PROBE_CACHE.move_to_end(key)
+            while len(_PROBE_CACHE) > _PROBE_CACHE_LIMIT:
+                _PROBE_CACHE.popitem(last=False)
+        return data
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _duration_value(value: Any) -> float:
+    try:
+        duration = float(value)
+        return duration if math.isfinite(duration) and duration > 0 else 0.0
+    except (TypeError, ValueError):
         return 0.0
+
+
+def probe_duration(path: Path) -> float:
+    return _duration_value(_probe_media(path).get("format", {}).get("duration"))
 
 
 def probe_stream_duration(path: Path, stream: str) -> float:
@@ -130,13 +215,20 @@ def probe_stream_duration(path: Path, stream: str) -> float:
     simply the longest stream. Final delivery validation needs both values.
     """
     selector = {"video": "v:0", "audio": "a:0"}.get(stream, stream)
+    if selector in ("v:0", "a:0"):
+        kind = "video" if selector == "v:0" else "audio"
+        for item in _probe_media(path).get("streams", []):
+            if item.get("codec_type") == kind:
+                return _duration_value(item.get("duration"))
+        return 0.0
+    # Preserve support for arbitrary FFprobe selectors for external callers.
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", selector,
              "-show_entries", "stream=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
             capture_output=True, text=True, timeout=30)
-        return float((out.stdout or "").strip())
+        return _duration_value((out.stdout or "").strip())
     except Exception:  # noqa: BLE001
         return 0.0
 
@@ -175,23 +267,10 @@ def is_valid_video(path: Path, min_duration: float = 1.0) -> bool:
 def probe_video_size(path: Path) -> Tuple[int, int, float]:
     """Return (width, height, fps) for the first video stream."""
     try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height,r_frame_rate",
-             "-of", "csv=p=0:s=x", str(path)],
-            capture_output=True, text=True, timeout=30)
-        # e.g. "1920x1080x30/1" or "1920x1080x30000/1001"
-        parts = (out.stdout or "").strip().split("x")
-        w = int(parts[0]) if parts else 1920
-        h = int(parts[1]) if len(parts) > 1 else 1080
-        fps = 30.0
-        if len(parts) > 2 and parts[2]:
-            fr = parts[2]
-            if "/" in fr:
-                a, b = fr.split("/", 1)
-                fps = float(a) / max(float(b), 1e-6)
-            else:
-                fps = float(fr)
+        video = next(item for item in _probe_media(path).get("streams", [])
+                     if item.get("codec_type") == "video")
+        w, h = int(video["width"]), int(video["height"])
+        fps = _rate_value(video.get("r_frame_rate")) or 30.0
         return max(w, 2), max(h, 2), max(fps, 1.0)
     except Exception:  # noqa: BLE001
         return 1920, 1080, 30.0
@@ -461,17 +540,7 @@ def _rate_value(value: Any) -> float:
 
 
 def _probe_export_contract(path: Path) -> Dict[str, Any]:
-    try:
-        result = subprocess.run([
-            "ffprobe", "-v", "error", "-show_entries",
-            "stream=index,codec_name,profile,codec_type,width,height,pix_fmt,"
-            "r_frame_rate,avg_frame_rate,start_time,duration,bit_rate,"
-            "sample_rate,channels:format=nb_streams,start_time,duration",
-            "-of", "json", str(path),
-        ], capture_output=True, text=True, timeout=60)
-        return json.loads(result.stdout or "{}") if result.returncode == 0 else {}
-    except Exception:  # noqa: BLE001
-        return {}
+    return _probe_media(path)
 
 
 def _validate_spotify_export(path: Path, fps: int) -> Dict[str, Any]:
@@ -525,9 +594,14 @@ def _validate_spotify_export(path: Path, fps: int) -> Dict[str, Any]:
     return {"video": video, "audio": audio, "format": data.get("format", {})}
 
 
+@telemetry.timed("final_export")
 def encode_final_export(path: Path, workdir: Path, fps: int = 30,
                         quality: str = "balanced", gpu: bool = False,
-                        log: Callable[[str], None] = lambda *_: None) -> Path:
+                        log: Callable[[str], None] = lambda *_: None, *,
+                        popup: Optional[Path] = None,
+                        popup_windows: Optional[List[Tuple[float, float]]] = None,
+                        popup_width: int = 420, popup_margin: int = 28,
+                        allow_silent: bool = False) -> Path:
     """Run VidForge's full, Spotify-safe final encoding pass.
 
     The stitched MP4 is an intermediate, never the deliverable. Its complete
@@ -569,14 +643,23 @@ def encode_final_export(path: Path, workdir: Path, fps: int = 30,
             "-af", audio_filter, "-c:a", "pcm_s16le", "-ar", "44100",
             "-ac", "2", str(audio_master),
         ], wallclock_s=max(1200.0, video_dur * 0.25 + 300.0))
-    except RuntimeError:
-        # Spotify requires an audio track; preserve a structurally valid export
-        # even for a damaged/missing intermediate track by supplying silence.
+    except RuntimeError as exc:
+        if not allow_silent:
+            audio_master.unlink(missing_ok=True)
+            raise RuntimeError("Final narration extraction failed; source media was retained. "
+                               "Export stopped to prevent a silent deliverable.") from exc
         _run([
             "ffmpeg", "-y", "-f", "lavfi", "-i",
             "anullsrc=r=44100:cl=stereo", "-t", f"{video_dur:.6f}",
             "-c:a", "pcm_s16le", str(audio_master),
         ], wallclock_s=max(1200.0, video_dur * 0.2 + 300.0))
+
+    if not allow_silent:
+        try:
+            _validate_narration_master(audio_master, video_dur, log)
+        except Exception:
+            audio_master.unlink(missing_ok=True)
+            raise
 
     scale = ",scale=1280:720:flags=lanczos" if quality == "fast720" else ""
     video_filter = (
@@ -590,10 +673,24 @@ def encode_final_export(path: Path, workdir: Path, fps: int = 30,
              "720p fast" if quality == "fast720" else "1080p balanced")
     log(f"  VidForge final encode: {label} · {encoder or 'libx264'} · "
         "H.264 High + AAC-LC 192k")
+    extra_inputs: List[str] = []
+    video_args = ["-map", "0:v:0", "-vf", video_filter]
+    windows = resolve_popup_windows(video_dur, popup_windows) if popup_windows else []
+    if popup and popup.exists() and windows:
+        extra_inputs = ["-i", str(popup)]
+        enable = "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in windows)
+        # Overlay before normalization preserves the previous 1080p popup
+        # geometry when the final export is subsequently reduced to 720p.
+        graph = (f"[2:v]scale={popup_width}:-1,format=rgba[pop];"
+                 f"[0:v][pop]overlay=W-w-{popup_margin}:H-h-{popup_margin}:"
+                 f"enable='{enable}'[branded];[branded]{video_filter}[final]")
+        video_args = ["-filter_complex", graph, "-map", "[final]"]
+        log("  Popup composited during final export (one video pass saved)")
     try:
-        _run([
+        with resources.reserve_disk(workdir, estimated_extra):
+            _run([
             "ffmpeg", "-y", "-i", str(path), "-i", str(audio_master),
-            "-map", "0:v:0", "-map", "1:a:0", "-vf", video_filter,
+            *extra_inputs, *video_args, "-map", "1:a:0",
             "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
             *_vidforge_final_encode_args(quality=quality, gpu=gpu),
             "-profile:v", "high", "-r", str(fps), "-fps_mode", "cfr",
@@ -614,6 +711,36 @@ def encode_final_export(path: Path, workdir: Path, fps: int = 30,
         encoded.unlink(missing_ok=True)
         audio_master.unlink(missing_ok=True)
     return path
+
+
+def _validate_narration_master(path: Path, expected: float, log) -> None:
+    """Inspect decoded PCM; codec checks alone cannot detect lost narration."""
+    import array
+    import wave
+    silent = longest = 0
+    active = False
+    with wave.open(str(path), "rb") as audio:
+        rate = audio.getframerate()
+        actual = audio.getnframes() / rate
+        if abs(actual - expected) > 0.1:
+            raise RuntimeError("Narration master duration does not cover the video")
+        while True:
+            cancel.check()
+            data = audio.readframes(rate)
+            if not data:
+                break
+            values = array.array("h", data)
+            if sys.byteorder != "little":
+                values.byteswap()
+            audible = any(abs(sample) > 32 for sample in values)
+            active = active or audible
+            silent = 0 if audible else silent + 1
+            longest = max(longest, silent)
+    if not active:
+        raise RuntimeError("Narration master is silent; export stopped before upload")
+    if longest >= 30:
+        log(f"  Audio review: {longest}s silent section; check intentional pauses")
+        telemetry.count("long_silent_sections")
 
 
 def _sub_style(margin_r: int = 25) -> str:
@@ -1260,10 +1387,66 @@ def concat_with_music(clips: List[Path], music: Optional[Path], out: Path,
 MAX_XFADE_INPUTS = 10
 
 
+def _xfade_cache_contract(clips: List[Path], trans_seconds: float,
+                          trans_types: List[str], gpu: bool
+                          ) -> Optional[Dict[str, Any]]:
+    sources = []
+    for path in clips:
+        signature = _probe_signature(path)
+        if signature is None:
+            return None
+        sources.append({"path": str(path.absolute()),
+                        "signature": list(signature)})
+    return {"version": 1, "sources": sources,
+            "seconds": trans_seconds, "types": trans_types, "gpu": gpu}
+
+
+def _reusable_xfade(path: Path, contract: Optional[Dict[str, Any]]) -> bool:
+    if contract is None:
+        return False
+    try:
+        saved = json.loads(path.with_suffix(".cache.json").read_text())
+        signature = _probe_signature(path)
+        return (saved.get("contract") == contract and signature is not None
+                and saved.get("output_signature") == list(signature)
+                and is_valid_video(path))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _save_xfade_contract(path: Path, contract: Optional[Dict[str, Any]]) -> None:
+    signature = _probe_signature(path)
+    if contract is None or signature is None:
+        return
+    manifest = path.with_suffix(".cache.json")
+    temporary = manifest.with_suffix(".json.tmp")
+    try:
+        temporary.write_text(json.dumps({"contract": contract,
+                                         "output_signature": list(signature)}))
+        os.replace(temporary, manifest)
+    except OSError:
+        # Optional resume optimization; a failed sidecar write must not turn
+        # a successfully encoded group into a failed render.
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _xfade_chain(clips: List[Path], music: Optional[Path], out: Path,
                  trans_seconds: float, trans_types: List[str],
                  music_volume: float = 0.15, crf: Optional[int] = None,
                  gpu: bool = False) -> None:
+    if len(clips) == 1:
+        # A one-beat Patreon half has no transition. Besides saving an encode,
+        # this avoids mapping nonexistent filter outputs named "[0:v]"/"[0:a]".
+        if music and music.exists():
+            concat_with_music(clips, music, out, out.parent, music_volume)
+        elif clips[0].resolve() != out.resolve():
+            # No remux is necessary: preserve the exact video/audio payload
+            # and timestamps, including the segment's AAC timing metadata.
+            shutil.copy2(clips[0], out)
+        return
     durs = [probe_duration(c) for c in clips]
     inputs: List[str] = []
     for c in clips:
@@ -1336,21 +1519,31 @@ def crossfade_concat(clips: List[Path], music: Optional[Path], out: Path,
                 continue
             log(f"  transition level {level + 1}, group {gi + 1}/{len(groups)} "
                 f"({len(group)} segments)")
-            # Keep first-level names compatible with existing cached jobs, so
-            # a failed final assembly can resume without rebuilding hours of
-            # already-completed transition groups.
+            # Keep existing file names, but reuse only when a sidecar proves
+            # these exact inputs/settings produced the cached group. Both
+            # Patreon halves share this workdir: mere MP4 validity previously
+            # allowed a retry of part 1 to adopt part 2's leftover groups.
             inter = (workdir / f"xseg_{gi:02d}.mp4" if level == 0
                      else workdir / f"xseg_l{level}_{gi:02d}.mp4")
             exact_types = [
                 trans_types[(group[i][2] - 1) % len(trans_types)]
                 for i in range(len(group) - 1)
             ]
-            if is_valid_video(inter):
+            group_clips = [item[0] for item in group]
+            contract = _xfade_cache_contract(group_clips, trans_seconds,
+                                             exact_types, gpu)
+            if _reusable_xfade(inter, contract):
                 log(f"  reusing cached {inter.name}")
             else:
                 inter.unlink(missing_ok=True)
-                _xfade_chain([item[0] for item in group], None, inter,
+                inter.with_suffix(".cache.json").unlink(missing_ok=True)
+                _xfade_chain(group_clips, None, inter,
                              trans_seconds, exact_types, crf=18, gpu=gpu)
+                # If a source changed while encoding, don't publish a cache
+                # entry claiming that the old input version produced it.
+                if contract == _xfade_cache_contract(group_clips, trans_seconds,
+                                                      exact_types, gpu):
+                    _save_xfade_contract(inter, contract)
             intermediates.append(inter)
             reduced.append((inter, group[0][1], group[-1][2]))
         segments = reduced
@@ -1365,6 +1558,7 @@ def crossfade_concat(clips: List[Path], music: Optional[Path], out: Path,
                  final_types, music_volume, gpu=gpu)
     for path in intermediates:
         path.unlink(missing_ok=True)
+        path.with_suffix(".cache.json").unlink(missing_ok=True)
 
 
 def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
@@ -1407,6 +1601,29 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
     export_quality = str(v.get("export_quality") or "balanced")
     if export_quality not in ("high", "balanced", "fast720"):
         export_quality = "balanced"
+    render_contract = {"version": 2, "video": v, "gpu": gpu_encode,
+                       "beats": [{k: str(value) for k, value in b.items()} for b in beats],
+                       "sources": [[artifacts.signature(b.get(k)) for k in
+                                    ("audio", "srt", "media", "host_media")] for b in beats],
+                       "assets": [artifacts.signature(p) for p in (overlay, badge, popup, music)],
+                       "popup_windows": popup_windows, "popup_full": popup_full_duration,
+                       "split": cut_after_beat}
+    figure_source = (v.get("figure") or {}).get("image")
+    if figure_source:
+        p = Path(figure_source)
+        render_contract["figure_source"] = artifacts.signature(p if p.is_absolute() else config.ROOT / p)
+    if cut_after_beat is not None:
+        render_contract["end_clip"] = artifacts.signature(default_patreon_end_clip())
+    render_manifest = workdir / "render.manifest.json"
+    final_outputs = [out_path]
+    if cut_after_beat is not None and 0 <= cut_after_beat < len(beats)-1:
+        final_outputs += [out_path.parent / "final_part1.mp4", out_path.parent / "final_part2.mp4"]
+    if artifacts.matches(render_manifest, render_contract, final_outputs):
+        for path in final_outputs:
+            _validate_spotify_export(path, fps)
+        log("  Reusing verified final export with matching inputs")
+        telemetry.count("final_export_cache_hits")
+        return out_path
     ken_burns = bool(v.get("ken_burns", True))
     ov_cfg = v.get("overlay", {}) or {}
     ov_opacity = float(ov_cfg.get("opacity", 0.35))
@@ -1467,9 +1684,21 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
     def pad_tail_for(i: int) -> float:
         return tr_sec if (layout != "classic" and tr_on and i < n - 1) else 0.0
 
+    @telemetry.timed("beat_render")
     def _composite_one(i: int) -> Path:
         b = beats[i]
         clip = workdir / f"beat_{i:03d}.mp4"
+        contract = {"version": 2, "video": v, "gpu": gpu_encode,
+                    "encoder": config.gpu_encoder() if gpu_encode else "libx264",
+                    "beat": {k: str(value) for k, value in b.items()
+                             if k not in ("audio_url", "task_id", "img_task_id")},
+                    "sources": {k: artifacts.signature(b.get(k))
+                                for k in ("audio", "srt", "media", "host_media")},
+                    "figure": artifacts.signature(figure),
+                    "badge": artifacts.signature(badge),
+                    "overlay": artifacts.signature(beat_overlays[i]),
+                    "padding": [pad_head_for(i), pad_tail_for(i)]}
+        manifest = clip.with_suffix(".manifest.json")
         # Resume: skip beats already on disk from a prior partial render.
         # (If Spotify/QR toggles change mid-resume, delete beat_*.mp4 first.)
         #
@@ -1486,8 +1715,10 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                 + pad_tail_for(i))
         if clip.exists():
             got = probe_duration(clip) if is_valid_video(clip, 0.2) else 0.0
-            if got > 0 and (want <= 0 or abs(got - want) <= max(1.0, want * 0.05)):
+            if (artifacts.matches(manifest, contract, [clip]) and got > 0
+                    and (want <= 0 or abs(got - want) <= max(1.0, want * 0.05))):
                 log(f"  beat {i+1}/{n}: reusing existing composite")
+                telemetry.count("beat_cache_hits")
                 _tick()
                 return clip
             log(f"  beat {i+1}/{n}: discarding unusable cached composite "
@@ -1539,6 +1770,7 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                     raise
                 log(f"  beat {i+1}/{n}: composite failed ({e}) — retrying "
                     f"({attempt + 2}/3)")
+        artifacts.publish(manifest, contract, [clip])
         _tick()
         return clip
 
@@ -1552,6 +1784,9 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
         for fut, i in futures.items():
             clips[i] = fut.result()  # re-raises on failure, aborting the render
 
+    merged_popups = config.get("MERGE_POPUP_FINAL_PASS", "1").lower() not in ("0", "false", "no")
+    final_windows: Dict[str, List[Tuple[float, float]]] = {}
+
     def _burn_popup(dest: Path, label: str,
                     windows: Optional[List[Tuple[float, float]]] = None) -> None:
         if not popup or not popup.exists():
@@ -1561,6 +1796,9 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
             full_duration=popup_full_duration)
         if not resolved:
             return
+        if merged_popups:
+            final_windows[str(dest)] = resolved
+            return
         timing = "full duration" if popup_full_duration else f"{len(resolved)} windows"
         log(f"  {label}: burning Spotify popup ({timing})")
         burn_timed_popup(dest, popup, dest, resolved,
@@ -1568,6 +1806,21 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                          popup_margin=popup_margin,
                          workdir=workdir, gpu=gpu_encode)
 
+    def _export(dest: Path):
+        contract = {"version": 2, "source": artifacts.signature(dest),
+                    "fps": fps, "quality": export_quality, "gpu": gpu_encode,
+                    "popup": artifacts.signature(popup),
+                    "windows": final_windows.get(str(dest)),
+                    "allow_silent": bool(v.get("allow_silent_export", False))}
+        encode_final_export(dest, workdir, fps=fps, quality=export_quality,
+                            gpu=gpu_encode, log=log,
+                            popup=popup if merged_popups else None,
+                            popup_windows=final_windows.get(str(dest)),
+                            popup_width=popup_width, popup_margin=popup_margin,
+                            allow_silent=bool(v.get("allow_silent_export", False)))
+        artifacts.publish(dest.with_suffix(".export.json"), contract, [dest])
+
+    @telemetry.timed("assembly")
     def _stitch(clips_subset: List[Path], dest: Path, label: str,
                 *, apply_popup: bool = True) -> None:
         if tr_on:
@@ -1622,14 +1875,9 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                 probe_duration(part2),
                 seed=(hash(str(part2.name)) & 0xFFFFFFFF) or 1)
             log(f"  paid half: Spotify popup at {w2}")
-            burn_timed_popup(part2, popup, part2, w2,
-                             popup_width=popup_width,
-                             popup_margin=popup_margin,
-                             workdir=workdir, gpu=gpu_encode)
-        encode_final_export(part1, workdir, fps=fps, quality=export_quality,
-                            gpu=gpu_encode, log=log)
-        encode_final_export(part2, workdir, fps=fps, quality=export_quality,
-                            gpu=gpu_encode, log=log)
+            _burn_popup(part2, "paid half", w2)
+        _export(part1)
+        _export(part2)
         # Default player / download uses the free half (with Patreon end clip).
         # os.link, NOT Path.hardlink_to: the latter only exists on Python 3.10+
         # and this runs on 3.9, where it raised AttributeError straight into
@@ -1641,11 +1889,17 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
             os.link(part1, out_path)
         except Exception:  # noqa: BLE001
             shutil.copy2(part1, out_path)
+        # Creating the default-player hardlink updates the inode's ctime.
+        # Refresh its verified output signature before the uploader checks it.
+        export_record = artifacts.read(part1.with_suffix(".export.json"))
+        export_record["outputs"] = [artifacts.signature(part1)]
+        artifacts.write(part1.with_suffix(".export.json"), export_record)
         log(f"  free half → {part1.name}, paid half → {part2.name} "
             f"({n1} + {n2} beats)")
+        artifacts.publish(render_manifest, render_contract, final_outputs)
         return out_path
 
     _stitch(clips, out_path, "full video")
-    encode_final_export(out_path, workdir, fps=fps, quality=export_quality,
-                        gpu=gpu_encode, log=log)
+    _export(out_path)
+    artifacts.publish(render_manifest, render_contract, final_outputs)
     return out_path

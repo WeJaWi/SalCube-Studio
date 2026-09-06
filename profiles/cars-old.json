@@ -34,7 +34,7 @@
     "music_style": "warm historical automotive documentary score, restrained drums, upright bass, guitar and subtle orchestral color, nostalgic without parody, no vocals"
   },
   "music": {"enabled": true, "tracks": "auto", "minutes_per_track": 18, "min_tracks": 2, "max_tracks": 5},
-  "voices": {"English": "elevenlabs_1uRnJduQCdWI9ssQhXIB"},
+  "voices": {"English": "elevenlabs_cIOaiiemAqOmrhA4l3E5"},
   "writing_sections": [
     {"name": "period_hook", "weight": 0.1, "hint": "Open with a verified design decision, historical turning point, or ownership reality that places the vehicle in its era."},
     {"name": "historical_setting", "weight": 0.23, "hint": "Establish dates, market, manufacturer context, generation, variants, intended audience, and what contemporary conditions shaped the car."},

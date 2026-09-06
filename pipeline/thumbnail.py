@@ -1,8 +1,9 @@
 """Standalone YouTube-thumbnail generator — independent of the video pipeline.
 
 Takes a template thumbnail (image 1: the style/colors/fonts/textures to
-keep) and a character reference photo (image 2), and asks GPT Image 2 (via
-kie.ai) to recompose the template with the new character and new text.
+keep) and a character reference photo (image 2), and asks the configured
+image-to-image model (via kie.ai) to recompose the template with the new
+character and new text.
 
 Uses its own kie.ai API key (KIE_THUMBNAIL_API_KEY) so this tool's spend is
 tracked separately from the video pipeline's kie credits (HeyGen/TTS/stock
@@ -25,6 +26,23 @@ def _authentication_failure(exc: Exception) -> bool:
         "invalid api key", "permission denied", "access denied",
         "do not have access", "not permitted", "error 401", "error 403",
     ))
+
+
+def _model_payload(model: str, prompt: str, image_urls: list[str], *,
+                   aspect_ratio: str, resolution: str) -> dict:
+    """Build the provider-specific input object for a Kie thumbnail model."""
+    if model.strip().lower() == "nano-banana-2-lite":
+        return {
+            "prompt": prompt,
+            "image_urls": image_urls,
+            "aspect_ratio": aspect_ratio,
+        }
+    return {
+        "prompt": prompt,
+        "input_urls": image_urls,
+        "aspect_ratio": aspect_ratio,
+        "resolution": resolution,
+    }
 
 
 def build_prompt(main_text: str, red_word: str, yellow_word: str,
@@ -114,7 +132,11 @@ def _fit_text(draw: ImageDraw.ImageDraw, text: str, max_width: int,
 
 def _paste_character(canvas: Image.Image, character_path: Path) -> None:
     character = Image.open(character_path)
-    if "A" in character.getbands():
+    # Some PNG portrait references carry a fully opaque alpha channel. Treat
+    # those as photographs; only a genuinely transparent image is a cutout.
+    has_transparency = ("A" in character.getbands()
+                        and character.getchannel("A").getextrema()[0] < 250)
+    if has_transparency:
         person = character.convert("RGBA")
         person.thumbnail((520, 670), Image.Resampling.LANCZOS)
         x = max(0, (500 - person.width) // 2)
@@ -261,7 +283,7 @@ def generate(template_path: Path, character_path: Optional[Path], dest: Path, *,
 
     Both images are uploaded to kie's temp storage first — the model needs
     public URLs, not local file paths. `model` overrides KIE_THUMBNAIL_MODEL
-    per-call, for trying alternate kie.ai models (e.g. nano-banana) without
+    per-call, for trying alternate kie.ai models without
     an .env edit.
     """
     if not config.KIE_THUMBNAIL_API_KEY:
@@ -288,14 +310,13 @@ def generate(template_path: Path, character_path: Optional[Path], dest: Path, *,
                 show_name=show_name, topic_hint=topic_hint)
         raise
     primary_model = model or config.KIE_THUMBNAIL_MODEL
-    payload = {
-        "prompt": build_prompt(main_text, red_word, yellow_word, name,
-                               no_character=character_path is None,
-                               show_name=show_name),
-        "input_urls": [url for url in (template_url, character_url) if url],
-        "aspect_ratio": aspect_ratio,
-        "resolution": resolution or config.KIE_THUMBNAIL_RESOLUTION,
-    }
+    prompt = build_prompt(main_text, red_word, yellow_word, name,
+                          no_character=character_path is None,
+                          show_name=show_name)
+    image_urls = [url for url in (template_url, character_url) if url]
+    payload = _model_payload(
+        primary_model, prompt, image_urls, aspect_ratio=aspect_ratio,
+        resolution=resolution or config.KIE_THUMBNAIL_RESOLUTION)
     task_attempts = [(primary_model, dedicated_key, payload)]
     if config.KIE_API_KEY and config.KIE_API_KEY != dedicated_key:
         task_attempts.append((primary_model, config.KIE_API_KEY, payload))
@@ -304,10 +325,8 @@ def generate(template_path: Path, character_path: Optional[Path], dest: Path, *,
     # GPT Image model is not enabled for either image key.
     if config.KIE_VIDEO_API_KEY:
         grok_payload = {
-            "prompt": build_prompt(main_text, red_word, yellow_word, name,
-                                   no_character=character_path is None,
-                                   show_name=show_name),
-            "image_urls": [url for url in (template_url, character_url) if url],
+            "prompt": prompt,
+            "image_urls": image_urls,
         }
         candidate = ("grok-imagine/image-to-image",
                      config.KIE_VIDEO_API_KEY, grok_payload)

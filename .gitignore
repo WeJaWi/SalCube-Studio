@@ -20,6 +20,11 @@ __pycache__/
 thumbnails/*
 !thumbnails/templates/
 !thumbnails/templates/default.png
+!thumbnails/references/
+!thumbnails/references/joseph-murphy/
+!thumbnails/references/joseph-murphy/*.png
+!thumbnails/references/joseph-murphy/portraits/
+!thumbnails/references/joseph-murphy/portraits/*.png
 
 # Optional external tooling and unrelated browser-extension workspace. The
 # core pipeline only detects waveformr when present; workers do not need it.

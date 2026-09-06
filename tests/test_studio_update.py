@@ -7,11 +7,19 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from tests.isolation import isolated_runtime
+
 import app
 from docx import Document
 from pipeline import (clients, config, delivery_doc, identity, llm, operations,
                       orchestrator, render, research, script, storage, thumbnail,
                       voiceover)
+
+
+def setUpModule():
+    isolation = isolated_runtime()
+    isolation.__enter__()
+    unittest.addModuleCleanup(isolation.__exit__, None, None, None)
 
 
 class IdentityTests(unittest.TestCase):
@@ -26,6 +34,10 @@ class VideoGroupTests(unittest.TestCase):
         inputs = app._build_inputs({}, "A title")
         self.assertEqual(inputs["script_model"], "gpt-5.6-luna")
         self.assertEqual(llm.resolve_model(None), "gpt-5.6-luna")
+
+    def test_rating_cta_is_opt_in(self):
+        self.assertFalse(app._build_inputs({}, "A title")["rating_cta"])
+        self.assertTrue(app._build_inputs({"rating_cta": True}, "A title")["rating_cta"])
 
     def test_small_group_is_inside_requested_range(self):
         for _ in range(100):
@@ -140,6 +152,30 @@ class AI33FallbackTests(unittest.TestCase):
         self.assertEqual(task_id, "backup-task")
         self.assertEqual(len(post.call_args_list), 2)
 
+    def test_known_voice_not_found_switches_account_before_task_creation(self):
+        unavailable = self.response(
+            400, {"success": False, "message": "elevenlabs_voice_not_found"})
+        accepted = self.response(
+            200, {"success": True, "task_id": "primary-voice-task"})
+        with patch.object(config, "AI33_API_KEY", "primary-test-key"), \
+                patch.object(config, "AI33_API_KEY_BACKUP", "backup-test-key"), \
+                patch.object(clients, "ai33_key_mode", return_value="backup"), \
+                patch.object(clients.requests, "post", side_effect=[unavailable, accepted]) as post:
+            task_id = clients.ai33_submit_form("/tts", {"text": "hello"})
+        self.assertEqual(task_id, "primary-voice-task")
+        self.assertEqual([call.kwargs["headers"]["xi-api-key"]
+                          for call in post.call_args_list],
+                         ["backup-test-key", "primary-test-key"])
+
+    def test_polled_voice_not_found_is_a_definitive_voice_error(self):
+        failed = self.response(200, {
+            "success": True, "status": "failed",
+            "message": "elevenlabs_voice_not_found",
+        })
+        with patch.object(clients.requests, "get", return_value=failed):
+            with self.assertRaises(clients.AI33VoiceNotFound):
+                clients.ai33_poll("failed-voice-task", timeout_s=1, interval=0)
+
     def test_forced_backup_is_first_without_exposing_key_values(self):
         self.mode_patch.stop()
         self.mode_patch = patch.object(clients, "ai33_key_mode",
@@ -163,6 +199,11 @@ class VoiceoverCacheTests(unittest.TestCase):
             for i in range(2):
                 (root / f"vo_{i:03d}.mp3").write_bytes(b"beat" * 100)
             beats = [{"text": "first narration"}, {"text": "second narration"}]
+            from pipeline import artifacts
+            artifacts.publish(raw.with_suffix(".manifest.json"), {
+                "text": "first narration second narration", "voice": config.AI33_VOICE_ID,
+                "speed": config.AI33_TTS_SPEED, "transcript": True,
+                "endpoint": "/v3/text-to-speech"}, [raw])
 
             def valid(path, min_duration=0.04):
                 del min_duration
@@ -602,6 +643,12 @@ class DeliveryDocumentTests(unittest.TestCase):
 
 
 class SpotifyPopupTests(unittest.TestCase):
+    def test_rating_cta_is_exact_and_idempotent(self):
+        narration = "The final teaching stays with you."
+        once = script.ensure_rating_cta(narration)
+        self.assertTrue(once.endswith(script.RATING_CTA))
+        self.assertEqual(script.ensure_rating_cta(once), once)
+
     def test_geistmeister_selects_dedicated_asset(self):
         asset = orchestrator._spotify_popup_asset({
             "spotify_popup_style": "geistmeister", "language": "German",
@@ -698,6 +745,7 @@ class MacRenderOptimizationTests(unittest.TestCase):
             with patch.object(render, "probe_stream_duration",
                               return_value=10.0), \
                     patch.object(render, "_run", side_effect=fake_ffmpeg), \
+                    patch.object(render, "_validate_narration_master"), \
                     patch.object(render, "_validate_spotify_export",
                                  return_value=contract), \
                     patch.object(render.config, "gpu_encoder",
@@ -1281,6 +1329,76 @@ class ThumbnailApprovalTests(unittest.TestCase):
                          "Change This Habit Tonight")
         self.assertEqual(app.JOBS[self.job_id]["thumbnail"]["state"],
                          "generating_image")
+        self.assertEqual(app.JOBS[self.job_id]["thumbnail"]["generation"], 0)
+
+    def test_joseph_murphy_uses_all_four_approved_reference_templates(self):
+        references = app._thumbnail_reference_templates("  Joseph   Murphy ")
+        self.assertEqual(len(references), 4)
+        self.assertTrue(all(path.parent.name == "joseph-murphy"
+                            for path in references))
+        selected = {
+            app._thumbnail_template_for(
+                self.job_id, generation, "Joseph Murphy", Path("fallback.png"))[0]
+            for generation in range(4)
+        }
+        self.assertEqual(selected, set(references))
+        fallback = Path("fallback.png")
+        self.assertEqual(
+            app._thumbnail_template_for(
+                self.job_id, 0, "Sigmund Freud", fallback),
+            (fallback, None))
+
+    def test_joseph_murphy_rotates_all_three_identity_portraits(self):
+        references = app._thumbnail_reference_portraits("Joseph Murphy")
+        self.assertEqual(len(references), 3)
+        selected = {
+            app._thumbnail_portrait_for(
+                self.job_id, generation, "Joseph Murphy", Path("fallback.png"))[0]
+            for generation in range(3)
+        }
+        self.assertEqual(selected, set(references))
+        fallback = Path("fallback.png")
+        self.assertEqual(
+            app._thumbnail_portrait_for(
+                self.job_id, 0, "Carl Gustav Jung", fallback),
+            (fallback, None))
+
+    def test_thumbnail_image_task_records_selected_murphy_reference(self):
+        app.JOBS[self.job_id]["inputs"] = {"cited_philosophers": "Joseph Murphy"}
+        app.JOBS[self.job_id]["thumbnail"] = {
+            "state": "generating_image", "generation": 0,
+            "localized_title": "A title", "language": "German",
+            "words": {"main_text": "Ein neuer Gedanke", "red_word": "HEUTE",
+                      "yellow_word": "DEIN LEBEN", "name": "Joseph Murphy"},
+        }
+        with patch.object(app.identity, "numeric_id", return_value="11223344556677889900"), \
+                patch.object(app.thumbnail, "generate") as generate, \
+                patch.object(app, "_persist_queue"):
+            app._thumbnail_image_task(self.job_id)
+        selected_template = generate.call_args.args[0]
+        selected_portrait = generate.call_args.args[1]
+        self.assertEqual(selected_template.parent.name, "joseph-murphy")
+        self.assertEqual(selected_portrait.parent.name, "portraits")
+        state = app.JOBS[self.job_id]["thumbnail"]
+        self.assertEqual(state["state"], "image_ready")
+        self.assertTrue(state["reference_template"].startswith(
+            "thumbnails/references/joseph-murphy/"))
+        self.assertTrue(state["reference_portrait"].startswith(
+            "thumbnails/references/joseph-murphy/portraits/"))
+
+    def test_thumbnail_regeneration_advances_reference_generation(self):
+        app.JOBS[self.job_id]["thumbnail"] = {
+            "state": "image_ready", "generation": 2,
+            "localized_title": "A title", "language": "German",
+            "words": {"main_text": "Ein Gedanke", "red_word": "HEUTE",
+                      "yellow_word": "NEU", "name": "Joseph Murphy"},
+        }
+        with patch.object(app, "_persist_queue"), \
+                patch.object(app.threading, "Thread"):
+            response = self.client.post(
+                f"/api/thumbnail/job/{self.job_id}/image/regenerate")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(app.JOBS[self.job_id]["thumbnail"]["generation"], 3)
 
     def test_word_package_uses_profile_language_and_trigger_guide(self):
         app.JOBS[self.job_id].update(
@@ -1350,6 +1468,30 @@ class ThumbnailProviderTests(unittest.TestCase):
             no_character=True, show_name=False)
         self.assertIn("Remove the name or label at the bottom completely", prompt)
         self.assertNotIn('bottom will be "ASTROLOGY"', prompt)
+
+    def test_nano_banana_2_lite_uses_its_documented_payload(self):
+        with patch.object(thumbnail.config, "KIE_THUMBNAIL_API_KEY", "thumb-key"), \
+                patch.object(thumbnail.config, "KIE_API_KEY", "thumb-key"), \
+                patch.object(thumbnail.clients, "kie_upload",
+                             side_effect=["https://one", "https://two"]), \
+                patch.object(thumbnail.clients, "kie_create_task",
+                             return_value="task-1") as create, \
+                patch.object(thumbnail.clients, "kie_poll",
+                             return_value=["https://result"]), \
+                patch.object(thumbnail.clients, "download",
+                             return_value=Path("out.png")):
+            result = thumbnail.generate(
+                Path("template.png"), Path("person.png"), Path("out.png"),
+                main_text="Main", red_word="Red", yellow_word="Gold",
+                name="Name", model="nano-banana-2-lite", resolution="4K")
+        self.assertEqual(result, Path("out.png"))
+        self.assertEqual(create.call_args.args[0], "nano-banana-2-lite")
+        payload = create.call_args.args[1]
+        self.assertEqual(payload["image_urls"],
+                         ["https://one", "https://two"])
+        self.assertEqual(payload["aspect_ratio"], "16:9")
+        self.assertNotIn("input_urls", payload)
+        self.assertNotIn("resolution", payload)
 
     def test_thumbnail_task_falls_back_to_main_key_on_auth_failure(self):
         with patch.object(thumbnail.config, "KIE_THUMBNAIL_API_KEY", "bad-key"), \

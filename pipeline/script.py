@@ -98,6 +98,18 @@ def _spotify_line(inputs: Dict[str, Any], profile: Dict[str, Any]) -> str:
     return base
 
 
+RATING_CTA = "If you enjoy this video, please give us a rating. It means a lot, thank you."
+
+
+def ensure_rating_cta(narration: str) -> str:
+    """Append the opted-in rating line once, verbatim, to spoken narration."""
+    normalized = " ".join(narration.split()).casefold()
+    phrase = " ".join(RATING_CTA.split()).casefold()
+    if phrase in normalized:
+        return narration
+    return narration.rstrip() + "\n\n" + RATING_CTA
+
+
 def _disclosure(profile: Dict[str, Any]) -> str:
     """The spoken AI disclosure as plain text. Tolerates a structured value
     (dict with a text-ish field) so a doc-style profile can't crash a job."""

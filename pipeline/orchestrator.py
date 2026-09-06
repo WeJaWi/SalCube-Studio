@@ -20,8 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import (animation, aivideo, cancel, clients, config, footage, heygen, images,
-               llm, music, render, script, voiceover)
+from . import (animation, aivideo, artifacts, cancel, clients, config, footage, heygen, images,
+               llm, media_cache, music, render, script, telemetry, voiceover)
 
 ProgressFn = Callable[[str, str], None]
 GateFn = Callable[[Dict[str, str], str], Tuple[str, str]]
@@ -138,6 +138,38 @@ def load_profile(name: str) -> Dict[str, Any]:
     return json.loads(path.read_text())
 
 
+def _clear_replanned_assets(assets: Path) -> int:
+    """Invalidate both raw grouped narration and beats after a script rewrite."""
+    cleared = 0
+    if assets.is_dir():
+        for pattern in ("vo_*.mp3", "vo_*.srt", "vo_*.ass", "vo_*.wav",
+                        "tts_raw_*.mp3", "tts_raw_*.srt", "tts_raw_*.wav",
+                        "host_*.mp4", "beat_*.mp4", "beat_*.jpg", "beat_*.png"):
+            for path in assets.glob(pattern):
+                if path.is_file() or path.is_symlink():
+                    path.unlink(missing_ok=True)
+                    cleared += 1
+    return cleared
+
+
+def _cached_broll_asset(assets: Path, index: int):
+    """Find a playable/decodable resume asset, not merely a nonempty file."""
+    for ext in ("mp4", "jpg", "png"):
+        for name in (f"beat_{index:03d}.{ext}", f"beat_{index:03d}_fb.{ext}"):
+            path = assets / name
+            if media_cache.valid_media(path, "video" if ext == "mp4" else "photo"):
+                return path, ext, "_fb" in name
+    return None
+
+
+def _remember_broll(b, i, assets, width, height, smart):
+    if b.get("media"):
+        contract = {"beat": {k: b.get(k) for k in
+                            ("text", "query", "prompt", "type", "selection_revision")},
+                    "size": [width, height], "smart": smart}
+        artifacts.publish(assets / f"broll_{i:03d}.json", contract, [b["media"]])
+
+
 def _track_count(length_chars: int, music_cfg: Dict[str, Any]) -> int:
     setting = music_cfg.get("tracks", "auto")
     if isinstance(setting, int) and setting > 0:
@@ -201,7 +233,7 @@ def _broll_fallback(b: Dict[str, Any], i: int, assets: Path, width: int,
     """Fallback chain: stock video → stock image → AI image → blank."""
     query = b.get("query") or " ".join(b["text"].split()[:3])
     if not skip_video:
-        media = footage.fetch_stock(query, assets / f"beat_{i:03d}_fb.mp4",
+        media = footage.fetch_stock(query, assets / f"beat_{i:03d}_fb.mp4", min_width=width,
                                     used=used, narration=b["text"], smart=smart,
                                     max_repeats=max_repeats)
         if media:
@@ -235,6 +267,7 @@ def _broll_fallback(b: Dict[str, Any], i: int, assets: Path, width: int,
                 b["media"] = images.collect_image(
                     task_id, assets / f"beat_{i:03d}_fb.png", context=context)
                 b["media_kind"] = "image"
+                _remember_broll(b, i, assets, width, height, smart)
                 kie_ledger.clear(i, kind)
                 return
             except clients.KieTaskFailed as e:
@@ -267,6 +300,7 @@ def _broll_fallback(b: Dict[str, Any], i: int, assets: Path, width: int,
         b["media"] = images.collect_image(
             task_id, assets / f"beat_{i:03d}_fb.png", context=context)
         b["media_kind"] = "image"
+        _remember_broll(b, i, assets, width, height, smart)
         kie_ledger.clear(i, kind)
     except clients.KieSubmissionUncertain as e:
         # Leave the durable ``submitting`` marker in place. The provider may
@@ -297,6 +331,18 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                  on_planned: Optional[Callable[[Dict[str, Any]], None]] = None,
                  profile_data: Optional[Dict[str, Any]] = None,
                  ) -> Path:
+    prefetches = []
+    try:
+        return _run_pipeline(inputs, profile_name, job_dir, progress, gate, voice_gate,
+                             beat_progress, on_planned, profile_data, prefetches)
+    finally:
+        for prefetch in prefetches:
+            prefetch.close()
+
+
+@telemetry.timed("pipeline")
+def _run_pipeline(inputs, profile_name, job_dir, progress, gate, voice_gate,
+                  beat_progress, on_planned, profile_data, prefetches):
     def emit(step: str, msg: str) -> None:
         # Every stage boundary and progress line funnels through here, so
         # one check gives cancellation coverage across the whole pipeline
@@ -326,6 +372,7 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
         "language": (inputs.get("language") or d.get("language", "English")).strip(),
         "length_chars": int(inputs.get("length_chars") or d.get("length_chars", 15000)),
         "comment_cta": bool(inputs.get("comment_cta", True)),
+        "rating_cta": bool(inputs.get("rating_cta", False)),
         "promote_ebook": bool(inputs.get("promote_ebook", False)),
         "ebook_cta_at": int(inputs.get("ebook_cta_at") or 0) or None,
         "promote_community": bool(inputs.get("promote_community", False)),
@@ -374,7 +421,8 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                   f"b-roll: {', '.join(broll)} · stock matching: {smart} · "
                   f"encoder: {gpu_encoder + ' (GPU)' if gpu_encode else 'libx264 (CPU)'} "
                   f"· {beat_workers} beat worker(s)"
-                  + (" · ebook CTA" if inputs["promote_ebook"] else ""))
+                  + (" · ebook CTA" if inputs["promote_ebook"] else "")
+                  + (" · rating CTA" if inputs["rating_cta"] else ""))
     if gpu_requested and not gpu_encode:
         emit("start", "GPU encode was enabled, but no working hardware H.264 "
               "encoder passed the sample encode — using libx264")
@@ -488,20 +536,34 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
             plan_file.unlink()
             emit("plan", "Cleared beat plan after Patreon cut (will replan)")
         assets = job_dir / "assets"
-        if assets.is_dir():
-            cleared = 0
-            for pat in ("vo_*.mp3", "vo_*.srt", "vo_*.ass", "host_*.mp4",
-                        "beat_*.mp4", "beat_*.jpg", "beat_*.png"):
-                for p in assets.glob(pat):
-                    p.unlink(missing_ok=True)
-                    cleared += 1
-            if cleared:
-                emit("plan", f"Cleared {cleared} beat/VO assets for replan")
+        cleared = _clear_replanned_assets(assets)
+        if cleared:
+            emit("plan", f"Cleared {cleared} beat/raw narration assets for replan")
         for p in job_dir.glob("beat_*.mp4"):
             p.unlink(missing_ok=True)
         for name in ("final.mp4", "final_part1.mp4", "final_part2.mp4",
                      "patreon_cut.json", "patreon_cut.txt"):
             (job_dir / name).unlink(missing_ok=True)
+
+    # This is inserted directly rather than merely asking the script model to
+    # remember it, so the selected option always produces the exact spoken
+    # sentence once. On a resume it is idempotent; if it changes an existing
+    # script, dependent narration/visual assets are invalidated safely.
+    if inputs["rating_cta"]:
+        updated_narration = script.ensure_rating_cta(narration)
+        if updated_narration != narration:
+            narration = updated_narration
+            script_file.write_text(narration)
+            plan_file = job_dir / "plan.json"
+            if plan_file.exists():
+                plan_file.unlink()
+                cleared = _clear_replanned_assets(job_dir / "assets")
+                emit("plan", "Added rating CTA — cleared dependent plan and "
+                             f"{cleared} visual/narration assets for replan")
+            for name in ("final.mp4", "final_part1.mp4", "final_part2.mp4",
+                         "patreon_cut.json", "patreon_cut.txt"):
+                (job_dir / name).unlink(missing_ok=True)
+            emit("script", "Added spoken rating CTA at the close")
 
     # Patreon split: the writer places a marker line that must never be
     # spoken — strip it, remember where it fell, report the cut point later.
@@ -608,7 +670,7 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
     elif music_cfg.get("enabled", True):
         n_tracks = _track_count(inputs["length_chars"], music_cfg)
         emit("music", f"Starting {n_tracks} music tracks (Suno)…")
-        music_tasks = music.submit_music(music_prompt, n_tracks)
+        music_tasks = music.submit_music(music_prompt, n_tracks, workdir=assets)
 
     # 5. Per-beat TTS (the full narration is voiced here — HeyGen only ever
     # lip-syncs segments of this same audio, so the voice never changes)
@@ -785,7 +847,7 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                     emit("host", f"Beat {i+1}: HeyGen submit retry ({e})")
                     time.sleep(8 * (attempt + 1))
 
-    # 7. Submit AI b-roll (video clips and cheap grok stills)
+    # 7. Submit AI b-roll (video clips and Z-Image stills)
     mm_places = (mindmap or {}).get("placements", {})
     try:
         fallback_limit = int(v.get("kie_fallback_image_limit",
@@ -805,18 +867,14 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
     for i, b in enumerate(beats):
         if b["type"] == "host" and not b.get("split"):
             continue  # host visuals live in host_*.mp4, handled in step 10
-        found = None
-        for ext in ("mp4", "jpg", "png"):
-            for name in (f"beat_{i:03d}.{ext}", f"beat_{i:03d}_fb.{ext}"):
-                p = assets / name
-                if p.exists() and p.stat().st_size > 1000:
-                    found = (p, ext, "_fb" in name)
-                    break
-            if found:
-                break
+        found = _cached_broll_asset(assets, i)
         if not found:
             continue
         p, ext, is_fb = found
+        contract = {"beat": {k: b.get(k) for k in ("text", "query", "prompt", "type", "selection_revision")},
+                    "size": [width, height], "smart": smart}
+        if not artifacts.matches(assets / f"broll_{i:03d}.json", contract, [p]):
+            continue
         if ext in ("jpg", "png"):
             kind = "image"
         elif is_fb:
@@ -869,7 +927,7 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                 emit("broll", f"Beat {i+1}: submit failed ({e})")
         elif b["type"] == "ai_image":
             kind = "ai_image"
-            model_name = "grok-imagine/text-to-image"
+            model_name = config.KIE_IMAGE_MODEL
             context = f"{job_dir.name}:beat-{i+1}:ai-image"
             existing = kie_ledger.get(i, kind)
             if existing:
@@ -884,8 +942,8 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                 continue
             kie_ledger.begin(i, kind, model_name)
             try:
-                b["img_task_id"] = images.submit_grok_image(
-                    b["prompt"], context=context)
+                b["img_task_id"] = images.submit_image(
+                    b["prompt"], width, height, context=context)
                 kie_ledger.submitted(
                     i, kind, model_name, b["img_task_id"])
                 emit("broll", f"Beat {i+1}: AI still submitted")
@@ -903,9 +961,17 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
     # instead of falling through to blank cards.
     themes = inputs["anim_themes"]
     anim_count = 0
-    used_media: Dict[str, int] = {}
+    used_media: Dict[str, int] = footage.restore_used(beats)
     broll_repeats = int(v.get("max_broll_repeats", 1))
+    for beat in beats:
+        for nid in beat.get("rejected_stock_ids", []):
+            used_media[nid] = broll_repeats
+    for i in mm_places:
+        beats[i]["_skip_stock"] = True
+    prefetch = footage.Prefetch(beats, width)
+    prefetches.append(prefetch)
     for i, b in enumerate(beats):
+        searched = prefetch.at(i)
         if b.get("media"):
             continue  # reused from disk (resume) — nothing to fetch
         if i in mm_places:
@@ -928,9 +994,9 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                              f"using planned b-roll")
         if b["type"] == "stock":
             emit("broll", f"Beat {i+1}: stock “{b['query']}”")
-            media = footage.fetch_stock(b["query"], assets / f"beat_{i:03d}.mp4",
+            media = footage.fetch_stock(b["query"], assets / f"beat_{i:03d}.mp4", min_width=width,
                                         used=used_media, narration=b["text"],
-                                        smart=smart, max_repeats=broll_repeats)
+                                        smart=smart, max_repeats=broll_repeats, prefetched=searched)
             if media:
                 b["media"], b["media_kind"] = media, "stock"
             else:
@@ -944,7 +1010,7 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                                               assets / f"beat_{i:03d}.jpg",
                                               used=used_media,
                                               narration=b["text"], smart=smart,
-                                              max_repeats=broll_repeats)
+                                              max_repeats=broll_repeats, prefetched=searched)
             if media:
                 b["media"], b["media_kind"] = media, "image"
             else:
@@ -979,10 +1045,10 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
             except Exception as e:  # noqa: BLE001
                 emit("anim", f"Beat {i+1}: animation failed ({e})")
                 _broll_fallback(b, i, assets, width, height, emit,
-                                used=used_media, max_repeats=broll_repeats,
+                                used=used_media, smart=smart, max_repeats=broll_repeats,
                                 kie_ledger=kie_ledger, kie_budget=kie_budget)
 
-    # 9. Collect AI b-roll (videos + grok stills)
+    # 9. Collect AI b-roll (videos + Z-Image stills)
     for i, b in enumerate(beats):
         if b["type"] not in ("ai_video", "ai_image") or i in mm_places:
             continue
@@ -990,15 +1056,25 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
             continue  # reused from disk (resume) — nothing to collect
         if b["type"] == "ai_image":
             planned_kind = "ai_image"
-            model_name = "grok-imagine/text-to-image"
+            saved_task = kie_ledger.get(i, planned_kind) or {}
+            model_name = str(saved_task.get("model") or config.KIE_IMAGE_MODEL)
             context = f"{job_dir.name}:beat-{i+1}:ai-image"
             allow_paid_fallback = True
             if b.get("img_task_id"):
                 try:
-                    b["media"] = images.collect_grok_image(
-                        b["img_task_id"], assets / f"beat_{i:03d}.png",
-                        context=context)
+                    if model_name == "grok-imagine/text-to-image":
+                        # Existing accepted Grok tasks must complete on their
+                        # original account; changing models must never replay
+                        # a task that may already have been billed.
+                        b["media"] = images.collect_grok_image(
+                            b["img_task_id"], assets / f"beat_{i:03d}.png",
+                            context=context)
+                    else:
+                        b["media"] = images.collect_image(
+                            b["img_task_id"], assets / f"beat_{i:03d}.png",
+                            context=context)
                     b["media_kind"] = "image"
+                    _remember_broll(b, i, assets, width, height, smart)
                     kie_ledger.clear(i, planned_kind)
                     continue
                 except clients.KieTaskFailed as e:
@@ -1012,7 +1088,7 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
             elif (kie_ledger.get(i, planned_kind) or {}).get("state") == "submitting":
                 allow_paid_fallback = False
             _broll_fallback(b, i, assets, width, height, emit, used=used_media,
-                            max_repeats=broll_repeats,
+                            smart=smart, max_repeats=broll_repeats,
                             kie_ledger=kie_ledger, kie_budget=kie_budget,
                             allow_ai=allow_paid_fallback)
             continue
@@ -1027,6 +1103,7 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                                                   assets / f"beat_{i:03d}.mp4",
                                                   context=context)
                 b["media_kind"] = "video"
+                _remember_broll(b, i, assets, width, height, smart)
                 kie_ledger.clear(i, planned_kind)
                 continue
             except clients.KieTaskFailed as e:
@@ -1040,9 +1117,15 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
         elif (kie_ledger.get(i, planned_kind) or {}).get("state") == "submitting":
             allow_paid_fallback = False
         _broll_fallback(b, i, assets, width, height, emit, used=used_media,
-                        max_repeats=broll_repeats,
+                        smart=smart, max_repeats=broll_repeats,
                         kie_ledger=kie_ledger, kie_budget=kie_budget,
                         allow_ai=allow_paid_fallback)
+
+    for i, b in enumerate(beats):
+        if b.get("media"):
+            contract = {"beat": {k: b.get(k) for k in ("text", "query", "prompt", "type", "selection_revision")},
+                        "size": [width, height], "smart": smart}
+            artifacts.publish(assets / f"broll_{i:03d}.json", contract, [b["media"]])
 
     # 10. Collect HeyGen clips and finalize beat kinds
     still = _host_still(profile, profile_name)
@@ -1082,7 +1165,7 @@ def run_pipeline(inputs: Dict[str, Any], profile_name: str, job_dir: Path,
                 emit("host", f"Beat {i+1}: no host visual — falling back to stock")
                 b["query"] = " ".join(inputs["title"].split()[:3])
                 _broll_fallback(b, i, assets, width, height, emit,
-                                used=used_media, max_repeats=broll_repeats,
+                                used=used_media, smart=smart, max_repeats=broll_repeats,
                                 kie_ledger=kie_ledger, kie_budget=kie_budget)
                 b["kind"] = b.get("media_kind", "blank")
         else:  # split

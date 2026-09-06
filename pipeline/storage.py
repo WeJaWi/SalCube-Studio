@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 
 import requests
 
-from . import config
+from . import artifacts, config
 
 
 DRIVE_API = "https://www.googleapis.com/drive/v3"
@@ -170,7 +170,7 @@ class GoogleDriveStorage:
                state_file: Optional[Path] = None,
                content_type: Optional[str] = None,
                folder_id: Optional[str] = None,
-               file_id: Optional[str] = None) -> dict:
+               file_id: Optional[str] = None, on_progress=None) -> dict:
         """Upload and verify one local file, returning only small metadata.
 
         ``state_file`` lets a retry continue a valid Drive session after a
@@ -209,12 +209,13 @@ class GoogleDriveStorage:
                                               content_type, file_id=file_id)
             offset = -1
             state = {"source_name": source.name, "size": total,
+                     "source_signature": artifacts.signature(source),
                      "folder_id": folder_id, "file_id": file_id,
                      "session_url": session_url}
             _atomic_json_write(state_file, state)
 
         result = self._send_chunks(source, total, session_url, state_file, state,
-                                   offset + 1)
+                                   offset + 1, on_progress=on_progress)
         verified = self._verify_upload(result, source)
         state_file.unlink(missing_ok=True)
         return verified
@@ -451,8 +452,20 @@ class GoogleDriveStorage:
         raise DriveError("Drive returned an invalid resumable-upload status")
 
     def _send_chunks(self, source: Path, total: int, session_url: str,
-                     state_file: Path, state: dict, start: int) -> dict:
+                     state_file: Path, state: dict, start: int, on_progress=None) -> dict:
         pos = max(0, start)
+        began = time.monotonic()
+
+        def report(confirmed, phase="uploading", retry=0):
+            if not on_progress:
+                return
+            elapsed = max(0.001, time.monotonic() - began)
+            rate = max(0, confirmed - start) / elapsed
+            on_progress({"confirmed_bytes": confirmed, "total_bytes": total,
+                         "bytes_per_second": round(rate), "phase": phase, "retry": retry,
+                         "eta_seconds": round((total-confirmed)/rate) if rate > 0 else None})
+
+        report(pos)
         with source.open("rb") as src:
             src.seek(pos)
             while pos < total:
@@ -469,6 +482,8 @@ class GoogleDriveStorage:
                         }, data=block)
                     except requests.RequestException:
                         r = None
+                    if r is not None and r.status_code in (401, 403):
+                        raise DriveError(f"Drive access denied (HTTP {r.status_code}); check account permission or quota")
                     if r is not None and r.status_code in (200, 201):
                         final_response = r
                         break
@@ -484,25 +499,32 @@ class GoogleDriveStorage:
                         time.sleep(min(30, 2 ** attempt))
                         continue
                     if completed is not None:
+                        report(total, "verifying")
                         return completed
                     if confirmed >= end:
                         break
                     if attempt == 4:
                         detail = r.text[:200] if r is not None else "network failure"
                         raise DriveError(f"Drive upload failed at byte {pos}: {detail}")
+                    report(pos, "retrying", attempt + 1)
                     time.sleep(min(30, 2 ** attempt))
                 if final_response is not None:
                     try:
+                        report(total, "verifying")
                         return final_response.json()
                     except ValueError as e:
                         raise DriveError("Drive completed upload without file metadata") from e
                 confirmed, completed = self._probe_session(session_url, total)
                 if completed is not None:
+                    report(total, "verifying")
                     return completed
-                pos = max(pos + len(block), confirmed + 1)
+                pos = confirmed + 1
+                if pos < start or pos > total:
+                    raise DriveError("Drive returned an invalid confirmed upload offset")
                 src.seek(pos)
                 state["confirmed_bytes"] = pos
                 _atomic_json_write(state_file, state)
+                report(pos)
         raise DriveError("Drive upload ended without completion metadata")
 
     def _verify_upload(self, result: dict, source: Path) -> dict:
@@ -523,7 +545,8 @@ class GoogleDriveStorage:
         try:
             data = json.loads(path.read_text())
             if (data.get("source_name") == source.name
-                    and int(data.get("size") or -1) == total):
+                    and int(data.get("size") or -1) == total
+                    and data.get("source_signature") == artifacts.signature(source)):
                 return data
         except Exception:  # noqa: BLE001
             pass

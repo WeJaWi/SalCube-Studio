@@ -7,6 +7,7 @@ upload API (3-day retention) used to hand local files to kie models.
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -15,7 +16,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from . import cancel, config
+from . import ai33_tasks, cancel, config, telemetry
 
 
 def _retrying(fn, attempts: int = 4, backoff: float = 5.0):
@@ -55,24 +56,64 @@ def _retrying(fn, attempts: int = 4, backoff: float = 5.0):
     raise last
 
 
-def download(url: str, dest: Path) -> Path:
+def download(url: str, dest: Path, *, timeout: int = 300) -> Path:
+    """Publish only a complete download; never turn a partial into a cache hit."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
     def _dl():
-        # Stream downloads to disk. A provider URL normally points at a tiny
-        # stock clip, but buffering a multi-GB response in RAM can kill the
-        # render process before its retry logic gets a chance to help.
-        r = requests.get(url, timeout=300, stream=True)
-        r.raise_for_status()
-        with dest.open("wb") as out:
-            for block in r.iter_content(chunk_size=1024 * 1024):
-                if block:
-                    out.write(block)
-        return dest
+        cancel.check()
+        response = None
+        partial = None
+        try:
+            response = requests.get(url, timeout=timeout, stream=True)
+            response.raise_for_status()
+            # Each attempt gets its own sibling so concurrent jobs/retries
+            # cannot overwrite each other's temporary file. The final rename
+            # stays on one filesystem and also works on Windows after close.
+            with tempfile.NamedTemporaryFile(
+                    mode="wb", dir=dest.parent, prefix=f".{dest.name}.",
+                    suffix=".part", delete=False) as out:
+                partial = Path(out.name)
+                received = 0
+                for block in response.iter_content(chunk_size=1024 * 1024):
+                    cancel.check()
+                    if block:
+                        out.write(block)
+                        received += len(block)
+            cancel.check()
+            expected = None
+            if response.headers.get("Content-Encoding", "identity").lower() == "identity":
+                try:
+                    expected = int(response.headers.get("Content-Length", ""))
+                except (ValueError, TypeError):
+                    pass
+            if received == 0 or (expected is not None and received != expected):
+                raise requests.exceptions.ChunkedEncodingError(
+                    f"Incomplete download: received {received} bytes, expected {expected}")
+            partial.replace(dest)
+            return dest
+        finally:
+            if response is not None:
+                response.close()
+            if partial is not None:
+                partial.unlink(missing_ok=True)
+
     return _retrying(_dl)
 
 
 # ───────────────────────── ai33.pro ─────────────────────────────
 class AI33CreditsExhausted(RuntimeError):
     """The selected ai33 account explicitly reported no credits/quota."""
+
+
+class AI33VoiceNotFound(RuntimeError):
+    """A TTS voice is not available to the selected AI33 account.
+
+    This is a definitive rejection: no provider task was created, so trying
+    the other configured account is safe.  It deliberately does *not* cover
+    generic TTS failures, whose acceptance state could be uncertain.
+    """
 
 
 _AI33_KEY_LOCK = threading.Lock()
@@ -193,6 +234,7 @@ def _mark_ai33_primary_depleted(api_key: str) -> None:
 
 
 def _remember_ai33_task(task_id: str, api_key: str) -> None:
+    ai33_tasks.remember(task_id, api_key)
     with _AI33_KEY_LOCK:
         _AI33_TASK_KEYS[task_id] = api_key
 
@@ -208,13 +250,28 @@ def _ai33_submit(request_fn) -> str:
         raise RuntimeError("ai33 API key is not configured")
     for index, api_key in enumerate(keys):
         try:
-            response = _retrying(lambda: request_fn(api_key))
+            cancel.check()
+            try:
+                response = request_fn(api_key)
+            except requests.RequestException as exc:
+                raise ai33_tasks.SubmissionUncertain("AI33 acceptance is unknown after a network failure; submission was not replayed") from exc
+            if response.status_code >= 500:
+                raise ai33_tasks.SubmissionUncertain("AI33 returned a server error; acceptance is unknown")
+            try:
+                response.json()
+            except ValueError as exc:
+                raise ai33_tasks.SubmissionUncertain("AI33 returned an unreadable response; acceptance is unknown") from exc
             data = _ai33_check(response)
         except AI33CreditsExhausted:
             _mark_ai33_primary_depleted(api_key)
             if index + 1 >= len(keys):
                 raise
             print("[ai33] selected account credits exhausted — switching account")
+            continue
+        except AI33VoiceNotFound:
+            if index + 1 >= len(keys):
+                raise
+            print("[ai33] selected account cannot access this ElevenLabs voice — switching account")
             continue
         except RuntimeError as exc:
             # A final 429 from _retrying is raised before _ai33_check sees the
@@ -230,25 +287,35 @@ def _ai33_submit(request_fn) -> str:
             continue
         task_id = str(data.get("task_id") or "").strip()
         if not task_id:
-            raise RuntimeError("ai33 response did not include a task_id")
-        _remember_ai33_task(task_id, api_key)
+            raise ai33_tasks.SubmissionUncertain("AI33 response omitted the task ID; acceptance is unknown")
+        try:
+            _remember_ai33_task(task_id, api_key)
+        except OSError as exc:
+            raise ai33_tasks.SubmissionUncertain("AI33 accepted the task but its account record could not be saved") from exc
         return task_id
     raise AI33CreditsExhausted(
         "ai33 credits are exhausted for every configured key")
 
 
-def ai33_submit_json(path: str, body: dict) -> str:
+def ai33_submit_json(path: str, body: dict, *, ledger_path: Optional[Path] = None) -> str:
     """POST a JSON job to ai33, return task_id."""
     url = f"{config.AI33_BASE_URL}{path}"
+    if ledger_path is not None:
+        return ai33_tasks.submit(ledger_path, body,
+            lambda: ai33_submit_json(path, body), kind=path)
     return _ai33_submit(lambda api_key: requests.post(
         url, headers={**_ai33_headers(api_key),
                       "Content-Type": "application/json"},
         json=body, timeout=60))
 
 
-def ai33_submit_form(path: str, fields: dict, files: Optional[dict] = None) -> str:
+def ai33_submit_form(path: str, fields: dict, files: Optional[dict] = None, *,
+                     ledger_path: Optional[Path] = None) -> str:
     """POST a multipart/form job to ai33, return task_id."""
     url = f"{config.AI33_BASE_URL}{path}"
+    if ledger_path is not None:
+        return ai33_tasks.submit(ledger_path, fields,
+            lambda: ai33_submit_form(path, fields, files), kind=path)
     return _ai33_submit(lambda api_key: requests.post(
         url, headers=_ai33_headers(api_key), data=fields, files=files,
         timeout=120))
@@ -271,6 +338,12 @@ def _ai33_check(r: requests.Response) -> dict:
     if r.status_code >= 400 or not data.get("success", True) or bad_provider_code:
         if _ai33_credit_error(r.status_code, provider_code, message):
             raise AI33CreditsExhausted("ai33 account credits are exhausted")
+        # AI33 returns this exact provider code before creating a TTS task.
+        # It happens when a cloned/custom ElevenLabs voice belongs to the
+        # other configured account.  Restrict account failover to this known,
+        # deterministic rejection so network/server failures are never replayed.
+        if "elevenlabs_voice_not_found" in message.casefold():
+            raise AI33VoiceNotFound("ai33 ElevenLabs voice is not available to this account")
         raise RuntimeError(f"ai33 error {r.status_code}: {message}")
     return data
 
@@ -281,6 +354,8 @@ def ai33_poll(task_id: str, timeout_s: int = 1200, interval: float = 5.0,
     url = f"{config.AI33_BASE_URL}/v1/task/{task_id}"
     with _AI33_KEY_LOCK:
         task_key = _AI33_TASK_KEYS.get(task_id)
+    if not task_key:
+        task_key = ai33_tasks.key_for(task_id)
     if not task_key:
         keys = _ai33_keys()
         if not keys:
@@ -323,6 +398,7 @@ def ai33_poll(task_id: str, timeout_s: int = 1200, interval: float = 5.0,
         if on_progress:
             on_progress(data.get("progress", 0))
         if status == "done":
+            ai33_tasks.complete(task_id, data)
             _forget_ai33_task(task_id)
             return data
         if status in ("error", "failed"):
@@ -332,6 +408,9 @@ def ai33_poll(task_id: str, timeout_s: int = 1200, interval: float = 5.0,
                 _mark_ai33_primary_depleted(task_key)
                 raise AI33CreditsExhausted(
                     "ai33 task failed because account credits are exhausted")
+            if "elevenlabs_voice_not_found" in message.casefold():
+                raise AI33VoiceNotFound(
+                    "ai33 ElevenLabs voice is not available to this account")
             raise RuntimeError(f"ai33 task failed: {message}")
         cancel.sleep(interval)
     _forget_ai33_task(task_id)

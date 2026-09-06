@@ -8,33 +8,61 @@ import socket
 import threading
 import time
 import traceback
+import hashlib
+from functools import lru_cache
 from typing import Any, Callable, Dict
 
 import requests
 
-from . import config
+from . import artifacts, cancel, config, resources
+
+SLOT_STATUSES = frozenset({"running", "awaiting_approval", "retry_wait"})
+
+
+@lru_cache(maxsize=1)
+def application_revision():
+    digest = hashlib.sha256()
+    paths = [config.ROOT / "app.py", *sorted((config.ROOT / "pipeline").glob("*.py")),
+             *sorted((config.ROOT / "templates").glob("*.html"))]
+    for path in paths:
+        try:
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+        except OSError:
+            pass
+    return digest.hexdigest()[:12]
 
 
 class FleetReporter:
-    def __init__(self, job_id: str):
+    def __init__(self, job_id: str, attempt_id=None):
         self.job_id = job_id
         self._lock = threading.Lock()
         self._approval = threading.Event()
         self._approval_data: dict = {}
         self._state: dict = {"job_id": job_id, "status": "running",
-                             "step": "start", "progress_pct": 0}
+                             "step": "start", "progress_pct": 0, "attempt_id": attempt_id}
 
     def progress(self, step: str, message: str, pct: int) -> None:
         with self._lock:
+            self._state.pop("error", None)
+            self._state.pop("retry_at", None)
             self._state.update(status="running", step=step,
                                message=message, progress_pct=pct)
+
+    def retry_wait(self, error: str, retries: int, limit: int, retry_at: float) -> None:
+        with self._lock:
+            self._state.update(status="retry_wait", step="retry_wait", error=error,
+                               retries=retries, retry_limit=limit, retry_at=retry_at,
+                               message=f"Retry {retries}/{limit} scheduled; worker slot reserved")
 
     def await_approval(self, hooks: dict, outline: str) -> tuple[str, str]:
         with self._lock:
             self._state.update(status="awaiting_approval", step="awaiting",
                                awaiting={"hooks": hooks, "outline": outline})
             self._approval.clear()
-        self._approval.wait()
+        while not self._approval.wait(0.5):
+            cancel.check()
+        cancel.check()
         with self._lock:
             approval = dict(self._approval_data)
             self._state.pop("awaiting", None)
@@ -48,10 +76,14 @@ class FleetReporter:
             self._approval_data = dict(approval)
             self._approval.set()
 
-    def complete(self, drive: dict) -> None:
+    def complete(self, drive: dict, performance=None) -> None:
         with self._lock:
             self._state.update(status="done", step="done", progress_pct=100,
-                               drive=drive)
+                               drive=drive, performance=performance)
+
+    def uploading(self, drive: dict):
+        with self._lock:
+            self._state.update(status="uploading", step="drive", drive=drive)
 
     def fail(self, error: str) -> None:
         with self._lock:
@@ -83,6 +115,20 @@ class FleetWorker:
         # behavior; a current controller can drain/pause or lower capacity
         # without restarting this process.
         self._policy: dict = {"mode": "active", "max_jobs": None}
+        self._state_file = config.OUTPUT_DIR / "fleet_reporters.json"
+        for jid, state in artifacts.read(self._state_file).items():
+            if not isinstance(state, dict):
+                continue
+            reporter = FleetReporter(jid, state.get("attempt_id"))
+            reporter._state = state
+            if state.get("status") not in ("done", "error"):
+                reporter.fail("Worker restarted during this attempt; resume the job to continue cached work")
+            self._jobs[jid] = reporter
+
+    def _persist_reporters(self):
+        with self._lock:
+            states = {jid: reporter.snapshot() for jid, reporter in self._jobs.items()}
+            artifacts.write(self._state_file, states)
 
     def start(self) -> None:
         if self._thread is None:
@@ -96,7 +142,7 @@ class FleetWorker:
             policy = dict(self._policy)
         active = sum(
             1 for j in jobs
-            if j["status"] in ("running", "awaiting_approval")
+            if j["status"] in SLOT_STATUSES
         )
         physical_max = max(1, min(8, int(config.FLEET_MAX_JOBS)))
         try:
@@ -121,27 +167,31 @@ class FleetWorker:
             load_1m = None
         return {
             "worker_id": self.worker_id, "name": self.name,
-            "protocol_version": 2,
+            "protocol_version": 4,
             "hardware": {"cpu_cores": config._detect_cpu_count(),
                          "ram_gb": round(config._detect_ram_gb(), 1),
                          "hw_encoder": config.gpu_encoder(),
                          "platform": platform.system(),
                          "platform_release": platform.release(),
-                         "python": platform.python_version()},
+                         "python": platform.python_version(), "app_revision": application_revision()},
             "capacity": {"max_jobs": physical_max,
                          "effective_max_jobs": effective_max,
                          "active": active,
                          "free": (max(0, effective_max - active)
                                   if accepting else 0)},
             "metrics": {"disk": disk_metrics, "load_1m": load_1m,
+                        "render": resources.snapshot(),
                         "uptime_seconds": round(time.monotonic() - self._started_at)},
             "policy": policy,
+            "cached_jobs": [p.name for p in config.OUTPUT_DIR.iterdir()
+                            if p.is_dir() and p.name.isdigit() and (p / "plan.json").exists()][:200],
             "jobs": jobs,
         }
 
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
+                self._persist_reporters()
                 r = requests.post(f"{config.FLEET_MAIN_URL}/api/fleet/heartbeat",
                                   json=self._payload(), headers={
                                       "Authorization": f"Bearer {config.FLEET_PAIRING_TOKEN}"},
@@ -180,12 +230,18 @@ class FleetWorker:
         # The main only acknowledges a terminal snapshot after applying and
         # persisting it. Pruning here keeps days of completed reporters from
         # bloating every future heartbeat while preserving retry-by-same-ID.
-        for jid in reply.get("acknowledged_jobs") or []:
+        acknowledgements = reply.get("acknowledged_attempts")
+        if acknowledgements is None:
+            acknowledgements = [{"job_id": jid} for jid in reply.get("acknowledged_jobs") or []]
+        for ack in acknowledgements:
+            jid = ack.get("job_id")
             jid = str(jid or "")
             with self._lock:
                 reporter = self._jobs.get(jid)
                 if (reporter and reporter.snapshot().get("status")
-                        in ("done", "error")):
+                        in ("done", "error") and
+                        (not reporter.snapshot().get("attempt_id") or
+                         reporter.snapshot().get("attempt_id") == ack.get("attempt_id"))):
                     self._jobs.pop(jid, None)
         for approval in reply.get("approvals") or []:
             with self._lock:
@@ -203,24 +259,29 @@ class FleetWorker:
                 effective_max = min(physical_max, int(override)) if override else physical_max
                 active = sum(
                     1 for item in self._jobs.values()
-                    if item.snapshot().get("status") in ("running", "awaiting_approval")
+                    if item.snapshot().get("status") in SLOT_STATUSES
                 )
                 if mode != "active" or active >= effective_max:
                     continue
                 existing = self._jobs.get(jid)
                 if existing:
+                    if (spec.get("attempt_id") and existing.snapshot().get("attempt_id")
+                            == spec.get("attempt_id")):
+                        continue
                     # Repeated delivery while the job is still active is the
                     # normal heartbeat acknowledgement path. A deliberate
                     # same-ID retry after a terminal result is different: it
                     # must get a fresh reporter/thread or the worker would
                     # replay the old done/error snapshot forever.
                     if existing.snapshot().get("status") in (
-                            "running", "awaiting_approval"):
+                            "running", "awaiting_approval", "retry_wait", "uploading"):
                         continue
-                reporter = FleetReporter(jid)
+                reporter = FleetReporter(jid, spec.get("attempt_id"))
                 self._jobs[jid] = reporter
+            self._persist_reporters()  # acknowledge durably before starting paid work
             threading.Thread(target=self._run, args=(spec, reporter), daemon=True,
                              name=f"dmiqwi-fleet-{jid}").start()
+        self._persist_reporters()
 
     def _run(self, spec: dict, reporter: FleetReporter) -> None:
         try:
@@ -232,3 +293,5 @@ class FleetWorker:
             # the worker's console is on another machine.
             detail = "".join(traceback.format_exception(type(e), e, e.__traceback__))
             reporter.fail(detail[-6000:])
+        finally:
+            self._persist_reporters()

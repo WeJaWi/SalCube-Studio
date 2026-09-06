@@ -10,6 +10,13 @@ from unittest.mock import patch
 import requests
 
 from pipeline import clients, config, llm, orchestrator
+from tests.isolation import isolated_runtime
+
+
+def setUpModule():
+    isolation = isolated_runtime()
+    isolation.__enter__()
+    unittest.addModuleCleanup(isolation.__exit__, None, None, None)
 
 
 def response(status: int, data: dict) -> SimpleNamespace:

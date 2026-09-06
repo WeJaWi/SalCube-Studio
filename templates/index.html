@@ -581,6 +581,7 @@
       <div class="logo-name">Dmi<span>qwi</span></div>
     </a>
     <div class="top-tag">Video studio</div>
+    <a href="/api/usage/ai33" target="_blank" rel="noopener" class="top-tag">AI33 usage</a>
     <label class="top-toggle" id="gpuToggleWrap" title="Applies to jobs started after this change — running jobs finish with their original encoder.">
       <input type="checkbox" id="gpuToggle" />
       <span id="gpuToggleLabel">GPU encode</span>
@@ -715,6 +716,7 @@
     <div class="section">
       <label>Call-to-actions</label>
       <label class="check"><input type="checkbox" id="cta_comment" checked /> Comment prompts</label>
+      <label class="check"><input type="checkbox" id="cta_rating" /> Spoken rating CTA — “If you enjoy this video, please give us a rating. It means a lot, thank you.”</label>
       <label class="check"><input type="checkbox" id="cta_ebook" /> E-book CTA</label>
       <label class="check"><input type="checkbox" id="qr_badge" /> QR badge (top-left)</label>
       <textarea id="ebook_text" placeholder="Optional: exact e-book CTA block" style="min-height:56px;margin:4px 0 8px"></textarea>
@@ -956,6 +958,7 @@ function buildPayload(title) {
     anim_templates: [...document.querySelectorAll(".tpl:checked")].map(c => c.value),
     anim_themes: [...document.querySelectorAll(".theme:checked")].map(c => c.value),
     comment_cta: $("#cta_comment").checked,
+    rating_cta: $("#cta_rating").checked,
     patreon_split: $("#patreon_split").checked,
     patreon_cut_from: parseInt($("#patreon_from").value) || null,
     patreon_cut_to: parseInt($("#patreon_to").value) || null,
@@ -1071,7 +1074,7 @@ function renderWorkers(workers) {
         <strong title="${escapeHtml(w.worker_id)}">${escapeHtml(w.name)}</strong>
         <span class="badge ${w.health === "paused" ? "worker-paused" : w.health}">${escapeHtml(healthLabel)}</span>
       </div>
-      <div class="worker-meta">${escapeHtml(hw.platform || "Worker")} · ${hw.cpu_cores || "?"} cores · ${hw.ram_gb || "?"} GB RAM<br>${escapeHtml(hw.hw_encoder || "software H.264")} · seen ${workerAge(w.age_seconds || 0)}</div>
+      <div class="worker-meta">${escapeHtml(hw.platform || "Worker")} · ${hw.cpu_cores || "?"} cores · ${hw.ram_gb || "?"} GB RAM<br>${escapeHtml(hw.hw_encoder || "software H.264")} · seen ${workerAge(w.age_seconds || 0)}<br>${hw.app_revision ? 'Version '+escapeHtml(hw.app_revision) : 'Worker update needed'}${metrics.render ? ` · ${metrics.render.active_encoders}/${metrics.render.max_encoders} encoders · ${metrics.render.waiting_encoders} waiting` : ''}</div>
       <div class="worker-stats">
         <div class="worker-stat"><span>Active</span><strong>${cap.active||0} / ${cap.effective_max_jobs||0}</strong></div>
         <div class="worker-stat"><span>Pending</span><strong>${cap.pending||0}</strong></div>
@@ -1395,10 +1398,12 @@ async function refreshQueue() {
         : "";
       const assignment = j.dispatched_to ? ` · ${escapeHtml(workerName(j.dispatched_to))}` : "";
       return `<div class="qrow${j.job_id===currentJob?' sel':''}" data-id="${j.job_id}">
-        <span class="badge ${j.status}">${statusLabel(j.status)}</span>
+        <span class="badge ${j.status}">${j.status==='done' ? (j.drive?.state==='uploaded' ? 'Delivered' : j.drive?.state==='error' ? 'Upload failed' : 'Render ready') : statusLabel(j.status)}</span>
         <span class="qtitle" title="${escapeHtml(j.title || j.job_id)}">${escapeHtml(j.title || j.job_id)}</span>
-        <span class="qmeta">${pos}${escapeHtml(j.profile || "")}${j.step && j.status==='running' ? ' · '+escapeHtml(j.step) : ''}${assignment}${jobMeta(j)}</span>
+        <span class="qmeta">${pos}${escapeHtml(j.profile || "")}${j.step && j.status==='running' ? ' · '+escapeHtml(j.step) : ''}${assignment}${jobMeta(j)}${j.queue_reason ? ' · '+escapeHtml(j.queue_reason) : ''}${j.drive?.progress ? ' · '+Math.round(100*j.drive.progress.confirmed_bytes/Math.max(1,j.drive.progress.total_bytes))+'% uploaded · '+(j.drive.progress.bytes_per_second/1000000).toFixed(1)+' MB/s'+(j.drive.progress.eta_seconds != null ? ' · '+Math.ceil(j.drive.progress.eta_seconds/60)+'m remaining' : '') : ''}</span>
         ${sizeBadge(j)}
+        ${['done','paused','error'].includes(j.status) && !j.dispatched_to ? `<a href="/broll/${encodeURIComponent(j.job_id)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">B-roll</a>` : ''}
+        ${j.performance ? `<a href="/api/performance/${encodeURIComponent(j.job_id)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Timings</a>` : ''}
         ${canCancel ? `<button class="danger qcancel" data-id="${j.job_id}">Remove</button>` : ""}
         ${canResume ? `<button class="secondary qresume" data-id="${j.job_id}" title="Continue from where it stopped" style="margin:0;padding:6px 12px;font-size:12px">Resume</button>` : ""}
         ${canRelease ? `<button class="secondary qrelease" data-id="${j.job_id}" title="Return this unstarted dispatch to the queue" style="margin:0;padding:6px 12px;font-size:12px">Release</button>` : ""}
