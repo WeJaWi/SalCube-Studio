@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Statistics · SalCube Studio</title>
+  <link rel="icon" href="{{ url_for('static', filename='salcube.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='salcube.css') }}">
+  <script src="{{ url_for('static', filename='stats.js') }}" defer></script>
+</head>
+<body class="stats-page">
+{% include '_studio_header.html' %}
+<main class="stats-wrap">
+  <div class="stats-intro">
+    <div><div class="stats-eyebrow">The bigger picture</div><h1>Your studio, in numbers.</h1><p class="stats-muted">Track production, understand usage, spot what needs attention.</p></div>
+    <div class="stats-filters">
+      <label>Period<select id="statsDays"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option></select></label>
+      <label>Profile<select id="statsProfile"><option value="">All accessible profiles</option></select></label>
+      <button id="statsRefresh" type="button">Refresh</button>
+    </div>
+  </div>
+  <div id="statsStatus" class="stats-status" role="status">Loading your statistics…</div>
+  <section class="stats-cards" aria-label="Key statistics">
+    <article class="stats-card"><div class="stats-label">Jobs created</div><div id="metricJobs" class="stats-value">—</div><div id="detailJobs" class="stats-detail">Loading production history</div></article>
+    <article class="stats-card"><div class="stats-label">Daily narration average</div><div id="metricChars" class="stats-value mint">—</div><div id="detailChars" class="stats-detail">Submitted AI33 characters / day</div></article>
+    <article class="stats-card"><div class="stats-label">Recorded Kie credits</div><div id="metricKie" class="stats-value gold">—</div><div id="detailKie" class="stats-detail">Provider-reported usage only</div></article>
+    <article class="stats-card"><div class="stats-label">Median render time</div><div id="metricRender" class="stats-value">—</div><div id="detailRender" class="stats-detail">Measured completed renders</div></article>
+  </section>
+  <div class="stats-grid">
+    <div class="stats-main">
+      <section class="stats-panel">
+        <div class="stats-panel-head"><div><h2>Daily activity</h2><span class="stats-detail">Every calendar day counts · UTC</span></div><select id="chartMetric" aria-label="Chart metric"><option value="characters">Narration characters</option><option value="jobs">Jobs created</option></select></div>
+        <div id="activityChart" class="stats-chart" role="group" aria-label="Daily activity bars"></div>
+        <div class="stats-chart-labels"><span id="chartFrom"></span><span id="chartTo"></span></div>
+        <div id="chartSummary" class="stats-chart-summary" aria-live="polite"></div>
+      </section>
+      <section class="stats-panel"><h2>By profile</h2><p class="stats-detail">Job status today, for jobs created within this period.</p>
+        <div class="stats-table-wrap"><table class="stats-table"><thead><tr><th scope="col">Profile</th><th scope="col">Jobs</th><th scope="col">Done</th><th scope="col">Failed</th><th scope="col">Retrying</th><th scope="col">Chars / day</th><th scope="col">Render median</th></tr></thead><tbody id="profileRows"></tbody></table></div>
+      </section>
+      <section class="stats-panel"><h2>Where processing time goes</h2><p class="stats-detail">Recorded call durations. Parallel and nested stages overlap; these are not a total runtime.</p><div id="stageRows"></div></section>
+    </div>
+    <aside class="stats-side">
+      <section class="stats-panel stats-assistant">
+        <div class="stats-assistant-title"><img class="salcube-avatar" src="{{ url_for('static', filename='salcube.svg') }}" alt="SalCube's smiling cube face"><div><h2>SalCube</h2><p>Your numbers have a guide.</p></div></div>
+        {% if owner_access %}
+        <p class="stats-detail">I can read these statistics alongside worker health and job history. Ask me about the selected period and profile.</p>
+        <label class="stats-detail" for="statsQuestion">What would you like to understand?</label>
+        <textarea id="statsQuestion" maxlength="2000" placeholder="Which profile uses the most narration characters?"></textarea>
+        <button id="statsAsk" type="button">Ask SalCube</button><div id="statsAnswer" class="stats-answer" role="status"></div>
+        {% else %}<p class="stats-detail">You can view statistics for your profiles. SalCube's fleet-wide reports require owner access.</p>{% endif %}
+      </section>
+      <section class="stats-panel"><h2>Current job states</h2><p class="stats-detail">All dates · selected profile scope</p><div id="statusRows"></div></section>
+      <section class="stats-panel"><h2>About these numbers</h2><ul id="statsNotes" class="stats-notes"></ul></section>
+    </aside>
+  </div>
+</main>
+</body>
+</html>

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import statistics
+import math
 import threading
 from typing import List, Optional
 
@@ -55,7 +56,7 @@ def record_render(profile: str, job_id: str, chars: int, beats: int,
         return  # a hard-crash / instant-resume timing isn't a real sample
     with _STATS_LOCK:
         data = _load()
-        samples = data["samples"].setdefault(profile, [])
+        samples = [s for s in data["samples"].get(profile, []) if s.get("job_id") != job_id]
         samples.append({
             "job_id": job_id, "chars": chars, "beats": beats,
             "render_seconds": render_seconds, "gpu": gpu,
@@ -63,6 +64,29 @@ def record_render(profile: str, job_id: str, chars: int, beats: int,
         })
         data["samples"][profile] = samples[-MAX_SAMPLES_PER_PROFILE:]
         _save(data)
+
+
+def record_performance(profile, job_id, performance, finished_at):
+    """Learn ETAs only from measured complete renders, never cached resumes.
+
+    Each machine records its own completions so Windows and Mac hardware
+    speeds are not mixed. Deduplication prevents retries multiplying samples.
+    Statistics must never turn a successful deliverable into a failed job.
+    """
+    if not isinstance(performance, dict):
+        return
+    try:
+        counters = performance.get("counters") or {}
+        if counters.get("beat_cache_hits") or counters.get("final_export_cache_hits"):
+            return
+        seconds = float(((performance.get("stages") or {}).get("video_render") or {}).get("seconds") or 0)
+        chars = int(performance.get("chars") or 0)
+        if not math.isfinite(seconds) or seconds <= 0 or chars <= 0:
+            return
+        record_render(profile, job_id, chars, int(performance.get("beats") or 0), seconds,
+                      performance.get("encoder") not in (None, "libx264"), finished_at)
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
 
 
 def _chars_per_minute(samples: List[dict]) -> Optional[float]:

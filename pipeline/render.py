@@ -1561,6 +1561,7 @@ def crossfade_concat(clips: List[Path], music: Optional[Path], out: Path,
         path.with_suffix(".cache.json").unlink(missing_ok=True)
 
 
+@telemetry.timed("video_render")
 def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                  music: Optional[Path], workdir: Path, out_path: Path,
                  overlay: Optional[Path] = None,

@@ -1,4 +1,4 @@
-# Dmiqwi — video studio
+# SalCube Studio — video studio
 
 Formerly *Senior Health Studio*. Channel profiles still include Grandma Hannah & Matthias Richter.
 
@@ -172,6 +172,30 @@ awake during multi-hour renders without forcing the display to stay on.
 
 Outline, hooks, and the final script are saved in the job folder
 (`output/<job>/outline.txt`, `hooks.json`, `script.txt`).
+
+## Statistics and SalCube
+
+The **Statistics** tab (`/stats`) shows 7/30/90-day activity, per-profile job
+counts, daily average submitted AI33 characters, recorded Kie credits, and
+measured processing durations. `/api/stats?days=30&profile=classic` accepts
+1–365 calendar days. Counts use UTC submission dates; job status is current.
+Usage is deduplicated by provider task/intent and covers this machine's local
+ledgers only, not all workers or invoices. Missing credit amounts and render
+timings are displayed as unknown. Deleted history cannot be reconstructed.
+
+SalCube is the studio observer, with a cube face and access to sanitized
+30-day statistics during regular checks. Questions asked from Statistics
+receive fresh server-side aggregates for the selected period and profile.
+Profile-restricted users see only their own statistics; fleet-wide observer
+reports/chat require owner access. No API keys enter these aggregates.
+
+New completed, uncached renders teach each machine's existing ETA estimator
+its measured throughput. Repeated completions are deduplicated, partial/cache
+resumes are excluded, and different machines' speeds are not mixed. At least
+three samples are needed before measured throughput replaces the default.
+
+Restart the app to activate these backend additions; a Git pull alone does
+not reload a running Python server. Let active jobs finish before restarting.
 
 ## AI operations center
 

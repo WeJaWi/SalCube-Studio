@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Dmiqwi</title>
+<title>SalCube Studio</title>
 <style>
   :root {
     /* Grey-forward palette: cool charcoal + soft cyan accents */
@@ -571,34 +571,17 @@
   ::-webkit-scrollbar-thumb { background: #3a3f48; border-radius: 99px; }
   ::-webkit-scrollbar-thumb:hover { background: #4a505a; }
 </style>
+<link rel="stylesheet" href="{{ url_for('static', filename='salcube.css') }}">
 </head>
 <body>
 
-<header class="topbar">
-  <div class="topbar-inner">
-    <a class="logo" href="/">
-      <div class="logo-mark">D</div>
-      <div class="logo-name">Dmi<span>qwi</span></div>
-    </a>
-    <div class="top-tag">Video studio</div>
-    <a href="/api/usage/ai33" target="_blank" rel="noopener" class="top-tag">AI33 usage</a>
-    <label class="top-toggle" id="gpuToggleWrap" title="Applies to jobs started after this change — running jobs finish with their original encoder.">
-      <input type="checkbox" id="gpuToggle" />
-      <span id="gpuToggleLabel">GPU encode</span>
-    </label>
-    <label class="top-toggle" id="pauseToggleWrap" title="Stops picking up NEW jobs. Anything already running keeps going.">
-      <input type="checkbox" id="pauseToggle" />
-      <span id="pauseToggleLabel">Pause queue</span>
-    </label>
-    <a class="top-tag" href="/thumbnails" style="text-decoration:none">Thumbnails →</a>
-  </div>
-</header>
+{% include '_studio_header.html' %}
 
 <div class="studio-shell">
 <div class="wrap">
   <div class="hero">
-    <h1>Create videos with <em>Dmiqwi</em></h1>
-    <p class="sub">Outline + hooks → approval → script → voice → b-roll → FFmpeg. Queue multiple titles — several can run at once.</p>
+    <h1>From an idea to <em>your next video.</em></h1>
+    <p class="sub">Create, queue and deliver. Your scripts, voices, footage and workers — together in one studio.</p>
   </div>
 
   {% if missing_keys %}
@@ -694,7 +677,7 @@
         <label style="margin:0">Allowed animation templates</label>
         <button type="button" id="tplAll" style="margin:0;padding:6px 14px;font-size:12px">Select all</button>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px 14px">
+      <div class="template-options" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px 14px">
         {% for t in anim_templates %}
         <label class="check" style="margin-bottom:4px"><input type="checkbox" class="tpl" value="{{ t }}" checked /> {{ t }}</label>
         {% endfor %}
@@ -839,12 +822,12 @@
 </div>
 
 <aside class="panel ops-panel">
-  <div class="ops-head">
-    <span class="dot" id="opsDot"></span>
-    <strong>System observer</strong>
-    <span class="badge" id="opsModel">Qwen → Terra fallback</span>
+  <div class="ops-head salcube-head">
+    <img class="salcube-avatar" src="{{ url_for('static', filename='salcube.svg') }}" alt="SalCube's smiling cube face">
+    <div><strong>SalCube</strong><div class="salcube-caption"><span class="dot" id="opsDot"></span>Your studio observer</div></div>
   </div>
-  <div class="ops-policy">Read-only except AI33 credit failover · checks every minute · keys are never shown to the observer · reports stay local.</div>
+  <div class="salcube-model" id="opsModel">Connecting to your observer…</div>
+  <div class="ops-policy">Reads jobs, workers and <a href="/stats">statistics</a> · checks every minute · can switch AI33 keys on credit failure · keys stay private, reports stay local.</div>
   <div class="ops-drive">
     <span class="dot" id="driveDot"></span>
     <span id="driveState">Checking Google Drive…</span>
@@ -856,9 +839,9 @@
   </div>
   <div id="opsLog" class="ops-log"><div class="hint">Waiting for the first system update…</div></div>
   <div class="ops-chat">
-    <textarea id="opsQuestion" placeholder="Ask about jobs, workers, failures, disk, Drive, or the app…"></textarea>
+    <textarea id="opsQuestion" aria-label="Question for SalCube" placeholder="Ask about usage, jobs, workers, failures or Drive…"></textarea>
     <div class="ops-actions">
-      <button id="askOps">Ask monitor</button>
+      <button id="askOps">Ask SalCube</button>
       <button id="makeOpsReport" class="secondary">Create report</button>
     </div>
     <div id="opsAnswer" class="ops-answer hidden"></div>
@@ -1735,8 +1718,16 @@ function shortTime(iso) {
 }
 
 async function refreshOps() {
+  if (!{{ owner_access | tojson }}) {
+    $("#opsModel").textContent = "Owner access required";
+    $("#opsLog").textContent = "Fleet-wide reports are private. Your profile statistics are available from the Statistics tab.";
+    ["#askOps", "#makeOpsReport", "#opsQuestion"].forEach(id => $(id).disabled = true);
+    return;
+  }
   try {
-    const data = await (await fetch("/api/ops/status")).json();
+    const response = await fetch("/api/ops/status");
+    if (!response.ok) throw new Error("Observer unavailable");
+    const data = await response.json();
     $("#opsDot").className = "dot " + (data.running ? "online" : "busy");
     $("#opsModel").textContent = data.model || "Qwen → Terra fallback";
     const entries = (data.entries || []).slice().reverse();
@@ -1800,7 +1791,7 @@ $("#askOps").addEventListener("click", async () => {
   if (!q) return;
   $("#askOps").disabled = true;
   $("#opsAnswer").classList.remove("hidden");
-  $("#opsAnswer").textContent = "Qwen is reviewing the current system snapshot…";
+  $("#opsAnswer").textContent = "SalCube is reviewing the current system snapshot…";
   try {
     const data = await (await fetch("/api/ops/chat", {method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify({question:q})})).json();

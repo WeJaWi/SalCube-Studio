@@ -1,0 +1,16 @@
+<header class="studio-header">
+  <div class="studio-header-inner">
+    <a class="studio-brand" href="/" aria-label="SalCube Studio home"><img src="{{ url_for('static', filename='salcube.svg') }}" alt="" width="38" height="38"><span>SalCube <small>STUDIO</small></span></a>
+    <nav class="studio-nav" aria-label="Main navigation">
+      <a href="/" {% if request.path == '/' %}aria-current="page"{% endif %}>Create</a>
+      <a href="/stats" {% if request.path == '/stats' %}aria-current="page"{% endif %}>Statistics</a>
+      <a href="/thumbnails" {% if request.path == '/thumbnails' %}aria-current="page"{% endif %}>Thumbnails</a>
+    </nav>
+    {% if request.path == '/' %}
+    <div class="studio-controls">
+      <label class="top-toggle" id="gpuToggleWrap" title="New jobs use this encoder; running jobs keep theirs."><input type="checkbox" id="gpuToggle"><span id="gpuToggleLabel">GPU encode</span></label>
+      <label class="top-toggle" id="pauseToggleWrap" title="Pauses new local jobs. Running jobs continue."><input type="checkbox" id="pauseToggle"><span id="pauseToggleLabel">Pause queue</span></label>
+    </div>
+    {% endif %}
+  </div>
+</header>

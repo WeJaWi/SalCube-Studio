@@ -15,7 +15,7 @@ from pathlib import Path
 from flask import (Flask, Response, g, jsonify, make_response, redirect,
                    render_template, request, send_file, abort)
 
-from pipeline import (ai33_tasks, animation, artifacts, cancel, clients, config, delivery_doc, fleet, identity,
+from pipeline import (ai33_tasks, analytics, animation, artifacts, cancel, clients, config, delivery_doc, fleet, identity,
                       jobs, llm, operations, orchestrator, render as video_render,
                       research, resources, scheduler, stats, storage, telemetry, thumbnail)
 
@@ -221,7 +221,7 @@ def _render_progress_pct(completed: int, total: int) -> int:
 # Each key belongs to a named user with an allowed-profiles set; None = all.
 ACCESS = config.access_keys()
 
-_LOGIN_PAGE = """<!doctype html><html><head><title>Dmiqwi</title>
+_LOGIN_PAGE = """<!doctype html><html><head><title>SalCube Studio</title>
 <style>
 body{background:#1a1c1f;color:#d4d7dc;font-family:Inter,-apple-system,sans-serif;
 display:flex;align-items:center;justify-content:center;height:100vh;margin:0;
@@ -240,8 +240,8 @@ border-radius:999px;padding:11px 28px;font-size:14px;font-weight:650;cursor:poin
 box-shadow:0 0 0 1px rgba(255,255,255,.08) inset}
 h2{margin:0;font-size:22px;letter-spacing:-.03em;color:#c8ccd2}h2 span{color:#5ec8d8}
 </style></head><body>
-<form method="post" action="/login"><div class="mark">D</div>
-<h2>Dmi<span>qwi</span></h2>
+<form method="post" action="/login"><div class="mark">S</div>
+<h2>SalCube <span>Studio</span></h2>
 <input type="password" name="key" placeholder="Access key" autofocus />
 <br/><button>Enter</button>{ERR}</form></body></html>"""
 
@@ -284,6 +284,8 @@ def _auth():
         return None
     g.user = _user_for(request.cookies.get("studio_key"))
     if g.user:
+        if request.path.startswith("/api/ops/") and g.user.get("profiles") is not None:
+            return jsonify({"error": "SalCube's fleet-wide reports require owner access"}), 403
         return None
     if request.path.startswith("/api/"):
         return jsonify({"error": "not authorized"}), 401
@@ -1342,6 +1344,7 @@ def _run_job_impl(job_id: str, inputs: dict, profile: str, *,
         on_planned call, right after the script is finalized). Purely
         informational in this increment — updates the queue's size
         badge/ETA display, never blocks or gates anything."""
+        token.metrics.context.update(chars=meta["chars"], beats=meta["est_beats"])
         settings = config.load_settings()
         small_th = config.queue_setting("small_threshold_chars", profile, settings)
         big_th = config.queue_setting("big_threshold_chars", profile, settings)
@@ -1421,6 +1424,7 @@ def _run_job_impl(job_id: str, inputs: dict, profile: str, *,
         if not video_render.is_valid_video(out):
             raise RuntimeError(
                 f"render did not produce a valid playable video: {out.name}")
+        stats.record_performance(profile, job_id, token.metrics.snapshot(), datetime.now().isoformat(timespec="seconds"))
         with LOCK:
             JOBS[job_id]["status"] = "uploading"
             JOBS[job_id]["step"] = "drive"
@@ -1517,7 +1521,38 @@ def index():
         anim_templates=list(animation.TEMPLATES),
         anim_themes=list(animation.THEMES),
         profile_theme_defaults=_profile_theme_defaults(),
+        owner_access=not ACCESS or getattr(g, "user", {}).get("profiles") is None,
     )
+
+
+def _statistics(days=30, profile=None, allowed_profiles=None):
+    with LOCK:
+        rows = [{"job_id": jid, "profile": j.get("profile"), "status": j.get("status"),
+                 "created_at": j.get("created_at"), "performance": j.get("performance")}
+                for jid, j in JOBS.items()]
+    return analytics.snapshot(rows, days=days, profile=profile, allowed_profiles=allowed_profiles)
+
+
+@app.route("/stats")
+def statistics_page():
+    return render_template("stats.html", owner_access=not ACCESS or getattr(g, "user", {}).get("profiles") is None)
+
+
+@app.route("/api/stats")
+def statistics_api():
+    try:
+        days = int(request.args.get("days", "30"))
+        if not 1 <= days <= 365:
+            raise ValueError()
+    except ValueError:
+        return jsonify({"error": "days must be between 1 and 365"}), 400
+    profile = request.args.get("profile") or None
+    if profile and not _allowed_profile(profile):
+        abort(403)
+    allowed = getattr(g, "user", {}).get("profiles") if ACCESS else None
+    response = jsonify(_statistics(days, profile, allowed))
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _build_inputs(data: dict, title: str) -> dict:
@@ -2921,6 +2956,9 @@ def _ops_snapshot() -> dict:
     important = [r for r in job_rows if r["status"] not in ("done", "cancelled")]
     recent_done = [r for r in reversed(job_rows) if r["status"] == "done"][:5]
     monitored_jobs = (important[:30] + recent_done)[:35]
+    statistics = _statistics()
+    statistics.pop("daily", None)  # Keep minute-by-minute prompts compact.
+    statistics.pop("filters", None)
     return {
         "captured_at": now.isoformat(timespec="seconds"),
         "fleet_role": config.FLEET_ROLE,
@@ -2934,6 +2972,7 @@ def _ops_snapshot() -> dict:
         "disk": operations.disk_snapshot(),
         "drive": {"configured": DRIVE.configured, "authorized": DRIVE.authorized},
         "ai33": clients.ai33_key_status(),
+        "statistics": statistics,
     }
 
 
@@ -2951,11 +2990,21 @@ def ops_status():
 
 @app.route("/api/ops/chat", methods=["POST"])
 def ops_chat():
-    question = str((request.get_json(silent=True) or {}).get("question") or "").strip()
+    body = request.get_json(silent=True) or {}
+    question = str(body.get("question") or "").strip()
     if not question:
         return jsonify({"error": "question is required"}), 400
+    statistics = None
+    if "days" in body:
+        try:
+            days = int(body["days"])
+            if not 1 <= days <= 365:
+                raise ValueError()
+        except (TypeError, ValueError):
+            return jsonify({"error": "days must be between 1 and 365"}), 400
+        statistics = _statistics(days, str(body.get("profile") or "") or None)
     try:
-        return jsonify(_ops_center().chat(question))
+        return jsonify(_ops_center().chat(question, statistics=statistics))
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 502
 

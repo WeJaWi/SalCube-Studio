@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Dmiqwi — Thumbnails</title>
+<title>Thumbnails · SalCube Studio</title>
 <style>
   :root {
     --bg: #1a1c1f; --bg-elev: #22252a; --panel: #25282e; --panel-2: #2a2e35;
@@ -107,18 +107,11 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: #3a3f48; border-radius: 99px; }
 </style>
+<link rel="stylesheet" href="{{ url_for('static', filename='salcube.css') }}">
 </head>
 <body>
 
-<header class="topbar">
-  <div class="topbar-inner">
-    <a class="logo" href="/">
-      <div class="logo-mark">D</div>
-      <div class="logo-name">Dmi<span>qwi</span></div>
-    </a>
-    <a class="top-tag" href="/">← Video studio</a>
-  </div>
-</header>
+{% include '_studio_header.html' %}
 
 <div class="wrap">
   <div class="hero">

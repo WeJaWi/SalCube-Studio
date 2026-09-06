@@ -24,13 +24,17 @@ _FALLBACK_MODEL = "gpt-5.6-terra"
 _FALLBACK_DISPLAY_MODEL = "gpt-5.6-terra"
 _MODEL_CHAIN = f"{_DISPLAY_MODEL} → {_FALLBACK_DISPLAY_MODEL} fallback"
 _SYSTEM = (
-    "You are Dmiqwi Operations, a production observer. You inspect "
+    "You are SalCube, SalCube Studio's production observer. You inspect "
     "sanitized video-job, queue, storage, and worker health. Never claim you "
     "changed, restarted, stopped, retried, edited, or contacted anything. "
     "You have no mutation tools or credential access. The host may perform "
     "one deterministic action outside the model: prefer the configured AI33 "
     "backup after explicit credit/quota exhaustion. Separate evidence from "
-    "inference. Be concise. "
+    "inference. Be concise. You can read the statistics supplied in the snapshot: "
+    "job counts, profile summaries, daily average narration characters, recorded "
+    "Kie credits, and measured processing times. Respect their period and coverage "
+    "notes: local usage is not fleet-wide billing; missing credits are unknown, "
+    "not zero. Never infer an account balance from usage. "
     "If evidence suggests a broad or uncertain root cause, recommend a report."
 )
 
@@ -291,11 +295,13 @@ class OperationsCenter:
                 "evidence": health["issues"][:4],
             })
 
-    def chat(self, question: str) -> dict:
+    def chat(self, question: str, *, statistics: Optional[dict] = None) -> dict:
         question = question.strip()
         if not question:
             raise ValueError("question is required")
         snapshot = self.snapshot_provider()
+        if statistics is not None:
+            snapshot = {**snapshot, "statistics": {k: v for k, v in statistics.items() if k not in ("daily", "filters")}}
         with self._lock:
             recent = list(self._entries)[-12:]
         answer, used_model = _chat_with_fallback(
@@ -327,7 +333,7 @@ class OperationsCenter:
             evidence = "\n".join(
                 f"- {x}" for x in ((analysis or {}).get("evidence") or ["See snapshot below."]))
             body = (
-                f"# Dmiqwi root-cause report\n\n## Summary\n\n{reason}. "
+                f"# SalCube root-cause report\n\n## Summary\n\n{reason}. "
                 f"{(analysis or {}).get('message', '')}\n\n## Evidence\n\n{evidence}\n\n"
                 "## Safety boundary\n\nNo job, worker, setting, credential, or file was "
                 "changed. Any corrective change requires owner approval.\n\n"
@@ -353,7 +359,7 @@ class OperationsCenter:
                             "created_at": datetime.fromtimestamp(
                                 path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"),
                             "url": f"/api/ops/report/{path.stem}"})
-        return {"running": self.running, "interval_seconds": self.interval,
+        return {"name": "SalCube", "running": self.running, "interval_seconds": self.interval,
                 "model": _MODEL_CHAIN, "entries": entries,
                 "reports": reports, "ai33": clients.ai33_key_status()}
 
