@@ -1387,6 +1387,7 @@ async function refreshQueue() {
         ${sizeBadge(j)}
         ${['done','paused','error'].includes(j.status) && !j.dispatched_to ? `<a href="/broll/${encodeURIComponent(j.job_id)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">B-roll</a>` : ''}
         ${j.performance ? `<a href="/api/performance/${encodeURIComponent(j.job_id)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Timings</a>` : ''}
+        ${j.status === 'done' && !j.dispatched_to && ['error','pending_authorization'].includes(j.drive?.state) ? `<button class="secondary qdriveRetry" data-id="${j.job_id}" style="margin:0;padding:6px 12px;font-size:12px" title="Upload the existing video without regenerating it">Retry upload</button>` : ''}
         ${canCancel ? `<button class="danger qcancel" data-id="${j.job_id}">Remove</button>` : ""}
         ${canResume ? `<button class="secondary qresume" data-id="${j.job_id}" title="Continue from where it stopped" style="margin:0;padding:6px 12px;font-size:12px">Resume</button>` : ""}
         ${canRelease ? `<button class="secondary qrelease" data-id="${j.job_id}" title="Return this unstarted dispatch to the queue" style="margin:0;padding:6px 12px;font-size:12px">Release</button>` : ""}
@@ -1398,8 +1399,19 @@ async function refreshQueue() {
     }).join("");
     qList.querySelectorAll(".qrow").forEach(el => {
       el.addEventListener("click", e => {
-        if (e.target.closest(".qcancel") || e.target.closest(".qretry") || e.target.closest(".qdispatch") || e.target.closest(".qworker") || e.target.closest(".qrelease") || e.target.closest(".qstop") || e.target.closest(".qresume")) return;
+        if (e.target.closest(".qcancel") || e.target.closest(".qretry") || e.target.closest(".qdriveRetry") || e.target.closest(".qdispatch") || e.target.closest(".qworker") || e.target.closest(".qrelease") || e.target.closest(".qstop") || e.target.closest(".qresume")) return;
         selectJob(el.dataset.id);
+      });
+    });
+    qList.querySelectorAll(".qdriveRetry").forEach(btn => {
+      btn.addEventListener("click", async e => {
+        e.stopPropagation(); btn.disabled = true;
+        try {
+          const response = await fetch(`/api/drive/retry/${encodeURIComponent(btn.dataset.id)}`, {method:"POST"});
+          const result = await response.json();
+          if (!response.ok) alert(result.error || "Could not retry the upload.");
+        } catch (error) { alert("Could not reach the app."); }
+        finally { btn.disabled = false; refreshQueue(); }
       });
     });
     qList.querySelectorAll(".qretry").forEach(btn => {

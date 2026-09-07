@@ -87,7 +87,8 @@ class GoogleDriveStorage:
 
     @property
     def authorized(self) -> bool:
-        return bool(self._load_token().get("refresh_token"))
+        token = self._load_token()
+        return bool(token.get("refresh_token")) and not token.get("authorization_required", False)
 
     def status(self) -> dict:
         token = self._load_token()
@@ -375,7 +376,7 @@ class GoogleDriveStorage:
 
     def _access_token(self, force_refresh: bool = False) -> str:
         token = self._load_token()
-        if not token.get("refresh_token"):
+        if not token.get("refresh_token") or token.get("authorization_required"):
             raise DriveAuthorizationRequired(
                 "Google Drive needs one-time browser authorization")
         expires_at = float(token.get("expires_at") or 0)
@@ -389,6 +390,15 @@ class GoogleDriveStorage:
             "refresh_token": token["refresh_token"],
             "grant_type": "refresh_token",
         }, timeout=60)
+        if r.status_code == 400:
+            try:
+                revoked = r.json().get("error") == "invalid_grant"
+            except (ValueError, AttributeError):
+                revoked = False
+            if revoked:
+                self._save_token({"authorization_required": True})
+                raise DriveAuthorizationRequired(
+                    "Google Drive authorization expired or was revoked. Reconnect Drive on this machine, then retry the upload.")
         self._require_ok(r, "refreshing Google Drive access")
         fresh = r.json()
         if not fresh.get("access_token"):

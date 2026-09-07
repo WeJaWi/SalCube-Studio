@@ -920,8 +920,8 @@ def _verified_delivery_roles(job_dir: Path, remote_files: dict) -> list[tuple[st
         if not path.exists() and (remote_files.get(role) or {}).get("id"):
             continue
         signature = artifacts.signature(path)
-        if (signature != signatures[path.name]
-                or artifacts.read(path.with_suffix(".export.json")).get("outputs") != [signature]
+        if (signature is None or signature[:3] != signatures[path.name][:3]
+                or not artifacts.output_matches(artifacts.read(path.with_suffix(".export.json")), path)
                 or not video_render.is_valid_video(path)):
             return []
     return roles
@@ -1085,7 +1085,7 @@ def _upload_job_deliverables(job_id: str, job_dir: Path) -> None:
         with LOCK:
             job = JOBS.get(job_id)
             if job:
-                job["drive"] = {"state": "not_configured", "files": {}}
+                job["drive"] = {"state": "not_configured", "files": (job.get("drive") or {}).get("files") or {}}
         _append_job_log(job_id, "drive", "Drive is not configured — keeping local deliverable")
         _persist_queue()
         return
@@ -1093,7 +1093,7 @@ def _upload_job_deliverables(job_id: str, job_dir: Path) -> None:
         with LOCK:
             job = JOBS.get(job_id)
             if job:
-                job["drive"] = {"state": "pending_authorization", "files": {}}
+                job["drive"] = {"state": "pending_authorization", "files": (job.get("drive") or {}).get("files") or {}}
         _append_job_log(job_id, "drive", "Drive needs one-time browser authorization — keeping local deliverable")
         _persist_queue()
         return
@@ -1124,8 +1124,8 @@ def _upload_job_deliverables(job_id: str, job_dir: Path) -> None:
         for role, path in deliverables:
             if role in files and not path.exists():
                 continue
-            if (requires_validation and
-                    artifacts.read(path.with_suffix(".export.json")).get("outputs") != [artifacts.signature(path)]):
+            if (requires_validation and not artifacts.output_matches(
+                    artifacts.read(path.with_suffix(".export.json")), path)):
                 raise storage.DriveError(f"{path.name} has no matching verified final export; rerender before delivery")
             dest_name = _video_drive_name(title, role)
             with _DRIVE_UPLOAD_LOCK:
@@ -1174,7 +1174,8 @@ def _upload_job_deliverables(job_id: str, job_dir: Path) -> None:
         with LOCK:
             job = JOBS.get(job_id)
             if job:
-                job["drive"] = {"state": "error", "files": files, "error": str(e)}
+                job["drive"] = {"state": ("pending_authorization" if isinstance(e, storage.DriveAuthorizationRequired)
+                                           else "error"), "files": files, "error": str(e)}
         _append_job_log(job_id, "drive", f"Drive upload failed; local file kept ({e})")
     finally:
         _persist_queue()
@@ -2799,7 +2800,7 @@ def drive_status():
 def drive_disconnect():
     with LOCK:
         active = [job_id for job_id, job in JOBS.items()
-                  if job.get("status") == "uploading"]
+                  if job.get("status") == "uploading" or (job.get("drive") or {}).get("state") == "uploading"]
     if active:
         return jsonify({
             "error": "Drive is uploading a video; wait for it to finish before changing accounts"
@@ -2854,6 +2855,8 @@ def drive_retry(job_id: str):
         drive_state = (job.get("drive") or {}).get("state")
         if drive_state == "uploading":
             return jsonify({"error": "Drive upload already running"}), 409
+        if job.get("status") not in ("done", "error", "paused"):
+            return jsonify({"error": "Wait for this job to finish or stop before retrying its upload"}), 409
         upload_video = bool(_drive_deliverables(job_dir))
         package_state = (job.get("package") or {}).get("state")
         remote_files = ((job.get("drive") or {}).get("files") or {})

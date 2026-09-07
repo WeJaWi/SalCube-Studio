@@ -1819,7 +1819,7 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                             popup_windows=final_windows.get(str(dest)),
                             popup_width=popup_width, popup_margin=popup_margin,
                             allow_silent=bool(v.get("allow_silent_export", False)))
-        artifacts.publish(dest.with_suffix(".export.json"), contract, [dest])
+        artifacts.publish(dest.with_suffix(".export.json"), contract, [dest], hash_outputs=True)
 
     @telemetry.timed("assembly")
     def _stitch(clips_subset: List[Path], dest: Path, label: str,
