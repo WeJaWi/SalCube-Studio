@@ -25,6 +25,8 @@ def isolated_runtime():
         for name, path in paths.items():
             stack.enter_context(patch.object(config, name, path))
         stack.enter_context(patch.object(app, "QUEUE_STATE_FILE", root / "output/queue_state.json"))
+        stack.enter_context(patch.object(app, "UPDATE_LOCK_FILE", root / "output/.southcube-update.lock"))
+        stack.enter_context(patch.object(app, "UPDATE_STATUS_FILE", root / "output/update_status.json"))
         stack.enter_context(patch.object(app, "THUMB_OUT_DIR", root / "generated"))
         stack.enter_context(patch.object(app, "THUMB_UPLOADS_DIR", root / "uploads"))
         stack.enter_context(patch.object(stats, "STATS_FILE", root / "output/render_stats.json"))

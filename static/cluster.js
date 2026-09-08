@@ -98,10 +98,13 @@
   }
 
   function draw(value) {
-    data = value; const summary = value.summary || {}, observer = value.observer || {};
+    data = value; const summary = value.summary || {}, observer = value.observer || {}, update = value.update || {};
     $('sumOnline').textContent = fmt(summary.online); $('sumTotal').textContent = `of ${fmt(summary.total)} known nodes`;
     $('sumSlots').textContent = fmt(summary.free_slots); $('sumJobs').textContent = fmt(summary.active_jobs);
-    $('sumObserver').textContent = observer.running ? 'Watching' : 'Starting'; $('sumModel').textContent = observer.model || 'SalCube'; $('agentState').textContent = observer.running ? `Watching every ${fmt((observer.interval_seconds || 300) / 60)} minutes` : 'Starting';
+    $('sumObserver').textContent = observer.running ? 'Watching' : 'Starting'; $('sumModel').textContent = observer.model || 'SalCube';
+    $('sumUpdate').textContent = update.auto_update ? `Git: ${String(update.state || 'checking').replaceAll('_', ' ')}` : 'Git: manual updates';
+    $('sumUpdate').dataset.state = update.state || 'manual';
+    $('agentState').textContent = observer.running ? `Watching every ${fmt((observer.interval_seconds || 300) / 60)} minutes · Git ${String(update.state || 'checking').replaceAll('_', ' ')}` : 'Starting';
     const queued = (value.job_history || []).filter(job => job.status === 'queued');
     $('nodeGrid').replaceChildren(...(value.nodes || []).map(node => nodeCard(node, queued)));
     drawJobs();

@@ -64,6 +64,8 @@ _CLUSTER_HISTORY = None
 _NODE_MONITOR = None
 _CLUSTER_INIT_LOCK = threading.Lock()
 _CLUSTER_STOP = threading.Event()
+UPDATE_LOCK_FILE = config.OUTPUT_DIR / ".southcube-update.lock"
+UPDATE_STATUS_FILE = config.OUTPUT_DIR / "update_status.json"
 
 
 def _cluster_history():
@@ -93,6 +95,15 @@ def _safe_node_report(value) -> dict:
     return {key: clean.get(key) for key in (
         "sampled_at", "instance_id", "state", "cpu", "memory", "gpu",
         "processes", "changes") if key in clean}
+
+
+def _update_status() -> dict:
+    status = artifacts.read(UPDATE_STATUS_FILE)
+    if not status:
+        status = {"state": "manual", "message": "Automatic update supervisor is not running",
+                  "supervised": False, "auto_update": False,
+                  "local_revision": fleet.application_revision()}
+    return node_monitor.sanitize(status)
 
 
 def _fleet_policy(worker_id: str, settings: dict | None = None) -> dict:
@@ -315,7 +326,7 @@ def _auth():
             g.fleet_worker = True
             return None
         return jsonify({"error": "fleet authentication required"}), 401
-    central_path = (request.path in ("/cluster", "/api/cluster")
+    central_path = (request.path in ("/cluster", "/api/cluster", "/api/update/status")
                     or request.path.startswith("/api/ops/"))
     if central_path and config.FLEET_ROLE == "worker":
         return jsonify({"error": "SalCube runs on the main computer; open its SouthCube dashboard"}), 409
@@ -785,7 +796,7 @@ def _kick_queue() -> None:
     "running") while still holding LOCK, so two overlapping kicks can never
     double-start the same job.
     """
-    if config.queue_setting("queue_paused"):
+    if config.queue_setting("queue_paused") or UPDATE_LOCK_FILE.exists():
         return  # paused: let running jobs finish, just don't pick up more
     to_start: list[tuple[str, dict, str]] = []
     with LOCK:
@@ -875,7 +886,7 @@ def _wait_for_fleet_retry(job_id: str, reporter: fleet.FleetReporter) -> bool:
 
 def _fleet_dispatch_for(worker_id: str, free: int) -> list[dict]:
     """Claim eligible queued jobs up to this worker's available capacity."""
-    if config.FLEET_ROLE != "main" or free <= 0:
+    if config.FLEET_ROLE != "main" or free <= 0 or UPDATE_LOCK_FILE.exists():
         return []
     # Re-evaluate against controller policy and unacknowledged deliveries.
     # The free count passed by an old worker can otherwise remain unchanged
@@ -1661,10 +1672,12 @@ def _cluster_snapshot() -> dict:
         not row.get("online"), str(row.get("name") or "").lower()))]
     history = _cluster_history().observe(nodes, jobs_rows)
     active_statuses = _ACTIVE - {"awaiting_approval"}
+    update_state = _update_status()
     return node_monitor.sanitize({
         "name": "SouthCube", "captured_at": datetime.now().isoformat(timespec="seconds"),
         "observer": {key: ops_state.get(key) for key in (
             "name", "running", "interval_seconds", "model")},
+        "update": update_state,
         "summary": {"total": len(nodes), "online": sum(bool(n.get("online")) for n in nodes),
                     "active_jobs": sum(j.get("status") in active_statuses for j in jobs_rows),
                     "free_slots": sum(int((n.get("capacity") or {}).get("effective_free") or 0)
@@ -1686,6 +1699,13 @@ def cluster_page():
 @app.route("/api/cluster")
 def cluster_api():
     response = jsonify(_cluster_snapshot())
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/update/status")
+def update_status_api():
+    response = jsonify(_update_status())
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -2384,6 +2404,8 @@ def dispatch_to_worker(job_id: str):
         abort(403)
     if config.FLEET_ROLE != "main":
         return jsonify({"error": "this machine is not configured as fleet main"}), 409
+    if UPDATE_LOCK_FILE.exists():
+        return jsonify({"error": "SouthCube is preparing an automatic update; the job remains queued"}), 409
     requested = str((request.get_json(silent=True) or {}).get("worker_id") or "").strip()
     now = datetime.now().timestamp()
     settings = config.load_settings()
@@ -3127,6 +3149,7 @@ def _ops_snapshot() -> dict:
     cluster_state = _cluster_snapshot()
     cluster_for_ai = {
         "summary": cluster_state.get("summary"),
+        "update": cluster_state.get("update"),
         "nodes": [{
             "worker_id": node.get("worker_id"), "name": node.get("name"),
             "role": node.get("role"), "online": node.get("online"),

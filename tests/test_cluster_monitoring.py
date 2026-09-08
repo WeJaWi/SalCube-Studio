@@ -112,6 +112,15 @@ class ClusterApiTests(unittest.TestCase):
             self.assertEqual(client.get("/api/cluster").status_code, 403)
             self.assertEqual(client.get("/cluster").status_code, 403)
 
+    def test_update_lock_keeps_queued_work_from_starting(self):
+        app.JOBS["queued"] = {"status": "queued", "step": "queued",
+                              "profile": "classic", "inputs": {}, "created_at": "now"}
+        app.UPDATE_LOCK_FILE.touch()
+        with patch.object(app.threading, "Thread") as thread:
+            app._kick_queue()
+        self.assertEqual(app.JOBS["queued"]["status"], "queued")
+        thread.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

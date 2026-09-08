@@ -203,6 +203,21 @@ can use the central state to explain failures, identify an idle worker, and
 recommend where a queued job should run. Worker Active/Drain/Pause, slot limits,
 and explicit queued-job assignment remain deterministic owner controls.
 
+On the main Mac, start the studio through the supervisor:
+
+```bash
+.venv/bin/python scripts/southcube_supervisor.py
+```
+
+It keeps the app available at `http://100.72.62.87:5066/`, checks
+`origin/main` every five minutes, accepts only a clean fast-forward update,
+installs requirements when that file changed, and restarts the app. An update
+waits while any job is active or queued. A short update lock prevents a new
+local or fleet job from starting during the final idle check. Tracked local
+changes or diverged Git history block the update and appear in SouthCube;
+untracked output folders are left alone. If the Flask process exits, the
+supervisor launches it again.
+
 New completed, uncached renders teach each machine's existing ETA estimator
 its measured throughput. Repeated completions are deduplicated, partial/cache
 resumes are excluded, and different machines' speeds are not mixed. At least

@@ -42,6 +42,10 @@ _SYSTEM = (
     "recommend a specific available worker for a queued job. Heartbeat loss alone "
     "means stopped or unreachable; call it a crash only when process or job error "
     "evidence confirms one. Worker reporters contain no independent AI brain."
+    " The cluster update field comes from a deterministic main-computer "
+    "supervisor. It checks origin/main, waits for an idle queue, applies only a "
+    "clean fast-forward update, and restarts the app. Report blocked, waiting, "
+    "error, or current states exactly; never claim the language model ran Git."
 )
 
 
