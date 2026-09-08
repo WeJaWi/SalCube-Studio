@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import hmac
 import json
+import platform
 import re
 import secrets
 import threading
@@ -15,9 +16,11 @@ from pathlib import Path
 from flask import (Flask, Response, g, jsonify, make_response, redirect,
                    render_template, request, send_file, abort)
 
-from pipeline import (ai33_tasks, analytics, animation, artifacts, cancel, clients, config, delivery_doc, fleet, identity,
-                      jobs, llm, operations, orchestrator, render as video_render,
-                      research, resources, scheduler, stats, storage, telemetry, thumbnail)
+from pipeline import (ai33_tasks, analytics, animation, artifacts, cancel,
+                      clients, cluster, config, delivery_doc, fleet, identity,
+                      jobs, llm, node_monitor, operations, orchestrator,
+                      render as video_render, research, resources, scheduler,
+                      stats, storage, telemetry, thumbnail)
 
 app = Flask(__name__)
 
@@ -57,6 +60,39 @@ _FLEET_LOCK = threading.Lock()
 FLEET_WORKER: fleet.FleetWorker | None = None
 OPS: operations.OperationsCenter | None = None
 _FLEET_MODES = frozenset({"active", "draining", "paused"})
+_CLUSTER_HISTORY = None
+_NODE_MONITOR = None
+_CLUSTER_INIT_LOCK = threading.Lock()
+_CLUSTER_STOP = threading.Event()
+
+
+def _cluster_history():
+    global _CLUSTER_HISTORY
+    path = config.OUTPUT_DIR / "cluster_history.json"
+    with _CLUSTER_INIT_LOCK:
+        if _CLUSTER_HISTORY is None or _CLUSTER_HISTORY.path != path:
+            _CLUSTER_HISTORY = cluster.ClusterHistory(path)
+        return _CLUSTER_HISTORY
+
+
+def _node_monitor():
+    global _NODE_MONITOR
+    with _CLUSTER_INIT_LOCK:
+        if _NODE_MONITOR is None or _NODE_MONITOR.output_dir != config.OUTPUT_DIR:
+            _NODE_MONITOR = node_monitor.NodeMonitor(config.ROOT, config.OUTPUT_DIR)
+        return _NODE_MONITOR
+
+
+def _safe_node_report(value) -> dict:
+    """Accept only the documented, secret-free worker telemetry fields."""
+    if not isinstance(value, dict):
+        return {}
+    clean = node_monitor.sanitize(value)
+    if not isinstance(clean, dict):
+        return {}
+    return {key: clean.get(key) for key in (
+        "sampled_at", "instance_id", "state", "cpu", "memory", "gpu",
+        "processes", "changes") if key in clean}
 
 
 def _fleet_policy(worker_id: str, settings: dict | None = None) -> dict:
@@ -184,6 +220,7 @@ def _fleet_worker_rows() -> list[dict]:
                 "protocol_version": int(worker.get("protocol_version") or 1),
                 "hardware": worker.get("hardware") if isinstance(worker.get("hardware"), dict) else {},
                 "metrics": worker.get("metrics") if isinstance(worker.get("metrics"), dict) else {},
+                "node": worker.get("node") if isinstance(worker.get("node"), dict) else {},
                 "capacity": capacity,
                 "policy": policy,
                 "last_seen": worker.get("last_seen"),
@@ -195,7 +232,7 @@ def _fleet_worker_rows() -> list[dict]:
                 "jobs": worker_jobs,
             })
     rows.sort(key=lambda row: (row["stale"], row["name"].lower()))
-    return rows
+    return node_monitor.sanitize(rows)
 
 # Phase-weighted progress (0-100), keyed by the real `step` names emitted
 # from pipeline/orchestrator.py's emit() calls — each value is that phase's
@@ -278,13 +315,19 @@ def _auth():
             g.fleet_worker = True
             return None
         return jsonify({"error": "fleet authentication required"}), 401
+    central_path = (request.path in ("/cluster", "/api/cluster")
+                    or request.path.startswith("/api/ops/"))
+    if central_path and config.FLEET_ROLE == "worker":
+        return jsonify({"error": "SalCube runs on the main computer; open its SouthCube dashboard"}), 409
     if not ACCESS:
         return None  # single-user localhost mode — unchanged behavior
     if request.path == "/login" or request.path.startswith("/static"):
         return None
     g.user = _user_for(request.cookies.get("studio_key"))
     if g.user:
-        if request.path.startswith("/api/ops/") and g.user.get("profiles") is not None:
+        owner_path = (central_path or request.path == "/api/workers"
+                      or request.path.startswith("/api/workers/"))
+        if owner_path and g.user.get("profiles") is not None:
             return jsonify({"error": "SalCube's fleet-wide reports require owner access"}), 403
         return None
     if request.path.startswith("/api/"):
@@ -1539,6 +1582,114 @@ def statistics_page():
     return render_template("stats.html", owner_access=not ACCESS or getattr(g, "user", {}).get("profiles") is None)
 
 
+def _cluster_job_rows() -> list[dict]:
+    with LOCK:
+        rows = []
+        for jid, job in JOBS.items():
+            log = job.get("worker_events") or job.get("log") or []
+            rows.append(node_monitor.sanitize({
+                "job_id": jid,
+                "title": job.get("publication_title") or job.get("title") or jid,
+                "profile": job.get("profile") or "",
+                "worker_id": job.get("dispatched_to") or "main",
+                "status": job.get("status") or "unknown",
+                "step": job.get("step") or "",
+                "progress_pct": job.get("progress_pct") or 0,
+                "created_at": job.get("created_at"),
+                "updated_at": job.get("updated_at") or job.get("created_at"),
+                "error": str(job.get("error") or "")[-1500:],
+                "recent_events": [
+                    {key: event.get(key) for key in ("at", "t", "step", "message")}
+                    for event in log[-8:] if isinstance(event, dict)
+                ],
+            }))
+    return rows
+
+
+def _cluster_snapshot() -> dict:
+    """One central, secret-free view of the main and every known worker."""
+    jobs_rows = _cluster_job_rows()
+    worker_rows = _fleet_worker_rows()
+    current_ids = {row["worker_id"] for row in worker_rows}
+    for previous in _cluster_history().known_workers():
+        wid = str(previous.get("worker_id") or "")
+        if not wid or wid in current_ids:
+            continue
+        capacity = dict(previous.get("capacity") or {})
+        capacity.update(free=0, effective_free=0, pending=0)
+        worker_rows.append({**previous, "online": False, "stale": True,
+                            "health": "offline", "age_seconds": None,
+                            "capacity": capacity, "jobs": []})
+    for worker in worker_rows:
+        worker["role"] = "worker"
+        worker["agent"] = {"name": "Fleet reporter",
+                           "state": "reporting" if worker.get("online") else "disconnected",
+                           "mode": "lightweight"}
+        worker["jobs"] = [row for row in jobs_rows
+                          if row.get("worker_id") == worker.get("worker_id")
+                          and row.get("status") not in ("done", "cancelled")]
+
+    main_node = _node_monitor().snapshot()
+    main_jobs = [row for row in jobs_rows if row.get("worker_id") == "main"
+                 and row.get("status") not in ("done", "cancelled")]
+    local_active = sum(1 for row in main_jobs if row.get("status") in _SLOT_STATUSES)
+    local_max = config.max_concurrent_jobs()
+    ops_state = OPS.status() if OPS is not None else {
+        "name": "SalCube", "running": False, "interval_seconds": 300,
+        "model": config.OPENROUTER_MONITOR_MODEL,
+    }
+    main = {
+        "worker_id": "main", "name": "Main computer", "role": "main",
+        "online": True, "stale": False, "health": "available" if local_active < local_max else "busy",
+        "last_seen": datetime.now().isoformat(timespec="seconds"), "age_seconds": 0,
+        "hardware": {"cpu_cores": config._detect_cpu_count(),
+                     "ram_gb": round(config._detect_ram_gb(), 1),
+                     "hw_encoder": config.gpu_encoder() or "libx264",
+                     "platform": platform.system(), "platform_release": platform.release(),
+                     "app_revision": fleet.application_revision()},
+        "metrics": {"disk": operations.disk_snapshot(), "render": resources.snapshot()},
+        "capacity": {"max_jobs": local_max, "effective_max_jobs": local_max,
+                     "active": local_active, "free": max(0, local_max - local_active),
+                     "effective_free": max(0, local_max - local_active), "pending": 0},
+        "policy": {"mode": "active", "max_jobs": local_max},
+        "node": main_node, "agent": {"name": "SalCube",
+                     "state": "running" if ops_state.get("running") else "starting",
+                     "mode": "central", "model": ops_state.get("model")},
+        "jobs": main_jobs,
+    }
+    nodes = [main, *sorted(worker_rows, key=lambda row: (
+        not row.get("online"), str(row.get("name") or "").lower()))]
+    history = _cluster_history().observe(nodes, jobs_rows)
+    active_statuses = _ACTIVE - {"awaiting_approval"}
+    return node_monitor.sanitize({
+        "name": "SouthCube", "captured_at": datetime.now().isoformat(timespec="seconds"),
+        "observer": {key: ops_state.get(key) for key in (
+            "name", "running", "interval_seconds", "model")},
+        "summary": {"total": len(nodes), "online": sum(bool(n.get("online")) for n in nodes),
+                    "active_jobs": sum(j.get("status") in active_statuses for j in jobs_rows),
+                    "free_slots": sum(int((n.get("capacity") or {}).get("effective_free") or 0)
+                                      for n in nodes if n.get("online"))},
+        "nodes": nodes, **history,
+        "notes": [
+            "Worker telemetry is metadata only; commands, environment variables, credentials and file contents are never reported.",
+            "Heartbeat loss means stopped or unreachable. A crash is only confirmed when job or process evidence says so.",
+            "Detailed CPU, RAM, GPU, process and file-change data appears after each worker installs this version and restarts.",
+        ],
+    })
+
+
+@app.route("/cluster")
+def cluster_page():
+    return render_template("cluster.html", owner_access=True)
+
+
+@app.route("/api/cluster")
+def cluster_api():
+    response = jsonify(_cluster_snapshot())
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/api/stats")
 def statistics_api():
     try:
@@ -2025,6 +2176,8 @@ def approve(job_id: str):
 def fleet_heartbeat():
     """Fixed-schema worker heartbeat; bearer auth is enforced in _auth()."""
     data = request.get_json(force=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "heartbeat must be an object"}), 400
     worker_id = str(data.get("worker_id") or "").strip()
     if not worker_id or len(worker_id) > 120:
         return jsonify({"error": "valid worker_id is required"}), 400
@@ -2034,6 +2187,9 @@ def fleet_heartbeat():
     except (TypeError, ValueError):
         free = 0
     reported = data.get("jobs") if isinstance(data.get("jobs"), list) else []
+    reported = node_monitor.sanitize(reported)
+    if not isinstance(reported, list):
+        reported = []
     try:
         protocol_version = max(1, min(99, int(data.get("protocol_version") or 1)))
     except (TypeError, ValueError):
@@ -2046,6 +2202,7 @@ def fleet_heartbeat():
                        "hardware": data.get("hardware") if isinstance(data.get("hardware"), dict) else {},
                        "capacity": capacity,
                        "metrics": data.get("metrics") if isinstance(data.get("metrics"), dict) else {},
+                       "node": _safe_node_report(data.get("node")),
                        "cached_jobs": [str(jid) for jid in (data.get("cached_jobs") or [])
                                        if str(jid).isdigit()][:200],
                        "jobs": reported,
@@ -2113,6 +2270,11 @@ def fleet_heartbeat():
                 job["drive"] = report["drive"]
             if isinstance(report.get("performance"), dict):
                 job["performance"] = report["performance"]
+            events = report.get("recent_events")
+            if isinstance(events, list):
+                job["worker_events"] = node_monitor.sanitize([
+                    {k: event.get(k) for k in ("at", "step", "message")}
+                    for event in events[-12:] if isinstance(event, dict)])
             if state == "error":
                 job["error"] = str(report.get("error") or "remote worker failed")
     # A job appearing in this heartbeat acknowledges receipt of any previous
@@ -2962,6 +3124,21 @@ def _ops_snapshot() -> dict:
     statistics = _statistics()
     statistics.pop("daily", None)  # Keep minute-by-minute prompts compact.
     statistics.pop("filters", None)
+    cluster_state = _cluster_snapshot()
+    cluster_for_ai = {
+        "summary": cluster_state.get("summary"),
+        "nodes": [{
+            "worker_id": node.get("worker_id"), "name": node.get("name"),
+            "role": node.get("role"), "online": node.get("online"),
+            "health": node.get("health"), "capacity": node.get("capacity"),
+            "cpu": (node.get("node") or {}).get("cpu"),
+            "memory": (node.get("node") or {}).get("memory"),
+            "gpu": (node.get("node") or {}).get("gpu"),
+            "agent": node.get("agent"), "jobs": node.get("jobs"),
+            "changes": ((node.get("node") or {}).get("changes") or [])[-10:],
+        } for node in cluster_state.get("nodes", [])],
+        "events": (cluster_state.get("events") or [])[:25],
+    }
     return {
         "captured_at": now.isoformat(timespec="seconds"),
         "fleet_role": config.FLEET_ROLE,
@@ -2976,7 +3153,16 @@ def _ops_snapshot() -> dict:
         "drive": {"configured": DRIVE.configured, "authorized": DRIVE.authorized},
         "ai33": clients.ai33_key_status(),
         "statistics": statistics,
+        "cluster": cluster_for_ai,
     }
+
+
+def _cluster_observer_loop() -> None:
+    while not _CLUSTER_STOP.wait(10):
+        try:
+            _cluster_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[cluster] snapshot failed: {exc}")
 
 
 def _ops_center() -> operations.OperationsCenter:
@@ -3520,7 +3706,8 @@ def thumbnails_page():
         "thumbnails.html",
         has_default_template=bool(default_tpl),
         missing_key=not bool(config.KIE_THUMBNAIL_API_KEY),
-        default_model=config.KIE_THUMBNAIL_MODEL)
+        default_model=config.KIE_THUMBNAIL_MODEL,
+        owner_access=not ACCESS or getattr(g, "user", {}).get("profiles") is None)
 
 
 @app.route("/api/thumbnail", methods=["POST"])
@@ -3615,11 +3802,18 @@ if __name__ == "__main__":
         OPS = _ops_center()
         OPS.start()
         atexit.register(OPS.stop)
+        _node_monitor()
+        _CLUSTER_STOP.clear()
+        threading.Thread(target=_cluster_observer_loop, daemon=True,
+                         name="southcube-cluster-history").start()
+        atexit.register(_CLUSTER_STOP.set)
+        atexit.register(_node_monitor().stop)
         print(f"[ops] read-only {config.OPENROUTER_MONITOR_MODEL} monitor active "
               "(GPT-5.6 Terra fallback, 5-minute updates)")
     if config.FLEET_ROLE == "worker":
         FLEET_WORKER = fleet.FleetWorker(_run_fleet_worker_job,
                                          aborter=_abort_local_job)
         FLEET_WORKER.start()
+        atexit.register(FLEET_WORKER.stop)
         print(f"[fleet] worker {FLEET_WORKER.worker_id} polling {config.FLEET_MAIN_URL}")
     app.run(host=host, port=port, debug=False, threaded=True)

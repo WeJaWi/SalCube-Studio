@@ -189,6 +189,20 @@ receive fresh server-side aggregates for the selected period and profile.
 Profile-restricted users see only their own statistics; fleet-wide observer
 reports/chat require owner access. No API keys enter these aggregates.
 
+The **SouthCube** tab (`/cluster`) is the central cluster dashboard. It joins
+the main computer and every Tailscale-connected render worker into one view:
+online state, slots, current jobs, CPU, RAM, GPU telemetry, app processes,
+recent job events, and metadata-only file changes. The main computer persists
+a bounded event and job history in `output/cluster_history.json`, so a worker
+that disappears remains visible as offline after a controller restart.
+
+Worker reporters never transmit command lines, environment variables,
+credentials, or file contents. Heartbeat loss is described as stopped or
+unreachable unless a process/job error independently confirms a crash. SalCube
+can use the central state to explain failures, identify an idle worker, and
+recommend where a queued job should run. Worker Active/Drain/Pause, slot limits,
+and explicit queued-job assignment remain deterministic owner controls.
+
 New completed, uncached renders teach each machine's existing ETA estimator
 its measured throughput. Repeated completions are deduplicated, partial/cache
 resumes are excluded, and different machines' speeds are not mixed. At least
@@ -348,6 +362,11 @@ Only success, exhausted retries, or Stop releases that reservation. A Stop
 during the delay cancels the pending retry. The controller retains remote
 ownership if it restarts during the wait. Requests whose acceptance is unknown
 still require review instead of an automatic paid resubmission.
+
+Worker protocol v5 adds the lightweight SouthCube reporter. Resource sampling
+runs outside the heartbeat path, so a slow or unavailable GPU probe cannot
+delay fleet scheduling. Older workers continue rendering but show limited
+telemetry until updated and restarted.
 
 Update both machines for this behavior: in the Windows project folder run
 `git pull --ff-only origin main`, then restart with `run.bat`. Existing `.env`

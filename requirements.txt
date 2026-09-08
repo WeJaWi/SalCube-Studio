@@ -8,6 +8,7 @@ playwright>=1.40
 json-repair>=0.15
 Pillow>=10.0
 python-docx>=1.1
+psutil>=5.9
 
 # Ports from Wexilo (core/jobs, captions, waveform). Pillow also powers the
 # guaranteed local thumbnail fallback when remote image credentials reject.

@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict
 
 import requests
 
-from . import artifacts, cancel, config, resources
+from . import artifacts, cancel, config, node_monitor, resources
 
 SLOT_STATUSES = frozenset({"running", "awaiting_approval", "retry_wait"})
 
@@ -48,12 +48,20 @@ class FleetReporter:
             self._state.pop("retry_at", None)
             self._state.update(status="running", step=step,
                                message=message, progress_pct=pct)
+            self._add_event(step, message)
+
+    def _add_event(self, step: str, message: str) -> None:
+        events = self._state.setdefault("recent_events", [])
+        events.append({"at": time.time(), "step": str(step)[:80],
+                       "message": str(message)[:500]})
+        self._state["recent_events"] = events[-12:]
 
     def retry_wait(self, error: str, retries: int, limit: int, retry_at: float) -> None:
         with self._lock:
             self._state.update(status="retry_wait", step="retry_wait", error=error,
                                retries=retries, retry_limit=limit, retry_at=retry_at,
                                message=f"Retry {retries}/{limit} scheduled; worker slot reserved")
+            self._add_event("retry_wait", f"Retry {retries}/{limit}: {error}")
 
     def await_approval(self, hooks: dict, outline: str) -> tuple[str, str]:
         with self._lock:
@@ -80,14 +88,17 @@ class FleetReporter:
         with self._lock:
             self._state.update(status="done", step="done", progress_pct=100,
                                drive=drive, performance=performance)
+            self._add_event("done", "Job completed")
 
     def uploading(self, drive: dict):
         with self._lock:
             self._state.update(status="uploading", step="drive", drive=drive)
+            self._add_event("drive", "Uploading deliverables")
 
     def fail(self, error: str) -> None:
         with self._lock:
             self._state.update(status="error", step="error", error=error)
+            self._add_event("error", error)
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -116,6 +127,7 @@ class FleetWorker:
         # without restarting this process.
         self._policy: dict = {"mode": "active", "max_jobs": None}
         self._state_file = config.OUTPUT_DIR / "fleet_reporters.json"
+        self.node_monitor = node_monitor.NodeMonitor(config.ROOT, config.OUTPUT_DIR)
         for jid, state in artifacts.read(self._state_file).items():
             if not isinstance(state, dict):
                 continue
@@ -135,6 +147,10 @@ class FleetWorker:
             self._thread = threading.Thread(target=self._loop, daemon=True,
                                             name="dmiqwi-fleet-heartbeat")
             self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.node_monitor.stop()
 
     def _payload(self) -> dict:
         with self._lock:
@@ -167,7 +183,7 @@ class FleetWorker:
             load_1m = None
         return {
             "worker_id": self.worker_id, "name": self.name,
-            "protocol_version": 4,
+            "protocol_version": 5,
             "hardware": {"cpu_cores": config._detect_cpu_count(),
                          "ram_gb": round(config._detect_ram_gb(), 1),
                          "hw_encoder": config.gpu_encoder(),
@@ -182,6 +198,7 @@ class FleetWorker:
             "metrics": {"disk": disk_metrics, "load_1m": load_1m,
                         "render": resources.snapshot(),
                         "uptime_seconds": round(time.monotonic() - self._started_at)},
+            "node": self.node_monitor.snapshot(),
             "policy": policy,
             "cached_jobs": [p.name for p in config.OUTPUT_DIR.iterdir()
                             if p.is_dir() and p.name.isdigit() and (p / "plan.json").exists()][:200],

@@ -4,6 +4,7 @@
     <nav class="studio-nav" aria-label="Main navigation">
       <a href="/" {% if request.path == '/' %}aria-current="page"{% endif %}>Create</a>
       <a href="/stats" {% if request.path == '/stats' %}aria-current="page"{% endif %}>Statistics</a>
+      {% if owner_access %}<a href="/cluster" {% if request.path == '/cluster' %}aria-current="page"{% endif %}>SouthCube</a>{% endif %}
       <a href="/thumbnails" {% if request.path == '/thumbnails' %}aria-current="page"{% endif %}>Thumbnails</a>
     </nav>
     {% if request.path == '/' %}

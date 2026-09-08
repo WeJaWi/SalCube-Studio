@@ -36,6 +36,12 @@ _SYSTEM = (
     "notes: local usage is not fleet-wide billing; missing credits are unknown, "
     "not zero. Never infer an account balance from usage. "
     "If evidence suggests a broad or uncertain root cause, recommend a report."
+    " The cluster section is the central SouthCube view: node online state, CPU, "
+    "RAM, GPU, app processes, recent metadata-only file changes, current work and "
+    "persistent job/event history. Use it to identify idle or loaded workers and "
+    "recommend a specific available worker for a queued job. Heartbeat loss alone "
+    "means stopped or unreachable; call it a crash only when process or job error "
+    "evidence confirms one. Worker reporters contain no independent AI brain."
 )
 
 

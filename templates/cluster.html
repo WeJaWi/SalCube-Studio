@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SouthCube · SalCube Studio</title>
+  <link rel="icon" href="{{ url_for('static', filename='salcube.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='salcube.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='cluster.css') }}">
+  <script src="{{ url_for('static', filename='cluster.js') }}" defer></script>
+</head>
+<body class="stats-page cluster-page">
+{% include '_studio_header.html' %}
+<main class="cluster-wrap">
+  <section class="cluster-hero">
+    <div><div class="stats-eyebrow">Central system observer</div><h1>SouthCube cluster</h1><p class="stats-muted">One SalCube brain on this computer. Lightweight reporters on every worker.</p></div>
+    <button id="clusterRefresh" type="button">Refresh now</button>
+  </section>
+  <div id="clusterStatus" class="stats-status" role="status">Connecting to the cluster…</div>
+  <section class="cluster-summary" aria-label="Cluster summary">
+    <article><span>Nodes online</span><strong id="sumOnline">—</strong><small id="sumTotal">Connecting</small></article>
+    <article><span>Free slots</span><strong id="sumSlots">—</strong><small>Ready for work</small></article>
+    <article><span>Active jobs</span><strong id="sumJobs">—</strong><small>Across the cluster</small></article>
+    <article class="observer-card"><img src="{{ url_for('static', filename='salcube.svg') }}" alt="SalCube"><div><span>Observer</span><strong id="sumObserver">Starting</strong><small id="sumModel">SalCube</small></div></article>
+  </section>
+
+  <section class="cluster-section"><div class="section-heading"><div><h2>Computers</h2><p>Live capacity and resource pressure. Worker controls take effect on the next heartbeat.</p></div></div><div id="nodeGrid" class="node-grid"></div></section>
+
+  <div class="cluster-columns">
+    <div>
+      <section class="cluster-panel"><div class="section-heading"><div><h2>Job history</h2><p>Current and recent work, including its last worker.</p></div><select id="jobFilter" aria-label="Filter jobs"><option value="active">Active and failed</option><option value="all">All recent</option><option value="error">Errors only</option></select></div><div class="cluster-table-wrap"><table class="cluster-table"><thead><tr><th>Job</th><th>Worker</th><th>State</th><th>Progress</th></tr></thead><tbody id="jobRows"></tbody></table></div></section>
+      <section class="cluster-panel"><div class="section-heading"><div><h2>Cluster events</h2><p>Connections, heartbeat loss, restarts, file changes and job transitions.</p></div></div><div id="eventRows" class="event-list"></div></section>
+    </div>
+    <aside class="cluster-side">
+      <section class="cluster-panel salcube-cluster"><div class="assistant-heading"><img src="{{ url_for('static', filename='salcube.svg') }}" alt="SalCube"><div><h2>Ask SalCube</h2><p id="agentState">Reading the cluster</p></div></div><p class="stats-detail">Ask what each worker is doing, what failed, or where a queued job should run.</p><textarea id="clusterQuestion" maxlength="2000" placeholder="Which worker is idle and best for the next job?"></textarea><button id="clusterAsk" type="button">Ask SalCube</button><div id="clusterAnswer" class="cluster-answer" role="status"></div></section>
+      <section class="cluster-panel"><h2>App processes</h2><p class="stats-detail">Only this app and its child processes. Commands and environment variables stay private.</p><div id="processRows" class="compact-list"></div></section>
+      <section class="cluster-panel"><h2>Recent file changes</h2><p class="stats-detail">Names and timestamps only. No file contents.</p><div id="changeRows" class="compact-list"></div></section>
+      <section class="cluster-panel"><h2>How to read this</h2><ul id="clusterNotes" class="stats-notes"></ul></section>
+    </aside>
+  </div>
+</main>
+</body>
+</html>
