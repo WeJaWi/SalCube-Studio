@@ -2982,7 +2982,7 @@ def _ops_snapshot() -> dict:
 def _ops_center() -> operations.OperationsCenter:
     global OPS
     if OPS is None:
-        OPS = operations.OperationsCenter(_ops_snapshot, interval=60)
+        OPS = operations.OperationsCenter(_ops_snapshot, interval=300)
     return OPS
 
 
@@ -3616,7 +3616,7 @@ if __name__ == "__main__":
         OPS.start()
         atexit.register(OPS.stop)
         print(f"[ops] read-only {config.OPENROUTER_MONITOR_MODEL} monitor active "
-              "(GPT-5.6 Terra fallback, 60-second updates)")
+              "(GPT-5.6 Terra fallback, 5-minute updates)")
     if config.FLEET_ROLE == "worker":
         FLEET_WORKER = fleet.FleetWorker(_run_fleet_worker_job,
                                          aborter=_abort_local_job)

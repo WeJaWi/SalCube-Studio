@@ -76,7 +76,7 @@ def _chat_json_with_fallback(user: str, **kwargs) -> tuple[dict, str]:
 
 
 class OperationsCenter:
-    def __init__(self, snapshot_provider: Callable[[], dict], *, interval: int = 60):
+    def __init__(self, snapshot_provider: Callable[[], dict], *, interval: int = 300):
         self.snapshot_provider = snapshot_provider
         self.interval = max(60, int(interval))
         self.log_file = config.OUTPUT_DIR / "operations_log.jsonl"

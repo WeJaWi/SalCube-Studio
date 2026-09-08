@@ -201,8 +201,8 @@ not reload a running Python server. Let active jobs finish before restarting.
 
 The right side of the studio contains a Qwen 3.8 27B observer via
 OpenRouter, with GPT-5.6 Terra as its explicit fallback. Neither provider can
-fall through to the local Claude CLI. Once per
-minute it receives a sanitized snapshot of queue states, recent job events,
+fall through to the local Claude CLI. Every five
+minutes it receives a sanitized snapshot of queue states, recent job events,
 worker heartbeats/capacity, Drive readiness, encoder information, and free
 disk space. It writes a quiet update to `output/operations_log.jsonl`.
 
