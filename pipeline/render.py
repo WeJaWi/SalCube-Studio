@@ -43,6 +43,8 @@ _WALLCLOCK_CEILING_S = 1800
 _PROBE_CACHE_LIMIT = 512
 _PROBE_CACHE: OrderedDict = OrderedDict()
 _PROBE_CACHE_LOCK = threading.Lock()
+_FILTER_BUFFER_CAP_SUPPORTED: Optional[bool] = None
+_FILTER_BUFFER_CAP_LOCK = threading.Lock()
 _PROBE_ENTRIES = (
     "stream=index,codec_name,profile,codec_type,width,height,pix_fmt,"
     "r_frame_rate,avg_frame_rate,nb_frames,start_time,duration,bit_rate,"
@@ -53,6 +55,31 @@ _PROBE_ENTRIES = (
 def ensure_ffmpeg() -> None:
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         raise RuntimeError("ffmpeg/ffprobe not found on PATH (install ffmpeg).")
+
+
+def _supports_filter_buffer_cap() -> bool:
+    """Whether this FFmpeg can put a hard bound on filtergraph buffering.
+
+    A one-pass classic composite is safe only with this option: old FFmpeg
+    builds can otherwise let a looped visual race ahead of audio-driven
+    showwaves and consume memory without bound. Cache the capability for the
+    process because every beat asks the same question.
+    """
+    global _FILTER_BUFFER_CAP_SUPPORTED
+    with _FILTER_BUFFER_CAP_LOCK:
+        if _FILTER_BUFFER_CAP_SUPPORTED is not None:
+            return _FILTER_BUFFER_CAP_SUPPORTED
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-h", "full"],
+                capture_output=True, text=True, timeout=15)
+            help_text = (result.stdout or "") + (result.stderr or "")
+            _FILTER_BUFFER_CAP_SUPPORTED = (
+                result.returncode == 0
+                and "-filter_buffered_frames" in help_text)
+        except (OSError, subprocess.SubprocessError):
+            _FILTER_BUFFER_CAP_SUPPORTED = False
+        return _FILTER_BUFFER_CAP_SUPPORTED
 
 
 def _rss_mb(pid: int) -> float:
@@ -945,7 +972,10 @@ def _visual_input(media: Optional[Path], kind: str, w: int, h: int,
         if duration:
             return ["-loop", "1", "-t", f"{duration:.3f}", "-i", str(media)]
         return ["-loop", "1", "-i", str(media)]
-    return ["-f", "lavfi", "-i", f"color=c=0xFAF6EF:s={w}x{h}:r={fps}"]
+    color = f"color=c=0xFAF6EF:s={w}x{h}:r={fps}"
+    if duration:
+        color += f":d={duration:.3f}"
+    return ["-f", "lavfi", "-i", color]
 
 
 OVERLAY_KINDS = ("stock", "video", "image")
@@ -1016,14 +1046,18 @@ def _precompute_wave_clip(
         f"[0:a]aformat=channel_layouts=mono,"
         f"showwaves=s={ww}x{wh}:mode=cline:colors={color}:"
         f"rate={rate}:draw=full:scale={scale}:n={n},"
-        f"fps={fps},format=yuv420p[w]"
+        f"format=yuv420p[w]"
     )
     _run([
         "ffmpeg", "-y", "-i", str(audio),
         "-filter_complex", filt,
         "-map", "[w]", "-an",
         *_encode_args(quality="ultrafast", gpu=gpu), "-pix_fmt", "yuv420p",
-        "-r", str(fps), "-t", f"{duration:.3f}",
+        # showwaves emits only when its picture changes (normally about
+        # 10-15 fps). Encoding duplicate 30 fps frames made this fallback
+        # intermediate much slower without adding visible motion; overlay's
+        # framesync holds each frame during the final 30 fps composite.
+        "-t", f"{duration:.3f}",
         str(dest),
     ])
     return dest
@@ -1041,7 +1075,9 @@ def render_beat_classic(b: Dict[str, Any], out: Path, width: int, height: int,
                         popup_width: int = 420, popup_margin: int = 28,
                         workdir: Optional[Path] = None,
                         profile_video: Optional[Dict[str, Any]] = None,
-                        gpu: bool = False) -> None:
+                        gpu: bool = False,
+                        live_waveform: bool = True,
+                        single_pass: bool = False) -> None:
     """The 'classic' layout: blurred b-roll background, the philosopher
     cutout on the right, an animated voice waveform on the left with the
     subtitles beneath it. Built for very long (up to 3h) cheap videos —
@@ -1056,15 +1092,26 @@ def render_beat_classic(b: Dict[str, Any], out: Path, width: int, height: int,
     inputs: List[str] = []
     chain: List[str] = []
 
-    # Background is rendered to a flat file FIRST (see _precompute_bg_clip
-    # docstring) — the main composite below never sees an infinite/looped
-    # source, only ever this ordinary, already-finite clip.
     wdir = workdir or out.parent
-    bg_clip = _precompute_bg_clip(media, kind if media else "blank", duration,
-                                  width, height, fps, ken_burns, bg_blur,
-                                  wdir / f"{out.stem}_bgprecomp.mp4", gpu=gpu)
-    inputs += ["-i", str(bg_clip)]
-    chain.append("[0:v]setsar=1[bg]")
+    if single_pass:
+        # Modern FFmpeg can hard-limit buffered filter frames. That makes it
+        # safe to keep the finite visual, blur, waveform, overlays, captions,
+        # and audio in one graph instead of encoding the background first.
+        inputs += _visual_input(
+            media, kind if media else "blank", width, height, fps,
+            duration=duration, ken_burns=ken_burns)
+        chain.append(_pane(
+            0, kind if media else "blank", width, height, fps, frames,
+            ken_burns, "raw"))
+        chain.append(f"[raw]boxblur={bg_blur}:1[bg]")
+    else:
+        # Compatibility/safety path: flatten the background before it enters
+        # the audio-driven composite (see _precompute_bg_clip docstring).
+        bg_clip = _precompute_bg_clip(
+            media, kind if media else "blank", duration, width, height, fps,
+            ken_burns, bg_blur, wdir / f"{out.stem}_bgprecomp.mp4", gpu=gpu)
+        inputs += ["-i", str(bg_clip)]
+        chain.append("[0:v]setsar=1[bg]")
     last = "bg"
     n_in = 1
 
@@ -1099,38 +1146,54 @@ def render_beat_classic(b: Dict[str, Any], out: Path, width: int, height: int,
             "probeable audio stream")
     have_audio = bool(audio and Path(audio).exists())
     if have_audio:
-        # Waveform is PRECOMPUTED into a finite clip (see _precompute_wave_clip)
-        # then overlaid with colorkey so black bg is transparent. The narration
-        # audio is a separate -i used only for the final mix — never asplit
-        # into a live showwaves branch in this graph.
         wv_cfg = (profile_video or {}).get("waveform", {}) or {}
         ww = int(width * float(wv_cfg.get("width_frac", 0.46))) // 2 * 2
         wh = int(height * float(wv_cfg.get("height_frac", 0.30))) // 2 * 2
         wx, wy = int(width * 0.05), max(0, int(height * 0.46) - wh // 2)
         wv_color = wv_cfg.get("color", "0xFAF6EF@0.9")
-        # rate capped inside _precompute_wave_clip (default 15, smooth + safe)
-        wv_rate = int(wv_cfg.get("rate", 15))
+        wv_rate = max(1, min(int(wv_cfg.get("rate", 15)), 15))
         wv_n = max(1, int(wv_cfg.get("n", 5)))
         wv_scale = str(wv_cfg.get("scale", "sqrt"))
-        wave_clip = _precompute_wave_clip(
-            Path(audio), duration, ww, wh, fps, wv_color, wv_rate, wv_scale,
-            wv_n, wdir / f"{out.stem}_waveprecomp.mp4", gpu=gpu,
-        )
-        inputs += ["-i", str(wave_clip)]
-        # colorkey: showwaves draws on black; strip black so only the cream
-        # wave sits over the b-roll (same look as live overlay).
-        chain.append(
-            f"[{n_in}:v]colorkey=0x000000:0.18:0.2[wvk]"
-        )
+        if wv_scale not in ("lin", "log", "sqrt", "cbrt"):
+            wv_scale = "sqrt"
+
+        if live_waveform:
+            # The background is an ordinary finite file at this point, so
+            # narration can safely drive showwaves in the main composite.
+            # Both branches end at the same explicit beat duration. This
+            # removes one complete video encode + decode per classic beat.
+            inputs += ["-i", str(audio)]
+            a_idx = n_in
+            n_in += 1
+            chain.append(f"[{a_idx}:a]asplit=2[wavea][amix]")
+            chain.append(
+                f"[wavea]aformat=channel_layouts=mono,"
+                f"showwaves=s={ww}x{wh}:mode=cline:colors={wv_color}:"
+                f"rate={wv_rate}:draw=full:scale={wv_scale}:n={wv_n},"
+                f"format=yuv420p,colorkey=0x000000:0.18:0.2[wvk]"
+            )
+        else:
+            # Safety fallback selected after a live waveform hits the memory
+            # watchdog on an unusual FFmpeg/source combination.
+            wave_clip = _precompute_wave_clip(
+                Path(audio), duration, ww, wh, fps, wv_color, wv_rate,
+                wv_scale, wv_n,
+                wdir / f"{out.stem}_waveprecomp.mp4", gpu=gpu,
+            )
+            inputs += ["-i", str(wave_clip)]
+            chain.append(
+                f"[{n_in}:v]colorkey=0x000000:0.18:0.2[wvk]"
+            )
+            n_in += 1
+            inputs += ["-i", str(audio)]
+            a_idx = n_in
+            n_in += 1
+            chain.append(f"[{a_idx}:a]anull[amix]")
+
         chain.append(
             f"[{last}][wvk]overlay={wx}:{wy}:eof_action=repeat[bgw]"
         )
         last = "bgw"
-        n_in += 1
-        inputs += ["-i", str(audio)]
-        a_idx = n_in
-        n_in += 1
-        chain.append(f"[{a_idx}:a]anull[amix]")
 
     srt = b.get("srt")
     if srt and Path(srt).exists():
@@ -1162,7 +1225,10 @@ def render_beat_classic(b: Dict[str, Any], out: Path, width: int, height: int,
                    "anullsrc=channel_layout=stereo:sample_rate=44100"]
         chain.append(f"[{n_in}:a]atrim=0:{duration}[a]")
 
-    _run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(chain),
+    buffer_cap = (["-filter_buffered_frames", "300"]
+                  if single_pass else [])
+    _run(["ffmpeg", "-y", *buffer_cap, *inputs,
+          "-filter_complex", ";".join(chain),
           "-map", "[v]", "-map", "[a]",
           *_encode_args(quality=preset or "veryfast", gpu=gpu),
           "-pix_fmt", "yuv420p", "-r", str(fps),
@@ -1814,6 +1880,14 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
         # _run() already guarantees a failed attempt is killed cleanly.
         # Spotify popup is NOT burned per-beat (would be permanent); it is
         # applied after stitch via burn_timed_popup().
+        live_classic_waveform = config.get(
+            "CLASSIC_LIVE_WAVEFORM", "1").lower() not in (
+                "0", "false", "no")
+        single_pass_classic = (
+            layout == "classic"
+            and config.get("CLASSIC_SINGLE_PASS", "1").lower() not in (
+                "0", "false", "no")
+            and _supports_filter_buffer_cap())
         for attempt in range(3):
             try:
                 if layout == "classic":
@@ -1826,7 +1900,11 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                                         badge_margin=badge_margin,
                                         popup=None,
                                         workdir=workdir, profile_video=v,
-                                        gpu=gpu_encode)
+                                        gpu=gpu_encode,
+                                        live_waveform=live_classic_waveform,
+                                        single_pass=single_pass_classic)
+                    if single_pass_classic:
+                        telemetry.count("classic_single_pass_beats")
                 else:
                     render_beat(b, clip, width, height, fps, ken_burns,
                                 overlay=beat_overlays[i], overlay_opacity=ov_opacity,
@@ -1846,6 +1924,19 @@ def render_video(beats: List[Dict[str, Any]], profile: Dict[str, Any],
                 (workdir / f"{clip.stem}_waveprecomp.mp4").unlink(missing_ok=True)
                 if attempt == 2:
                     raise
+                if layout == "classic" and single_pass_classic:
+                    single_pass_classic = False
+                    telemetry.count("classic_single_pass_fallbacks")
+                    log(f"  beat {i+1}/{n}: single-pass composite was not "
+                        "accepted — switching this beat to the isolated "
+                        "background path")
+                elif (layout == "classic" and live_classic_waveform
+                        and "memory runaway" in str(e).lower()):
+                    live_classic_waveform = False
+                    telemetry.count("classic_waveform_safety_fallbacks")
+                    log(f"  beat {i+1}/{n}: live waveform exceeded the memory "
+                        "ceiling — switching this beat to the safe precomputed "
+                        "waveform path")
                 log(f"  beat {i+1}/{n}: composite failed ({e}) — retrying "
                     f"({attempt + 2}/3)")
         artifacts.publish(manifest, contract, [clip])

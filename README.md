@@ -486,6 +486,11 @@ Notes:
   for the previous separate pass. Final VidForge codec/audio settings remain
   unchanged. Failed narration extraction now stops delivery instead of
   generating a silent narrated video.
+- `CLASSIC_SINGLE_PASS=1` uses FFmpeg's hard filter-buffer ceiling to render
+  classic backgrounds, waveforms, overlays, captions and audio together. It
+  removes two intermediate video passes per beat. Unsupported FFmpeg builds
+  stay on the isolated path; a failed optimized beat retries there
+  automatically. `CLASSIC_LIVE_WAVEFORM=0` is a diagnostic opt-out.
 - `MAX_ACTIVE_ENCODERS=auto` shares a bounded FFmpeg budget across local jobs;
   memory availability and reserved final-export disk space are checked too.
   Preparation slots remain controlled by `MAX_CONCURRENT_JOBS` and worker

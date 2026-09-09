@@ -226,6 +226,146 @@ class WatchdogTests(unittest.TestCase):
                 render._run(["ffmpeg", "-version"])
 
 
+class ClassicWaveformOptimizationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.audio = self.root / "voice.mp3"
+        self.audio.write_bytes(b"synthetic audio")
+        self.bg = self.root / "background.mp4"
+        self.profile = {"waveform": {
+            "rate": 15, "color": "0xFAF6EF@0.9", "width_frac": 0.46,
+            "height_frac": 0.3, "n": 5, "scale": "sqrt",
+        }}
+
+    def render_classic(self, *, live=True, single=False):
+        commands = []
+        with patch.object(render, "is_valid_audio", return_value=True), \
+                patch.object(render, "_precompute_bg_clip",
+                             return_value=self.bg) as background, \
+                patch.object(render, "_precompute_wave_clip",
+                             return_value=self.root / "wave.mp4") as wave, \
+                patch.object(render, "_run",
+                             side_effect=lambda command: commands.append(command)):
+            render.render_beat_classic(
+                {"duration": 10, "kind": "blank", "audio": self.audio},
+                self.root / "beat.mp4", 1920, 1080, 30, False,
+                workdir=self.root, profile_video=self.profile,
+                live_waveform=live,
+                single_pass=single,
+            )
+        return commands, wave, background
+
+    def test_live_waveform_removes_intermediate_encode(self):
+        commands, wave, _ = self.render_classic(live=True)
+        wave.assert_not_called()
+        self.assertEqual(len(commands), 1)
+        graph = commands[0][commands[0].index("-filter_complex") + 1]
+        self.assertIn("asplit=2[wavea][amix]", graph)
+        self.assertIn("showwaves=", graph)
+        self.assertEqual(commands[0].count(str(self.audio)), 1)
+
+    def test_safe_mode_keeps_precomputed_waveform_path(self):
+        commands, wave, _ = self.render_classic(live=False)
+        wave.assert_called_once()
+        graph = commands[0][commands[0].index("-filter_complex") + 1]
+        self.assertNotIn("showwaves=", graph)
+        self.assertIn("[2:a]anull[amix]", graph)
+
+    def test_single_pass_builds_background_in_the_main_graph(self):
+        commands, wave, background = self.render_classic(
+            live=True, single=True)
+        background.assert_not_called()
+        wave.assert_not_called()
+        command = commands[0]
+        self.assertIn("-filter_buffered_frames", command)
+        self.assertEqual(
+            command[command.index("-filter_buffered_frames") + 1], "300")
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("boxblur=8:1[bg]", graph)
+        self.assertIn("showwaves=", graph)
+
+    def test_precomputed_fallback_does_not_encode_duplicate_fps(self):
+        commands = []
+        with patch.object(render, "_run",
+                          side_effect=lambda command: commands.append(command)):
+            render._precompute_wave_clip(
+                self.audio, 10, 882, 324, 30, "white", 15, "sqrt", 5,
+                self.root / "wave.mp4",
+            )
+        command = commands[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertNotIn("fps=30", graph)
+        self.assertNotIn("-r", command)
+
+
+class FilterBufferCapabilityTests(unittest.TestCase):
+    def test_capability_is_detected_once_and_cached(self):
+        reply = SimpleNamespace(
+            stdout="-filter_buffered_frames maximum buffered frames",
+            stderr="", returncode=0)
+        with patch.object(render, "_FILTER_BUFFER_CAP_SUPPORTED", None), \
+                patch.object(render.subprocess, "run",
+                             return_value=reply) as probe:
+            self.assertTrue(render._supports_filter_buffer_cap())
+            self.assertTrue(render._supports_filter_buffer_cap())
+        probe.assert_called_once()
+
+    def test_old_ffmpeg_fails_closed(self):
+        reply = SimpleNamespace(stdout="generic ffmpeg help", stderr="",
+                                returncode=0)
+        with patch.object(render, "_FILTER_BUFFER_CAP_SUPPORTED", None), \
+                patch.object(render.subprocess, "run", return_value=reply):
+            self.assertFalse(render._supports_filter_buffer_cap())
+
+
+class ClassicFallbackTests(unittest.TestCase):
+    def test_failure_steps_down_from_single_to_live_to_precomputed(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / "voice.mp3"
+            audio.write_bytes(b"audio")
+            calls = []
+
+            def composite(_beat, out, *_args, **kwargs):
+                calls.append((kwargs["single_pass"], kwargs["live_waveform"]))
+                if len(calls) == 1:
+                    raise RuntimeError("single-pass filter rejected")
+                if len(calls) == 2:
+                    raise RuntimeError("ffmpeg memory runaway: test ceiling")
+                out.write_bytes(b"valid composite")
+
+            def stitch(_clips, _music, dest, _workdir):
+                dest.write_bytes(b"stitched")
+
+            profile = {"video": {
+                "layout": "classic", "width": 320, "height": 180,
+                "fps": 30, "transitions": {"enabled": False},
+            }}
+            with patch.object(render, "ensure_ffmpeg"), \
+                    patch.object(render, "_supports_filter_buffer_cap",
+                                 return_value=True), \
+                    patch.object(render, "render_beat_classic",
+                                 side_effect=composite), \
+                    patch.object(render, "concat_with_music",
+                                 side_effect=stitch), \
+                    patch.object(render, "encode_final_export"), \
+                    patch.object(render.artifacts, "matches",
+                                 return_value=False), \
+                    patch.object(render.artifacts, "publish"), \
+                    patch.object(render.config, "get",
+                                 side_effect=lambda _key, default=None: default):
+                render.render_video(
+                    [{"duration": 1, "kind": "blank", "audio": audio}],
+                    profile, None, root, root / "final.mp4",
+                )
+
+            self.assertEqual(calls, [
+                (True, True), (False, True), (False, False),
+            ])
+
+
 class SingleClipAssemblyTests(unittest.TestCase):
     def test_single_clip_copies_exact_file_without_launching_ffmpeg(self):
         with TemporaryDirectory() as tmp:
@@ -485,6 +625,30 @@ class FFmpegSmokeTests(unittest.TestCase):
             self.assertLessEqual(abs(float(contract["audio"]["duration"]) -
                                      float(contract["video"]["duration"])), 0.05)
             self.assertFalse((root / "final_voice_all.wav").exists())
+
+    def test_classic_single_pass_has_exact_tracks_and_no_intermediates(self):
+        if not render._supports_filter_buffer_cap():
+            self.skipTest("FFmpeg lacks -filter_buffered_frames")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio, out = root / "voice.wav", root / "beat.mp4"
+            render._run([
+                "ffmpeg", "-y", "-f", "lavfi", "-i",
+                "sine=frequency=440:sample_rate=44100:duration=1",
+                "-c:a", "pcm_s16le", str(audio),
+            ])
+            render.render_beat_classic(
+                {"duration": 1, "kind": "blank", "audio": audio},
+                out, 320, 180, 30, False, workdir=root, gpu=False,
+                single_pass=True,
+            )
+            self.assertTrue(render.is_valid_video(out, 0.9))
+            self.assertAlmostEqual(
+                render.probe_stream_duration(out, "video"), 1, places=2)
+            self.assertAlmostEqual(
+                render.probe_stream_duration(out, "audio"), 1, places=2)
+            self.assertFalse((root / "beat_bgprecomp.mp4").exists())
+            self.assertFalse((root / "beat_waveprecomp.mp4").exists())
 
 
 if __name__ == "__main__":
