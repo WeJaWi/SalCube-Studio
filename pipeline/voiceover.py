@@ -22,6 +22,7 @@ import subprocess
 import threading
 import time as _time
 import uuid
+import wave
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -267,7 +268,7 @@ def _slice_group_pcm(beats: List[Dict[str, Any]], idxs: List[int], pcm: Path,
     """Slice one already-decoded narration master into beat files."""
     cues = captions.parse_srt(raw_srt.read_text(encoding="utf-8", errors="ignore")) \
         if raw_srt.exists() else []
-    total_dur = render.probe_duration(pcm)
+    total_dur = _pcm_wav_duration(pcm) or render.probe_duration(pcm)
     if total_dur <= 0:
         raise RuntimeError(
             f"tts group audio is unprobeable after PCM decode: {pcm.name}")
@@ -370,6 +371,25 @@ def _slice_group_pcm(beats: List[Dict[str, Any]], idxs: List[int], pcm: Path,
             captions.write_srt(beat_cues, srt_dest)
         beats[i].update(audio=dest, srt=srt_dest if has_cues else None,
                         audio_url=None, duration=end - start)
+
+
+def _pcm_wav_duration(path: Path) -> float:
+    """Read a decoded PCM master's duration without spawning FFprobe.
+
+    FFmpeg has finished and closed this WAV before slicing begins. Reading its
+    frame count directly avoids turning a transient FFprobe/process-resource
+    failure into a failed job while keeping FFprobe as a fallback for any WAV
+    variant the standard-library reader cannot parse.
+    """
+    try:
+        with wave.open(str(path), "rb") as source:
+            frame_rate = source.getframerate()
+            frames = source.getnframes()
+        if frame_rate > 0 and frames > 0:
+            return frames / frame_rate
+    except (EOFError, OSError, wave.Error):
+        pass
+    return 0.0
 
 
 def _write_slice(pcm: Path, dest: Path, start: float, end: float, beat_index: int) -> None:

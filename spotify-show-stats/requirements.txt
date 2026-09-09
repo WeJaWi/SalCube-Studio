@@ -1,0 +1,4 @@
+# The studio's root requirements already pin these; listed so the tool can
+# be run standalone. No other dependencies — everything else is stdlib.
+requests>=2.31
+urllib3<2

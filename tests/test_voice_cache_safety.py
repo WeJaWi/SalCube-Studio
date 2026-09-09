@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import wave
 from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,6 +18,25 @@ def setUpModule():
 
 
 class VoiceCacheSafetyTests(unittest.TestCase):
+    def test_pcm_slice_uses_wav_header_when_ffprobe_temporarily_fails(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pcm = root / "tts_raw_005.wav"
+            with wave.open(str(pcm), "wb") as output:
+                output.setnchannels(2)
+                output.setsampwidth(2)
+                output.setframerate(44_100)
+                output.writeframes(b"\x00" * 44_100 * 2 * 2)
+            beats = [{"text": "A valid one-second narration beat."}]
+
+            with patch.object(voiceover.render, "probe_duration", return_value=0), \
+                    patch.object(voiceover, "_write_slice") as write_slice:
+                voiceover._slice_group_pcm(
+                    beats, [0], pcm, root / "missing.srt", root)
+
+            write_slice.assert_called_once_with(pcm, root / "vo_000.mp3", 0.0, 1.0, 0)
+            self.assertEqual(beats[0]["duration"], 1.0)
+
     def test_slice_retries_local_validation_without_resubmitting_tts(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
