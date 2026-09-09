@@ -164,12 +164,68 @@
     max-width: 62ch;
   }
 
+  .studio-overview {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin: -4px 0 20px;
+  }
+  .overview-card {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 13px 14px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    background: rgba(27, 33, 39, 0.62);
+  }
+  .overview-icon {
+    width: 30px; height: 30px; flex: 0 0 30px;
+    display: grid; place-items: center;
+    border-radius: 9px;
+    color: var(--cyan);
+    background: var(--cyan-soft);
+    border: 1px solid rgba(141, 224, 197, 0.16);
+    font-size: 13px; font-weight: 750;
+  }
+  .overview-copy { min-width: 0; }
+  .overview-copy strong {
+    display: block;
+    color: var(--fg);
+    font-size: 13px;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .overview-copy span {
+    display: block;
+    color: var(--muted-2);
+    font-size: 10.5px;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .panel {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 24px;
     margin-bottom: 20px;
+  }
+  .composer-panel {
+    background:
+      linear-gradient(145deg, rgba(141,224,197,.055), transparent 35%),
+      var(--panel);
+    box-shadow: 0 16px 45px rgba(0,0,0,.16);
+    transition: border-color .2s, box-shadow .2s, transform .2s;
+  }
+  .composer-panel:focus-within {
+    border-color: rgba(141,224,197,.4);
+    box-shadow: 0 20px 55px rgba(0,0,0,.22), 0 0 0 3px rgba(141,224,197,.055);
   }
   .panel.ops-panel { background: linear-gradient(140deg, #21332f, var(--panel) 65%); }
   .panel-title {
@@ -310,6 +366,63 @@
     margin-top: 18px;
     padding-top: 16px;
     border-top: 1px solid var(--border-soft);
+  }
+  .advanced-settings {
+    margin-top: 18px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    background: rgba(20,28,29,.68);
+    overflow: hidden;
+  }
+  .advanced-settings summary {
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 52px;
+    padding: 12px 14px;
+    cursor: pointer;
+    color: var(--fg);
+    font-weight: 600;
+    user-select: none;
+  }
+  .advanced-settings summary::-webkit-details-marker { display: none; }
+  .advanced-settings summary:hover { background: rgba(255,255,255,.018); }
+  .advanced-settings summary:focus-visible { outline: 2px solid var(--cyan); outline-offset: -3px; }
+  .advanced-summary-copy {
+    color: var(--muted-2);
+    font-size: 11px;
+    font-weight: 450;
+    margin-left: 2px;
+  }
+  .advanced-chevron {
+    margin-left: auto;
+    color: var(--muted-2);
+    transition: transform .2s ease;
+  }
+  .advanced-settings[open] .advanced-chevron { transform: rotate(180deg); }
+  .advanced-body {
+    padding: 0 14px 16px;
+    border-top: 1px solid var(--border-soft);
+  }
+  .composer-shortcut {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    color: var(--muted-2);
+    font-size: 10.5px;
+  }
+  .composer-shortcut kbd {
+    min-width: 21px;
+    padding: 2px 5px;
+    text-align: center;
+    font: 600 10px/1.35 var(--font);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-bottom-color: #4a565d;
+    border-radius: 5px;
+    background: var(--panel-2);
   }
   .nested {
     margin-top: 14px;
@@ -558,6 +671,115 @@
     transition: width .4s ease;
   }
 
+  .job-progress {
+    margin: 14px 0 16px;
+    padding: 14px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    background: #141c1d;
+  }
+  .job-progress-head {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 9px;
+  }
+  .job-progress-head span {
+    min-width: 0; flex: 1;
+    color: var(--muted);
+    font-size: 11.5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .job-progress-head strong {
+    color: var(--cyan);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stage-rail {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 5px;
+    margin-top: 11px;
+  }
+  .stage-chip {
+    min-width: 0;
+    padding: 5px 3px;
+    text-align: center;
+    border-radius: 7px;
+    color: var(--muted-2);
+    background: rgba(255,255,255,.018);
+    border: 1px solid transparent;
+    font-size: 9.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: color .2s, background .2s, border-color .2s;
+  }
+  .stage-chip.done { color: var(--muted); background: rgba(141,224,197,.045); }
+  .stage-chip.current {
+    color: var(--cyan);
+    background: var(--cyan-soft);
+    border-color: rgba(141,224,197,.23);
+  }
+
+  #toasts {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 1000;
+    width: min(380px, calc(100vw - 32px));
+    display: grid;
+    gap: 9px;
+    pointer-events: none;
+  }
+  .toast {
+    pointer-events: auto;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    color: var(--fg);
+    background: rgba(27,33,39,.97);
+    border: 1px solid var(--border);
+    box-shadow: 0 16px 40px rgba(0,0,0,.34);
+    animation: toast-in .24s ease both;
+  }
+  .toast::before {
+    content: "!";
+    width: 20px; height: 20px; flex: 0 0 20px;
+    display: grid; place-items: center;
+    border-radius: 6px;
+    color: #311814;
+    background: var(--err);
+    font-size: 11px; font-weight: 800;
+  }
+  .toast.success::before { content: "✓"; color: #142622; background: var(--ok); }
+  .toast.info::before { content: "i"; color: #142622; background: var(--cyan); }
+  .toast-message { flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.45; }
+  .toast-close {
+    margin: -4px -6px -4px 0;
+    padding: 4px 7px;
+    border: 0;
+    background: transparent;
+    color: var(--muted-2);
+    box-shadow: none;
+    font-size: 15px;
+  }
+  .toast-close:hover { color: var(--fg); border-color: transparent; background: transparent; filter: none; }
+  .toast.leaving { animation: toast-out .2s ease both; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px) scale(.98); } }
+  @keyframes toast-out { to { opacity: 0; transform: translateY(5px) scale(.98); } }
+
+  @media (max-width: 720px) {
+    .studio-overview { grid-template-columns: 1fr; }
+    .overview-card { padding: 10px 12px; }
+    .advanced-summary-copy, .composer-shortcut { display: none; }
+    .stage-rail { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    #toasts { right: 16px; bottom: 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; }
+  }
+
   .hint { font-size: 12px; color: var(--muted-2); margin: 0; }
   .gate-box {
     margin-bottom: 16px;
@@ -592,6 +814,21 @@
     <p class="sub">Create, queue and deliver. Your scripts, voices, footage and workers — together in one studio.</p>
   </div>
 
+  <div class="studio-overview" aria-label="Studio status">
+    <div class="overview-card">
+      <div class="overview-icon" aria-hidden="true">▶</div>
+      <div class="overview-copy"><strong id="overviewJobs">Checking jobs…</strong><span id="overviewJobsDetail">Production queue</span></div>
+    </div>
+    <div class="overview-card">
+      <div class="overview-icon" aria-hidden="true">⌁</div>
+      <div class="overview-copy"><strong id="overviewWorkers">Checking workers…</strong><span id="overviewWorkersDetail">Fleet capacity</span></div>
+    </div>
+    <div class="overview-card">
+      <div class="overview-icon" aria-hidden="true">⚡</div>
+      <div class="overview-copy"><strong id="overviewEngine">Checking renderer…</strong><span id="overviewEngineDetail">Jobs keep their starting configuration</span></div>
+    </div>
+  </div>
+
   {% if missing_keys %}
   <div class="warn">
     Missing API keys: {% for k in missing_keys %}<code>{{ k }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.
@@ -605,8 +842,8 @@
   </div>
   {% endif %}
 
-  <div class="panel">
-    <div class="panel-title">New video</div>
+  <div class="panel composer-panel">
+    <div class="panel-title">Start a production</div>
     <label>Title / topic <span>(one per line to queue several)</span></label>
     <textarea id="title" placeholder="e.g. Why you are always tired (and the three things your body is missing)&#10;&#10;Or queue a batch:&#10;First video title&#10;Second video title&#10;Third video title" style="min-height:90px"></textarea>
     <div class="row" style="margin-top:14px">
@@ -629,6 +866,13 @@
       </div>
     </div>
 
+    <details class="advanced-settings" id="advancedSettings">
+      <summary>
+        <span>Production settings</span>
+        <span class="advanced-summary-copy">Script, footage, animation and calls-to-action</span>
+        <span class="advanced-chevron" aria-hidden="true">⌄</span>
+      </summary>
+      <div class="advanced-body">
     <div class="row" style="margin-top:14px">
       <div>
         <label>Cited thinker(s) <span>— Matthias profile; ignored by Hannah</span></label>
@@ -727,6 +971,8 @@
       <p class="sub" style="font-size:12px;margin:0 0 4px;opacity:.75">When split is on, free half (part&nbsp;1) ends with the bundled Patreon CTA clip (<code>branding/patreon-end.mp4</code>).</p>
       <p class="sub" style="font-size:12px;margin:8px 0 0">Soft like/subscribe and end-screen funnel stay on per profile. Remember title/description disclosure + YouTube altered-content flag.</p>
     </div>
+      </div>
+    </details>
 
     <div class="btn-row">
       <button id="go">Add to queue</button>
@@ -734,6 +980,7 @@
         <span class="dot" id="workerDot"></span><span id="goWorkerLabel">Send to worker</span>
       </button>
       <span class="hint" id="queueHint">Several jobs can run at once. Use Auto hook for unattended batches.</span>
+      <span class="composer-shortcut" aria-hidden="true"><kbd id="shortcutMod">⌘</kbd><span>+</span><kbd>↵</kbd></span>
     </div>
   </div>
 
@@ -766,6 +1013,14 @@
     </div>
     <div class="hint" style="margin:-7px 0 4px">Video ID: <span id="videoId" class="media-id"></span></div>
     <div id="descriptionState" class="hint" style="margin:0 0 14px">Description: waiting for your channel rules</div>
+
+    <div id="jobProgress" class="job-progress">
+      <div class="job-progress-head"><span id="jobStep">Waiting to start…</span><strong id="jobPct">0%</strong></div>
+      <div class="progress-track" role="progressbar" aria-label="Video progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="jobProgressBar">
+        <div class="progress-fill" id="jobProgressFill" style="width:0%"></div>
+      </div>
+      <div class="stage-rail" id="jobStages" aria-label="Production stages"></div>
+    </div>
 
     <div id="titleGate" class="approval-card hidden">
       <h3>Choose the video title</h3>
@@ -857,10 +1112,103 @@
 </aside>
 </div>
 
+<div id="toasts" aria-live="polite" aria-atomic="false"></div>
+
 <script>
 const $ = s => document.querySelector(s);
 let timer = null, queueTimer = null, currentJob = null;
 let selectedHook = null, gateShown = false, lastJobs = [], lastWorkers = [], videoFor = null;
+
+const JOB_STAGES = ["Plan", "Write", "Voice", "Footage", "Render", "Deliver"];
+
+function toast(message, type="error") {
+  const stack = $("#toasts");
+  if (!stack || !message) return;
+  const item = document.createElement("div");
+  item.className = `toast ${type}`;
+  item.setAttribute("role", type === "error" ? "alert" : "status");
+  const copy = document.createElement("div");
+  copy.className = "toast-message";
+  copy.textContent = String(message);
+  const close = document.createElement("button");
+  close.className = "toast-close";
+  close.type = "button";
+  close.setAttribute("aria-label", "Dismiss notification");
+  close.textContent = "×";
+  const dismiss = () => {
+    if (!item.isConnected || item.classList.contains("leaving")) return;
+    item.classList.add("leaving");
+    setTimeout(() => item.remove(), 210);
+  };
+  close.addEventListener("click", dismiss);
+  item.append(copy, close);
+  stack.appendChild(item);
+  while (stack.children.length > 4) stack.firstElementChild.remove();
+  setTimeout(dismiss, type === "error" ? 7000 : 4200);
+}
+
+// Existing action handlers already call alert() for operational failures.
+// Route those messages into the Studio notification layer without changing
+// confirm() — destructive choices must remain explicit and blocking.
+window.alert = message => toast(message, "error");
+
+function updateOverview() {
+  const active = lastJobs.filter(j => ["researching", "awaiting_title", "queued", "dispatched", "running", "awaiting_approval", "retry_wait"].includes(j.status));
+  const running = lastJobs.filter(j => j.status === "running").length;
+  $("#overviewJobs").textContent = active.length ? `${active.length} active production${active.length===1?"":"s"}` : "Studio ready";
+  $("#overviewJobsDetail").textContent = active.length ? `${running} rendering · ${Math.max(0, active.length-running)} waiting or preparing` : `${lastJobs.length} recent job${lastJobs.length===1?"":"s"}`;
+
+  const live = lastWorkers.filter(w => !w.stale);
+  const free = live.reduce((sum, w) => sum + ((w.capacity || {}).effective_free || 0), 0);
+  $("#overviewWorkers").textContent = live.length ? `${free} render slot${free===1?"":"s"} free` : "This Mac only";
+  $("#overviewWorkersDetail").textContent = live.length ? `${live.length} connected worker${live.length===1?"":"s"}` : "No remote worker connected";
+}
+
+function jobStageIndex(j) {
+  let step = String(j.step || "").toLowerCase();
+  if (["error", "retry_wait", "paused"].includes(step)) {
+    const prior = [...(j.log || [])].reverse().find(entry =>
+      entry.step && !["error", "queue", "retry_wait", "paused"].includes(String(entry.step).toLowerCase()));
+    if (prior) step = String(prior.step).toLowerCase();
+  }
+  if (j.status === "done" || step === "done" || step === "drive" || step.includes("upload")) return 5;
+  if (step === "render" || step.includes("ffmpeg")) return 4;
+  if (["broll", "anim", "host", "stock", "footage"].some(key => step.includes(key))) return 3;
+  if (step === "voiceover" || step === "voice" || step === "music") return 2;
+  if (step === "script" || step === "plan") return 1;
+  return 0;
+}
+
+function renderJobProgress(j) {
+  const pct = Math.max(0, Math.min(100, Number(j.progress_pct || (j.status === "done" ? 100 : 0))));
+  const current = jobStageIndex(j);
+  const latest = (j.log || []).length ? j.log[j.log.length - 1].message : "";
+  $("#jobStep").textContent = latest || statusLabel(j.status || "queued");
+  $("#jobPct").textContent = `${Math.round(pct)}%`;
+  $("#jobProgressFill").style.width = `${pct}%`;
+  $("#jobProgressBar").setAttribute("aria-valuenow", String(Math.round(pct)));
+  $("#jobStages").innerHTML = JOB_STAGES.map((label, index) => {
+    const state = j.status === "done" || index < current ? "done" : (index === current ? "current" : "");
+    return `<span class="stage-chip ${state}">${label}</span>`;
+  }).join("");
+}
+
+updateOverview();
+$("#jobStages").innerHTML = JOB_STAGES.map((label, index) =>
+  `<span class="stage-chip ${index===0?"current":""}">${label}</span>`).join("");
+$("#shortcutMod").textContent = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
+$("#title").addEventListener("keydown", event => {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    event.preventDefault();
+    if (!$("#go").disabled) $("#go").click();
+  }
+});
+try {
+  const advanced = $("#advancedSettings");
+  advanced.open = localStorage.getItem("salcube-production-settings") === "open";
+  advanced.addEventListener("toggle", () => localStorage.setItem(
+    "salcube-production-settings", advanced.open ? "open" : "closed"));
+} catch (e) { /* storage can be unavailable in private/locked-down browsers */ }
 
 const PROFILE_THEMES = {{ profile_theme_defaults | tojson }};
 function applyProfileThemes() {
@@ -878,13 +1226,19 @@ function applyGpuToggleUi(on) {
 }
 fetch("/api/settings").then(r => r.json()).then(s => {
   applyGpuToggleUi(!!s.gpu_encode);
+  const encoder = (s.hardware || {}).gpu_encoder;
+  $("#overviewEngine").textContent = s.gpu_encode && encoder ? "Accelerated renderer" : "Balanced renderer";
+  $("#overviewEngineDetail").textContent = s.gpu_encode && encoder ? `${encoder} · optimized FFmpeg passes` : "Software H.264 · optimized FFmpeg passes";
   if (!s.hardware || !s.hardware.gpu_encode_available) {
     $("#gpuToggleWrap").title = "No working hardware H.264 encoder was found on this machine";
     $("#gpuToggle").disabled = true;
   } else if (s.hardware.gpu_encoder) {
     $("#gpuToggleWrap").title = `Use ${s.hardware.gpu_encoder} for jobs started after this change`;
   }
-}).catch(() => {});
+}).catch(() => {
+  $("#overviewEngine").textContent = "Renderer status unavailable";
+  $("#overviewEngineDetail").textContent = "The Studio will retry automatically";
+});
 $("#gpuToggle").addEventListener("change", async () => {
   const on = $("#gpuToggle").checked;
   applyGpuToggleUi(on); // optimistic — reconciled by the response below
@@ -989,6 +1343,7 @@ $("#go").addEventListener("click", async () => {
     $("#queueHint").textContent = n > 1
       ? `Queued ${n} videos · IDs ${ids.join(", ")}`
       : `Video ${data.job_id} · ${(made[0]||{}).length_chars || "?"} chars · queued.`;
+    toast(n > 1 ? `${n} productions added to the queue.` : "Production added to the queue.", "success");
     const follow = currentJob && ["running","awaiting_approval"]
       .includes((lastJobs.find(j => j.job_id === currentJob) || {}).status)
       ? currentJob : ids[0];
@@ -1123,7 +1478,8 @@ async function refreshWorkers() {
     lastWorkers = await (await fetch("/api/workers")).json();
     applyWorkerLight(lastWorkers);
     renderWorkers(lastWorkers);
-  } catch (e) { lastWorkers = []; applyWorkerLight([]); }
+    updateOverview();
+  } catch (e) { lastWorkers = []; applyWorkerLight([]); updateOverview(); }
 }
 refreshWorkers();
 setInterval(refreshWorkers, 5000);
@@ -1155,6 +1511,8 @@ $("#goWorker").addEventListener("click", async () => {
     $("#queueHint").textContent = failed.length
       ? `${sent}/${ids.length} sent to the worker — the rest stayed in the queue (${failed[0]})`
       : `Sent ${sent} to the worker.`;
+    toast(failed.length ? `${sent}/${ids.length} jobs sent; the rest stayed queued.`
+      : `${sent} job${sent===1?"":"s"} sent to the worker.`, failed.length ? "info" : "success");
     selectJob(ids[0]);
     refreshQueue();
     refreshWorkers();
@@ -1302,6 +1660,7 @@ async function copyCurrentTitle() {
   }
   btn.textContent = ok ? "✓" : "✗";
   btn.classList.toggle("copied", ok);
+  toast(ok ? "Title copied." : "Could not copy the title.", ok ? "success" : "error");
   setTimeout(() => { btn.textContent = "⧉"; btn.classList.remove("copied"); }, 2000);
 }
 
@@ -1344,6 +1703,7 @@ async function refreshQueue() {
     const r = await fetch("/api/jobs");
     const list = await r.json();
     lastJobs = list;
+    updateOverview();
 
     const running = list.filter(j => j.status === "running");
     const runningPanel = $("#runningPanel");
@@ -1538,6 +1898,7 @@ function render(j, jobId) {
   $("#descriptionState").textContent = descState === "waiting_for_rules"
     ? "Description: waiting for your channel rules"
     : `Description: ${descState.replaceAll("_", " ")}`;
+  renderJobProgress(j);
   const log = $("#log");
   log.innerHTML = (j.log || []).map(l =>
     `<div class="line"><span class="t">${l.t}</span>`

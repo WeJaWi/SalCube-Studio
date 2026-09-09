@@ -29,6 +29,25 @@ class IdentityTests(unittest.TestCase):
         self.assertTrue(all(identity.is_numeric_id(v) for v in values))
 
 
+class StudioUiTests(unittest.TestCase):
+    def test_main_studio_exposes_progressive_composer_and_live_pipeline(self):
+        with patch.object(app, "ACCESS", []):
+            response = app.app.test_client().get("/")
+        self.assertEqual(response.status_code, 200)
+        page = response.get_data(as_text=True)
+        self.assertIn('class="studio-header"', page)
+        self.assertIn('id="advancedSettings"', page)
+        self.assertIn('id="overviewJobs"', page)
+        self.assertIn('id="overviewWorkers"', page)
+        self.assertIn('id="overviewEngine"', page)
+        self.assertIn('id="jobProgress"', page)
+        self.assertIn('id="jobStages"', page)
+        self.assertIn('id="toasts"', page)
+        self.assertIn('const JOB_STAGES = ["Plan", "Write", "Voice", '
+                      '"Footage", "Render", "Deliver"]', page)
+        self.assertIn('window.alert = message => toast(message, "error")', page)
+
+
 class VideoGroupTests(unittest.TestCase):
     def test_new_jobs_default_to_luna_script_generation(self):
         inputs = app._build_inputs({}, "A title")
