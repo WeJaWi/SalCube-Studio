@@ -45,7 +45,7 @@ _PROBE_CACHE: OrderedDict = OrderedDict()
 _PROBE_CACHE_LOCK = threading.Lock()
 _PROBE_ENTRIES = (
     "stream=index,codec_name,profile,codec_type,width,height,pix_fmt,"
-    "r_frame_rate,avg_frame_rate,start_time,duration,bit_rate,"
+    "r_frame_rate,avg_frame_rate,nb_frames,start_time,duration,bit_rate,"
     "sample_rate,channels:format=nb_streams,start_time,duration"
 )
 
@@ -231,6 +231,27 @@ def probe_stream_duration(path: Path, stream: str) -> float:
         return _duration_value((out.stdout or "").strip())
     except Exception:  # noqa: BLE001
         return 0.0
+
+
+def probe_video_duration_exact(path: Path) -> float:
+    """Return a CFR video's frame-exact playable duration when available.
+
+    MP4 stream-duration metadata can be rounded and AAC can make the container
+    longer than the picture. Files produced by this renderer carry an indexed
+    frame count, so frame count / frame rate is the reliable final-export
+    boundary. External media without that field keeps the duration fallback.
+    """
+    try:
+        video = next(item for item in _probe_media(path).get("streams", [])
+                     if item.get("codec_type") == "video")
+        frames = int(video.get("nb_frames") or 0)
+        frame_rate = (_rate_value(video.get("avg_frame_rate"))
+                      or _rate_value(video.get("r_frame_rate")))
+        if frames > 0 and frame_rate > 0:
+            return frames / frame_rate
+    except (StopIteration, TypeError, ValueError):
+        pass
+    return 0.0
 
 
 def is_valid_audio(path: Path, min_duration: float = 0.04) -> bool:
@@ -594,6 +615,36 @@ def _validate_spotify_export(path: Path, fps: int) -> Dict[str, Any]:
     return {"video": video, "audio": audio, "format": data.get("format", {})}
 
 
+def _can_copy_final_video(path: Path, fps: int, quality: str,
+                          has_overlay: bool = False) -> bool:
+    """Whether VidForge's final pass can preserve the encoded video stream.
+
+    Balanced exports without a final overlay often already satisfy the strict
+    delivery video contract because every beat uses the same CFR H.264 timing
+    settings. In that case only the continuous audio master needs encoding.
+    High-quality, 720p, incompatible, or branded outputs keep the full video
+    normalization pass.
+    """
+    if quality != "balanced" or has_overlay:
+        return False
+    try:
+        video = next(item for item in _probe_media(path).get("streams", [])
+                     if item.get("codec_type") == "video")
+        width = int(video.get("width") or 0)
+        height = int(video.get("height") or 0)
+        rates_ok = all(abs(_rate_value(video.get(key)) - fps) <= 0.01
+                       for key in ("r_frame_rate", "avg_frame_rate"))
+        return (video.get("codec_name") == "h264"
+                and str(video.get("profile") or "").lower() == "high"
+                and video.get("pix_fmt") == "yuv420p"
+                and width > 0 and height > 0
+                and abs(width / height - 16 / 9) < 0.02
+                and rates_ok
+                and abs(float(video.get("start_time") or 0)) <= 0.05)
+    except (StopIteration, TypeError, ValueError, ZeroDivisionError):
+        return False
+
+
 @telemetry.timed("final_export")
 def encode_final_export(path: Path, workdir: Path, fps: int = 30,
                         quality: str = "balanced", gpu: bool = False,
@@ -610,12 +661,14 @@ def encode_final_export(path: Path, workdir: Path, fps: int = 30,
     to AAC-LC exactly once in this pass, both streams start at zero, and the
     resulting file contains exactly one video and one audio track.
     """
-    video_dur = probe_stream_duration(path, "video") or probe_duration(path)
-    if video_dur <= 0:
-        raise RuntimeError(f"cannot final-encode unprobeable video: {path}")
     fps = max(1, int(fps))
     quality = quality if quality in ("high", "balanced", "fast720") \
         else "balanced"
+    video_dur = (probe_video_duration_exact(path)
+                 or probe_stream_duration(path, "video")
+                 or probe_duration(path))
+    if video_dur <= 0:
+        raise RuntimeError(f"cannot final-encode unprobeable video: {path}")
     audio_master = workdir / f"{path.stem}_voice_all.wav"
     encoded = workdir / f"{path.stem}_vidforge_encoded.mp4"
     audio_master.unlink(missing_ok=True)
@@ -676,6 +729,9 @@ def encode_final_export(path: Path, workdir: Path, fps: int = 30,
     extra_inputs: List[str] = []
     video_args = ["-map", "0:v:0", "-vf", video_filter]
     windows = resolve_popup_windows(video_dur, popup_windows) if popup_windows else []
+    copy_video = _can_copy_final_video(
+        path, fps, quality,
+        has_overlay=bool(popup and popup.exists() and windows))
     if popup and popup.exists() and windows:
         extra_inputs = ["-i", str(popup)]
         enable = "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in windows)
@@ -686,21 +742,42 @@ def encode_final_export(path: Path, workdir: Path, fps: int = 30,
                  f"enable='{enable}'[branded];[branded]{video_filter}[final]")
         video_args = ["-filter_complex", graph, "-map", "[final]"]
         log("  Popup composited during final export (one video pass saved)")
-    try:
-        with resources.reserve_disk(workdir, estimated_extra):
-            _run([
+
+    def _encode(copy_stream: bool) -> None:
+        selected_video_args = (["-map", "0:v:0"] if copy_stream else video_args)
+        video_codec_args = (["-c:v", "copy"] if copy_stream else
+                            [*_vidforge_final_encode_args(quality=quality, gpu=gpu),
+                             "-profile:v", "high", "-r", str(fps),
+                             "-fps_mode", "cfr"])
+        _run([
             "ffmpeg", "-y", "-i", str(path), "-i", str(audio_master),
-            *extra_inputs, *video_args, "-map", "1:a:0",
-            "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
-            *_vidforge_final_encode_args(quality=quality, gpu=gpu),
-            "-profile:v", "high", "-r", str(fps), "-fps_mode", "cfr",
+            *([] if copy_stream else extra_inputs), *selected_video_args,
+            "-map", "1:a:0", "-map_metadata", "-1", "-map_chapters", "-1",
+            "-sn", "-dn", *video_codec_args,
             "-color_range", "tv", "-colorspace", "bt709",
             "-color_primaries", "bt709", "-color_trc", "bt709",
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             "-t", f"{video_dur:.6f}", "-movflags", "+faststart",
             str(encoded),
         ], wallclock_s=max(3600.0, min(43_200.0, video_dur * 2 + 1800.0)))
-        contract = _validate_spotify_export(encoded, fps)
+
+    try:
+        with resources.reserve_disk(workdir, estimated_extra):
+            if copy_video:
+                log("  VidForge fast final pass: preserving verified video; "
+                    "encoding the continuous audio master only")
+                try:
+                    _encode(True)
+                    contract = _validate_spotify_export(encoded, fps)
+                except RuntimeError as exc:
+                    log(f"  Fast final pass rejected ({str(exc)[:120]}) — "
+                        "running full video normalization")
+                    encoded.unlink(missing_ok=True)
+                    _encode(False)
+                    contract = _validate_spotify_export(encoded, fps)
+            else:
+                _encode(False)
+                contract = _validate_spotify_export(encoded, fps)
         video = contract["video"]
         audio = contract["audio"]
         log(f"  Spotify export verified: {video.get('width')}x{video.get('height')} "

@@ -25,7 +25,8 @@ def metadata(duration="4.000"):
             {"index": 0, "codec_type": "video", "codec_name": "h264",
              "profile": "High", "pix_fmt": "yuv420p", "width": 640,
              "height": 360, "r_frame_rate": "30/1",
-             "avg_frame_rate": "30/1", "start_time": "0.000",
+             "avg_frame_rate": "30/1", "nb_frames": "120",
+             "start_time": "0.000",
              "duration": duration},
             {"index": 1, "codec_type": "audio", "codec_name": "aac",
              "profile": "LC", "sample_rate": "44100", "channels": 2,
@@ -125,6 +126,11 @@ class MetadataCacheTests(unittest.TestCase):
             self.assertFalse(render.is_valid_audio(self.path))
             self.assertEqual(render.probe_stream_duration(self.path, "audio"), 0)
             self.assertEqual(render.probe_duration(self.path), 4.0)
+
+    def test_frame_count_gives_exact_video_duration(self):
+        data = metadata("4.125")
+        with patch.object(render.subprocess, "run", return_value=response(data)):
+            self.assertEqual(render.probe_video_duration_exact(self.path), 4.0)
 
     def test_nonfinite_durations_fail_closed(self):
         for invalid in ("NaN", "inf", "-1", "N/A", None):
@@ -254,6 +260,58 @@ class SingleClipAssemblyTests(unittest.TestCase):
             self.assertIn("-c:a", command)
 
 
+class FinalExportFastPathTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.video = self.root / "final.mp4"
+        self.video.write_bytes(b"compatible stitched video")
+        self.contract = {
+            "video": {"width": 1920, "height": 1080,
+                      "pix_fmt": "yuv420p", "profile": "High"},
+            "audio": {"profile": "LC"},
+        }
+
+    @staticmethod
+    def _fake_ffmpeg(commands):
+        def run(command, **_kwargs):
+            commands.append(command)
+            Path(command[-1]).write_bytes(b"encoded")
+        return run
+
+    def test_balanced_compatible_export_copies_video_stream(self):
+        commands = []
+        with patch.object(render, "probe_video_duration_exact", return_value=10.0), \
+                patch.object(render, "_can_copy_final_video", return_value=True), \
+                patch.object(render, "_run", side_effect=self._fake_ffmpeg(commands)), \
+                patch.object(render, "_validate_narration_master"), \
+                patch.object(render, "_validate_spotify_export",
+                             return_value=self.contract):
+            render.encode_final_export(self.video, self.root)
+
+        self.assertEqual(len(commands), 2)
+        final = commands[1]
+        self.assertEqual(final[final.index("-c:v") + 1], "copy")
+        self.assertNotIn("-vf", final)
+
+    def test_rejected_stream_copy_falls_back_to_full_normalization(self):
+        commands = []
+        with patch.object(render, "probe_video_duration_exact", return_value=10.0), \
+                patch.object(render, "_can_copy_final_video", return_value=True), \
+                patch.object(render, "_run", side_effect=self._fake_ffmpeg(commands)), \
+                patch.object(render, "_validate_narration_master"), \
+                patch.object(render, "_validate_spotify_export", side_effect=[
+                    RuntimeError("copy contract mismatch"), self.contract]):
+            render.encode_final_export(self.video, self.root)
+
+        self.assertEqual(len(commands), 3)
+        fallback = commands[2]
+        self.assertIn("-vf", fallback)
+        self.assertIn("fps=fps=30", fallback[fallback.index("-vf") + 1])
+        self.assertNotEqual(fallback[fallback.index("-c:v") + 1], "copy")
+
+
 class TransitionCacheTests(unittest.TestCase):
     def setUp(self):
         self.temporary = TemporaryDirectory()
@@ -376,6 +434,35 @@ class TransitionCacheTests(unittest.TestCase):
                      shutil.which("ffmpeg") and shutil.which("ffprobe"),
                      "opt-in local FFmpeg smoke test")
 class FFmpegSmokeTests(unittest.TestCase):
+    @staticmethod
+    def _video_hash(path):
+        result = subprocess.run([
+            "ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v",
+            "-c:v", "copy", "-f", "hash", "-hash", "sha256", "-",
+        ], capture_output=True, text=True, check=True, timeout=30)
+        return result.stdout.strip()
+
+    def test_compliant_balanced_export_preserves_video_bitstream(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "final.mp4"
+            render._run([
+                "ffmpeg", "-y", "-f", "lavfi", "-i",
+                "testsrc2=size=320x180:rate=30:duration=1",
+                "-f", "lavfi", "-i",
+                "sine=frequency=440:sample_rate=44100:duration=1",
+                "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+                "-profile:v", "high", "-pix_fmt", "yuv420p", "-bf", "0",
+                "-video_track_timescale", "15360", "-c:a", "aac", "-ac", "2",
+                str(out),
+            ])
+            before = self._video_hash(out)
+            messages = []
+            render.encode_final_export(out, root, log=messages.append)
+            self.assertEqual(self._video_hash(out), before)
+            self.assertTrue(any("fast final pass" in line for line in messages))
+            render._validate_spotify_export(out, 30)
+
     def test_single_clip_preserves_video_and_final_spotify_contract(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -390,14 +477,7 @@ class FFmpegSmokeTests(unittest.TestCase):
             render.crossfade_concat([clip], None, out, 0.5, ["fade"])
             self.assertAlmostEqual(render.probe_stream_duration(out, "video"), 1, places=2)
 
-            def video_hash(path):
-                result = subprocess.run([
-                    "ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v",
-                    "-c:v", "copy", "-f", "hash", "-hash", "sha256", "-",
-                ], capture_output=True, text=True, check=True, timeout=30)
-                return result.stdout.strip()
-
-            self.assertEqual(video_hash(clip), video_hash(out))
+            self.assertEqual(self._video_hash(clip), self._video_hash(out))
             render.encode_final_export(out, root, fps=30, quality="balanced", gpu=False)
             contract = render._validate_spotify_export(out, 30)
             self.assertEqual(contract["video"]["profile"], "High")

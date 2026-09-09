@@ -140,11 +140,14 @@ awake during multi-hour renders without forcing the display to stay on.
    (intro + split-screens inside `host_budget_seconds`), everything
    generates in parallel, and FFmpeg composites with burned subtitles and the
    music bed. The stitched file then goes through VidForge's complete final
-   export pass: one continuous PCM audio master, a fresh constant-frame-rate
-   H.264 High/yuv420p encode, AAC-LC stereo at 192 kbps, zero-based track
-   timestamps, duration matching, and MP4 `faststart`. The delivered file is
-   validated against that contract before it can be marked complete, which
-   keeps it compatible with Spotify for Creators. Repeated metadata checks
+   export pass: one continuous PCM audio master, constant-frame-rate H.264
+   High/yuv420p, AAC-LC stereo at 192 kbps, zero-based track timestamps,
+   duration matching, and MP4 `faststart`. Balanced exports preserve an
+   already-compliant picture stream and rebuild only the audio; branded,
+   incompatible, 720p, and high-quality outputs automatically use the full
+   normalization encode. The delivered file is validated against the same
+   contract before it can be marked complete, which keeps it compatible with
+   Spotify for Creators. Repeated metadata checks
    share a stat-invalidated FFprobe cache, and resumable transition groups are
    reused only when their exact input/settings manifest still matches.
 5. For thumbnail-enabled profiles, GPT-5.6 Terra proposes thumbnail words in
