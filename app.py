@@ -232,6 +232,8 @@ def _fleet_worker_rows() -> list[dict]:
                 "hardware": worker.get("hardware") if isinstance(worker.get("hardware"), dict) else {},
                 "metrics": worker.get("metrics") if isinstance(worker.get("metrics"), dict) else {},
                 "node": worker.get("node") if isinstance(worker.get("node"), dict) else {},
+                "capabilities": (worker.get("capabilities")
+                                 if isinstance(worker.get("capabilities"), dict) else {}),
                 "capacity": capacity,
                 "policy": policy,
                 "last_seen": worker.get("last_seen"),
@@ -900,6 +902,25 @@ def _wait_for_fleet_retry(job_id: str, reporter: fleet.FleetReporter) -> bool:
         time.sleep(min(0.5, remaining))
 
 
+def _profile_dispatch_requirements(profile_data: dict) -> dict:
+    if hyperframes.is_hyperframes_profile(profile_data):
+        return {"engine": "hyperframes", "engine_version": hyperframes.ENGINE_VERSION,
+                "cli_version": hyperframes.CLI_VERSION}
+    return {}
+
+
+def _worker_supports_profile(worker: dict, profile_data: dict) -> bool:
+    requirements = _profile_dispatch_requirements(profile_data)
+    if not requirements:
+        return True
+    capability = ((worker.get("capabilities") or {}).get("hyperframes") or {})
+    return (
+        capability.get("ready") is True
+        and capability.get("engine_version") == requirements["engine_version"]
+        and capability.get("cli_version") == requirements["cli_version"]
+    )
+
+
 def _fleet_dispatch_for(worker_id: str, free: int) -> list[dict]:
     """Claim eligible queued jobs up to this worker's available capacity."""
     if config.FLEET_ROLE != "main" or free <= 0 or UPDATE_LOCK_FILE.exists():
@@ -924,20 +945,25 @@ def _fleet_dispatch_for(worker_id: str, free: int) -> list[dict]:
                    if not JOBS[jid].get("local_only")]
         cached_jobs = set((worker or {}).get("cached_jobs") or [])
         job_ids.sort(key=lambda jid: jid not in cached_jobs)
-        job_ids = job_ids[:free]
         dispatch = []
         for job_id in job_ids:
+            if len(dispatch) >= free:
+                break
             job = JOBS[job_id]
             try:
                 profile_data = orchestrator.load_profile(job["profile"])
             except Exception as e:  # noqa: BLE001
                 job.update(status="error", step="error", error=f"fleet profile snapshot failed: {e}")
                 continue
+            if not _worker_supports_profile(worker or {}, profile_data):
+                continue
+            requirements = _profile_dispatch_requirements(profile_data)
             job.update(status="dispatched", step="fleet", dispatched_to=worker_id,
                        dispatched_at=datetime.now().isoformat(timespec="seconds"))
             job["attempt_id"] = secrets.token_hex(12) if int((worker or {}).get("protocol_version", 1)) >= 3 else None
             dispatch.append({"job_id": job_id, "inputs": job["inputs"],
                              "profile": job["profile"], "profile_data": profile_data,
+                             "requirements": requirements,
                              "attempt_id": job.get("attempt_id")})
     if dispatch:
         _persist_queue()
@@ -2250,6 +2276,8 @@ def fleet_heartbeat():
                        "capacity": capacity,
                        "metrics": data.get("metrics") if isinstance(data.get("metrics"), dict) else {},
                        "node": _safe_node_report(data.get("node")),
+                       "capabilities": (node_monitor.sanitize(data.get("capabilities"))
+                                        if isinstance(data.get("capabilities"), dict) else {}),
                        "cached_jobs": [str(jid) for jid in (data.get("cached_jobs") or [])
                                        if str(jid).isdigit()][:200],
                        "jobs": reported,
@@ -2447,7 +2475,8 @@ def dispatch_to_worker(job_id: str):
         except Exception as e:  # noqa: BLE001
             return jsonify({"error": f"profile snapshot failed: {e}"}), 500
         spec = {"job_id": job_id, "inputs": job["inputs"],
-                "profile": job["profile"], "profile_data": profile_data}
+                "profile": job["profile"], "profile_data": profile_data,
+                "requirements": _profile_dispatch_requirements(profile_data)}
         # Choose and reserve while holding the fleet lock, so two simultaneous
         # manual sends cannot both consume the same last free slot.
         with _FLEET_LOCK:
@@ -2460,7 +2489,8 @@ def dispatch_to_worker(job_id: str):
                     continue
                 capacity = _fleet_capacity(worker, _fleet_policy(wid, settings))
                 if (age <= config.FLEET_STALE_SECONDS and capacity["effective_free"] > 0
-                        and (not requested or requested == wid)):
+                        and (not requested or requested == wid)
+                        and _worker_supports_profile(worker, profile_data)):
                     hardware = worker.get("hardware") or {}
                     render_metrics = (worker.get("metrics") or {}).get("render") or {}
                     score = (capacity["effective_free"] * 10 +
@@ -2469,7 +2499,11 @@ def dispatch_to_worker(job_id: str):
                              int(render_metrics.get("waiting_encoders") or 0) * 5)
                     choices.append((score, wid, worker))
             if not choices:
-                return jsonify({"error": "selected worker is unavailable, paused, or full"}), 409
+                detail = (" or lacks the required HyperFrames runtime"
+                          if hyperframes.is_hyperframes_profile(profile_data) else "")
+                return jsonify({
+                    "error": f"selected worker is unavailable, paused, full{detail}"
+                }), 409
             choices.sort(key=lambda item: (-item[0], item[1]))
             _, worker_id, worker = choices[0]
             job.update(status="dispatched", step="fleet", dispatched_to=worker_id,

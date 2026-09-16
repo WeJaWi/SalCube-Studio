@@ -1,0 +1,9 @@
+GSAP 3.14.2 license notice
+
+Copyright (c) 2008-2025, GreenSock. All rights reserved.
+Subject to the GreenSock standard "no charge" license:
+https://gsap.com/standard-license
+
+The vendored distribution retains its original license header. The package
+metadata identifies this license as:
+"Standard 'no charge' license: https://gsap.com/standard-license."

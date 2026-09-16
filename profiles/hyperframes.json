@@ -52,6 +52,9 @@
     "persona": "A precise, engaging narrator who turns difficult ideas into a clear visual journey.",
     "register": "Confident, concrete, warm, and economical. Never refer to production mechanics."
   },
+  "thumbnail": {
+    "enabled": false
+  },
   "music": {
     "enabled": false
   },

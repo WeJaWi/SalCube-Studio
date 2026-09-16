@@ -3,3 +3,4 @@
 *.jpg binary
 *.mp4 binary
 *.ttf binary
+pipeline/assets/*.min.js binary

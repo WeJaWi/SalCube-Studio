@@ -16,6 +16,8 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -25,7 +27,14 @@ from . import artifacts, cancel, captions, config, llm, render, telemetry, voice
 
 ENGINE_VERSION = 1
 CLI_VERSION = "0.8.41"
+GSAP_VERSION = "3.14.2"
+GSAP_SHA256 = "c174bfce53a729418d57a8ad8625e7247c793a22fef8e2851e3cfa3de9cd8280"
+GSAP_VENDOR = config.ROOT / "pipeline" / "assets" / f"gsap-{GSAP_VERSION}.min.js"
 SCHEMA_VERSION = 1
+REQUIRED_DOCTOR_CHECKS = ("Version", "Node.js", "FFmpeg", "FFprobe", "Chrome")
+_DOCTOR_CACHE_SECONDS = 300.0
+_DOCTOR_LOCK = threading.Lock()
+_DOCTOR_CACHE: Tuple[float, Dict[str, Any]] = (0.0, {})
 ALLOWED_LAYOUTS = ("editorial", "split", "statement", "diagram", "steps", "quote")
 ALLOWED_TRANSITIONS = ("crossfade", "push-left", "push-up", "iris")
 ALLOWED_DIRECTIONS = ("left", "right", "up", "down", "scale", "fade")
@@ -44,6 +53,7 @@ FORBIDDEN_SOURCE = (
     "<object", "<embed", "javascript:", "Date.now", "Math.random",
     "repeat: -1", "repeat:-1", "document.cookie", "localStorage",
     "sessionStorage", "window.location", "eval(", "new Function",
+    "http://", "https://", "//cdn", "@import", "url(http",
 )
 
 
@@ -64,6 +74,8 @@ def validate_profile(profile: Dict[str, Any]) -> None:
         raise ValueError("HyperFrames profile cannot enable external visual sources")
     if (profile.get("host") or {}).get("enabled"):
         raise ValueError("HyperFrames profile cannot enable an avatar host")
+    if (profile.get("thumbnail") or {}).get("enabled") is not False:
+        raise ValueError("HyperFrames profile must set thumbnail.enabled=false")
 
 
 def _atomic_text(path: Path, value: str) -> None:
@@ -71,6 +83,27 @@ def _atomic_text(path: Path, value: str) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(value, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _install_vendored_gsap(project: Path) -> Path:
+    """Copy the reviewed GSAP build into a job without any network dependency."""
+    try:
+        digest = hashlib.sha256(GSAP_VENDOR.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RuntimeError(f"vendored GSAP {GSAP_VERSION} is unavailable: {exc}") from exc
+    if digest != GSAP_SHA256:
+        raise RuntimeError("vendored GSAP failed its integrity check")
+    destination = project / "vendor" / "gsap.min.js"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".gsap-", dir=destination.parent)
+    os.close(fd)
+    temporary = Path(name)
+    try:
+        shutil.copyfile(GSAP_VENDOR, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
 
 
 def _stable_seed(*values: Any) -> int:
@@ -620,6 +653,7 @@ def compile_project(project: Path, blueprint: Dict[str, Any],
                     narration: Path, cues: Sequence[captions.Segment]) -> Path:
     validate_blueprint(blueprint)
     project.mkdir(parents=True, exist_ok=True)
+    _install_vendored_gsap(project)
     design = blueprint["design"]
     width, height = int(blueprint["width"]), int(blueprint["height"])
     duration = float(blueprint["duration"])
@@ -631,7 +665,8 @@ def compile_project(project: Path, blueprint: Dict[str, Any],
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width={width}, height={height}" />
-  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <meta name="hf-content-security-policy" content="pending" />
+  <script src="vendor/gsap.min.js"></script>
   <style>
     @font-face {{ font-family:"{html.escape(design['display_font'])}"; src:local("{html.escape(design['display_font'])}"); font-style:normal; }}
     @font-face {{ font-family:"{html.escape(design['body_font'])}"; src:local("{html.escape(design['body_font'])}"); font-style:normal; }}
@@ -675,6 +710,26 @@ def compile_project(project: Path, blueprint: Dict[str, Any],
 </body>
 </html>
 '''
+    style_match = re.search(r"<style>(.*?)</style>", source, flags=re.DOTALL)
+    script_matches = re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", source,
+                                flags=re.DOTALL)
+    if style_match is None or not script_matches:
+        raise RuntimeError("compiled HyperFrames source is missing executable blocks")
+    policy = (
+        "default-src 'none'; "
+        # HyperFrames injects its seek/inspection adapters as inline scripts
+        # during check and render. Executable source remains compiler-owned,
+        # while this policy still blocks every remote script and connection.
+        "script-src 'self' 'unsafe-inline'; "
+        # The checker also injects an inline measurement stylesheet.
+        "style-src 'unsafe-inline'; "
+        "font-src 'self'; media-src 'self'; img-src 'self' data:; "
+        "connect-src 'none'; object-src 'none'; frame-src 'none'; "
+        "base-uri 'none'; form-action 'none'"
+    )
+    source = source.replace(
+        '<meta name="hf-content-security-policy" content="pending" />',
+        f'<meta http-equiv="Content-Security-Policy" content="{policy}" />', 1)
     for forbidden in FORBIDDEN_SOURCE:
         if forbidden.casefold() in source.casefold():
             raise ValueError(f"compiled HyperFrames source contains forbidden token: {forbidden}")
@@ -698,41 +753,111 @@ def compile_project(project: Path, blueprint: Dict[str, Any],
     return index
 
 
+class HyperFramesCommandError(RuntimeError):
+    def __init__(self, message: str, *, returncode: int, stdout: str, stderr: str):
+        super().__init__(message)
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _read_spooled_log(handle, limit: int = 16 * 1024 * 1024) -> str:
+    handle.flush()
+    size = handle.seek(0, os.SEEK_END)
+    if size > limit:
+        handle.seek(-limit, os.SEEK_END)
+        prefix = f"[output truncated; retained last {limit} bytes]\n"
+    else:
+        handle.seek(0)
+        prefix = ""
+    return prefix + handle.read().decode("utf-8", errors="replace")
+
+
 def _run_process(command: Sequence[str], cwd: Path, timeout: float) -> Tuple[str, str]:
+    """Run chatty CLI commands without filling OS pipe buffers."""
     cancel.check()
-    proc = subprocess.Popen(list(command), cwd=str(cwd), text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    token = cancel.current()
-    if token:
-        token.register(proc)
-    started = time.monotonic()
-    try:
-        while proc.poll() is None:
-            cancel.check()
-            if time.monotonic() - started > timeout:
-                proc.kill()
-                raise RuntimeError(f"command timed out after {timeout:.0f}s: {' '.join(command[:4])}")
-            time.sleep(0.2)
-        stdout, stderr = proc.communicate()
-    finally:
+    with tempfile.TemporaryFile(mode="w+b") as out, \
+            tempfile.TemporaryFile(mode="w+b") as err:
+        proc = subprocess.Popen(list(command), cwd=str(cwd), stdout=out, stderr=err)
+        token = cancel.current()
         if token:
-            token.unregister(proc)
-        if proc.poll() is None:
-            proc.kill()
+            token.register(proc)
+        started = time.monotonic()
+        try:
+            while proc.poll() is None:
+                cancel.check()
+                if time.monotonic() - started > timeout:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    raise RuntimeError(
+                        f"command timed out after {timeout:.0f}s: {' '.join(command[:4])}")
+                time.sleep(0.2)
+            stdout, stderr = _read_spooled_log(out), _read_spooled_log(err)
+        finally:
+            if token:
+                token.unregister(proc)
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
     if proc.returncode != 0:
         stdout_tail = "\n".join(stdout.splitlines()[-30:])
         stderr_tail = "\n".join(stderr.splitlines()[-30:])
         tail = "\n".join(part for part in (stdout_tail, stderr_tail) if part)
-        raise RuntimeError(f"HyperFrames command failed ({proc.returncode}): {tail}")
+        raise HyperFramesCommandError(
+            f"HyperFrames command failed ({proc.returncode}): {tail}",
+            returncode=int(proc.returncode), stdout=stdout, stderr=stderr)
     return stdout or "", stderr or ""
 
 
-def doctor() -> Dict[str, Any]:
-    return {
+def _json_object(raw: str, label: str) -> Dict[str, Any]:
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end < start:
+        raise RuntimeError(f"{label} did not return a JSON object")
+    try:
+        value = json.loads(raw[start:end + 1])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{label} returned malformed JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} did not return a JSON object")
+    return value
+
+
+def doctor(*, force: bool = False) -> Dict[str, Any]:
+    """Return a cached, fail-closed readiness result for local rendering."""
+    global _DOCTOR_CACHE
+    with _DOCTOR_LOCK:
+        checked_at, cached = _DOCTOR_CACHE
+        if not force and cached and time.monotonic() - checked_at < _DOCTOR_CACHE_SECONDS:
+            return dict(cached)
+    health: Dict[str, Any] = {
         "node": shutil.which("node"), "npx": shutil.which("npx"),
         "ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe"),
         "node_major": _node_major(), "cli_version": CLI_VERSION,
+        "engine_version": ENGINE_VERSION, "required_checks": {}, "ready": False,
     }
+    missing = [name for name in ("node", "npx", "ffmpeg", "ffprobe")
+               if not health[name]]
+    if not missing and health["node_major"] >= 22:
+        try:
+            stdout, _stderr = _run_process([
+                "npx", "--yes", f"hyperframes@{CLI_VERSION}", "doctor", "--json",
+            ], config.ROOT, timeout=180)
+            report = _json_object(stdout, "HyperFrames doctor")
+            checks = {str(row.get("name")): bool(row.get("ok"))
+                      for row in report.get("checks") or [] if isinstance(row, dict)}
+            health["required_checks"] = {
+                name: checks.get(name, False) for name in REQUIRED_DOCTOR_CHECKS}
+            health["ready"] = all(health["required_checks"].values())
+            health["doctor"] = report
+        except Exception as exc:  # noqa: BLE001
+            health["error"] = str(exc)[-2000:]
+    else:
+        health["missing"] = missing
+        health["error"] = (f"missing {', '.join(missing)}" if missing else
+                           f"Node 22+ required (found {health['node_major'] or 'unknown'})")
+    with _DOCTOR_LOCK:
+        _DOCTOR_CACHE = (time.monotonic(), dict(health))
+    return health
 
 
 def ensure_runtime() -> Dict[str, Any]:
@@ -740,12 +865,30 @@ def ensure_runtime() -> Dict[str, Any]:
     health = doctor()
     missing = [name for name in ("node", "npx", "ffmpeg", "ffprobe")
                if not health[name]]
-    if missing or health["node_major"] < 22:
+    if missing or health["node_major"] < 22 or health.get("ready") is not True:
+        failed = [name for name, ok in (health.get("required_checks") or {}).items()
+                  if not ok]
         raise RuntimeError(
             "HyperFrames runtime unavailable: "
             + (f"missing {', '.join(missing)}; " if missing else "")
-            + f"Node 22+ required (found {health['node_major'] or 'unknown'})")
+            + (f"Node 22+ required (found {health['node_major'] or 'unknown'}); "
+               if health["node_major"] < 22 else "")
+            + (f"failed checks: {', '.join(failed)}" if failed else
+               str(health.get("error") or "doctor did not confirm readiness")))
     return health
+
+
+def runtime_capability() -> Dict[str, Any]:
+    """Small, path-free capability record suitable for fleet heartbeats."""
+    health = doctor()
+    return {
+        "ready": health.get("ready") is True,
+        "engine_version": ENGINE_VERSION,
+        "cli_version": CLI_VERSION,
+        "node_major": int(health.get("node_major") or 0),
+        "required_checks": dict(health.get("required_checks") or {}),
+        "error": str(health.get("error") or "")[-500:],
+    }
 
 
 def _node_major() -> int:
@@ -760,18 +903,27 @@ def _node_major() -> int:
 @telemetry.timed("hyperframes_check")
 def check_project(project: Path, samples: int = 15) -> Dict[str, Any]:
     ensure_runtime()
-    stdout, stderr = _run_process([
-        "npx", "--yes", f"hyperframes@{CLI_VERSION}", "check", ".", "--json",
-        "--samples", str(max(5, samples)), "--at-transitions", "--snapshots",
-        "--caption-zone", "x0=0;y0=.80;x1=1;y1=1;severity=warning;seek=.5,1",
-    ], project, timeout=900)
-    raw = stdout.strip()
+    command_error: Optional[HyperFramesCommandError] = None
     try:
-        result = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
-    except Exception:  # noqa: BLE001
-        result = {"ok": True, "stdout": raw[-8000:], "stderr": stderr[-4000:]}
+        stdout, stderr = _run_process([
+            "npx", "--yes", f"hyperframes@{CLI_VERSION}", "check", ".", "--json",
+            "--samples", str(max(5, samples)), "--at-transitions", "--snapshots",
+            "--frame-check",
+            "--caption-zone", "x0=0;y0=.80;x1=1;y1=1;severity=warning;seek=.5,1",
+        ], project, timeout=900)
+    except HyperFramesCommandError as exc:
+        command_error = exc
+        stdout, stderr = exc.stdout, exc.stderr
+        try:
+            result = _json_object(stdout, "HyperFrames check")
+        except RuntimeError:
+            raise RuntimeError(f"HyperFrames validation command failed: {exc}") from exc
+    else:
+        result = _json_object(stdout, "HyperFrames check")
+    if not isinstance(result.get("ok"), bool):
+        raise RuntimeError("HyperFrames validation report is missing boolean ok")
     artifacts.write(project / "validation-report.json", result)
-    if result.get("ok") is False:
+    if command_error is not None or result["ok"] is not True:
         raise RuntimeError(
             "HyperFrames validation failed: "
             + json.dumps(result, ensure_ascii=False)[-4000:])
@@ -797,6 +949,36 @@ def render_project(project: Path, output: Path, fps: int, quality: str = "delive
         output.unlink()
     shutil.move(str(draft), str(output))
     return output
+
+
+def publish_delivery_receipts(job_dir: Path, project: Path, blueprint_path: Path,
+                              output: Path, fps: int,
+                              source_signature: Optional[list] = None,
+                              *, gpu: bool = False) -> None:
+    """Publish the same verified delivery contract as the legacy renderer."""
+    export_contract = {
+        "version": 2,
+        "source": source_signature,
+        "fps": int(fps),
+        "quality": "balanced",
+        "gpu": bool(gpu),
+        "engine": "hyperframes",
+        "engine_version": ENGINE_VERSION,
+    }
+    artifacts.publish(output.with_suffix(".export.json"), export_contract,
+                      [output], hash_outputs=True)
+    render_contract = {
+        "version": 1,
+        "engine": "hyperframes",
+        "engine_version": ENGINE_VERSION,
+        "runtime": CLI_VERSION,
+        "blueprint": artifacts.file_digest(blueprint_path),
+        "fps": int(fps),
+    }
+    artifacts.publish(job_dir / "render.manifest.json", render_contract,
+                      [output], hash_outputs=True)
+    artifacts.publish(project / "final.manifest.json", render_contract,
+                      [output], hash_outputs=True)
 
 
 def run(narration: str, inputs: Dict[str, Any], profile: Dict[str, Any],
@@ -839,12 +1021,12 @@ def run(narration: str, inputs: Dict[str, Any], profile: Dict[str, Any],
     render_project(project, output, int(blueprint["fps"]),
                    quality=str(((profile.get("video") or {}).get("hyperframes") or {}).get("quality") or "delivery"),
                    gpu=gpu_encode, workers=workers)
+    source_signature = artifacts.signature(output)
     render.encode_final_export(
         output, job_dir, fps=int(blueprint["fps"]), quality="balanced",
         gpu=gpu_encode, log=lambda message: emit("render", message.strip()))
-    artifacts.publish(project / "final.manifest.json", {
-        "engine": ENGINE_VERSION, "blueprint": artifacts.file_digest(blueprint_path),
-        "runtime": CLI_VERSION, "fps": blueprint["fps"],
-    }, [output], hash_outputs=True)
+    publish_delivery_receipts(job_dir, project, blueprint_path, output,
+                              int(blueprint["fps"]), source_signature,
+                              gpu=gpu_encode)
     emit("done", f"HyperFrames video rendered — {duration / 60:.1f} minutes")
     return output

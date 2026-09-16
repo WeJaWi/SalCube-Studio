@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,11 +25,16 @@ class HyperFramesProfileTests(unittest.TestCase):
             video["broll_mix"][key] == 0
             for key in ("stock", "stock_image", "ai_video", "ai_image", "host")))
         self.assertFalse(self.profile["host"]["enabled"])
+        self.assertFalse(self.profile["thumbnail"]["enabled"])
 
     def test_profile_validation_fails_closed(self):
         unsafe = json.loads(json.dumps(self.profile))
         unsafe["video"]["broll_mix"]["stock"] = 0.1
         with self.assertRaisesRegex(ValueError, "external visual"):
+            hyperframes.validate_profile(unsafe)
+        unsafe = json.loads(json.dumps(self.profile))
+        unsafe["thumbnail"]["enabled"] = True
+        with self.assertRaisesRegex(ValueError, "thumbnail"):
             hyperframes.validate_profile(unsafe)
 
     def test_runtime_preflight_rejects_old_node_before_paid_work(self):
@@ -119,15 +125,65 @@ class HyperFramesProfileTests(unittest.TestCase):
             cues = []
             index = hyperframes.compile_project(root, blueprint, narration, cues)
             source = index.read_text()
+            local_gsap_exists = (root / "vendor" / "gsap.min.js").exists()
         self.assertIn('data-composition-id="main"', source)
         self.assertIn("gsap.timeline({paused:true})", source)
         self.assertIn('window.__timelines["main"] = tl', source)
         self.assertIn("tl.from", source)
         self.assertIn("data-track-index=\"20\"", source)
+        self.assertIn('http-equiv="Content-Security-Policy"', source)
+        self.assertIn('src="vendor/gsap.min.js"', source)
+        self.assertTrue(local_gsap_exists)
+        self.assertNotIn("https://", source)
         self.assertNotIn("Math.random", source)
         self.assertNotIn("Date.now", source)
         self.assertNotIn("repeat:-1", source)
         self.assertNotIn("<iframe", source)
+
+    def test_chatty_command_cannot_deadlock_on_pipe_capacity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout, stderr = hyperframes._run_process([
+                sys.executable, "-c",
+                "import sys; sys.stdout.write('x'*2000000); sys.stderr.write('y'*2000000)",
+            ], Path(tmp), timeout=15)
+        self.assertEqual(len(stdout), 2_000_000)
+        self.assertEqual(len(stderr), 2_000_000)
+
+    def test_validation_fails_closed_on_malformed_cli_output(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(hyperframes, "ensure_runtime"), \
+                patch.object(hyperframes, "_run_process", return_value=("not json", "")):
+            with self.assertRaisesRegex(RuntimeError, "JSON object"):
+                hyperframes.check_project(Path(tmp))
+
+    def test_delivery_receipts_satisfy_uploader_contract(self):
+        import app as studio_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp)
+            project = job / "hyperframes"
+            project.mkdir()
+            blueprint = project / "video-blueprint.json"
+            blueprint.write_text('{"schema_version":1}')
+            output = job / "final.mp4"
+            output.write_bytes(b"deterministic fixture")
+            hyperframes.publish_delivery_receipts(
+                job, project, blueprint, output, 30,
+                hyperframes.artifacts.signature(output))
+            with patch.object(studio_app.video_render, "is_valid_video", return_value=True):
+                roles = studio_app._verified_delivery_roles(job, {})
+        self.assertEqual([role for role, _path in roles], ["final"])
+
+    def test_worker_capability_gate_is_fail_closed(self):
+        import app as studio_app
+
+        self.assertFalse(studio_app._worker_supports_profile({}, self.profile))
+        worker = {"capabilities": {"hyperframes": {
+            "ready": True,
+            "engine_version": hyperframes.ENGINE_VERSION,
+            "cli_version": hyperframes.CLI_VERSION,
+        }}}
+        self.assertTrue(studio_app._worker_supports_profile(worker, self.profile))
 
     def test_orchestrator_bypasses_every_legacy_visual_planner(self):
         with tempfile.TemporaryDirectory() as tmp:

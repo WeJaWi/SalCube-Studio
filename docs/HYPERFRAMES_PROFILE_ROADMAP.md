@@ -22,6 +22,17 @@ items remain the follow-on roadmap rather than claims of completed work.
 - [x] UI profile controls for visual identity and motion pacing.
 - [x] Unit and integration coverage proving legacy visual providers are bypassed.
 
+## Production hardening shipped
+
+- [x] Publish root render and per-export receipts accepted by verified Drive delivery.
+- [x] Disable thumbnail generation and fail profile validation if it is re-enabled.
+- [x] Vendor and integrity-check GSAP so composition rendering has no CDN dependency.
+- [x] Apply a restrictive CSP that blocks remote connections, frames, objects, and forms.
+- [x] Spool bounded CLI output to disk so verbose checks and renders cannot deadlock.
+- [x] Fail validation closed on malformed JSON, missing `ok`, or non-zero CLI exits.
+- [x] Run the pinned CLI doctor and require Node, FFmpeg, FFprobe, and Chrome checks.
+- [x] Advertise HyperFrames readiness in worker heartbeats and reject incompatible dispatches.
+
 ## Product objective
 
 Add a new SalCube Studio profile that produces complete videos with original
