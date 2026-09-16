@@ -59,7 +59,14 @@ class HyperFramesProfileTests(unittest.TestCase):
                     [{"text": "A budgeted scene.", "duration": 4.0}],
                     design, self.profile, "gpt-5.6-luna", root,
                     lambda *_: None)
+            budget = json.loads((root / "authoring-budget.json").read_text())
         call.assert_called_once()
+        self.assertEqual(budget["version"], 2)
+        self.assertEqual(budget["json_attempts"], 2)
+        self.assertEqual(budget["requests"][0]["api_output_token_cap"], 10000)
+        expected = ((budget["requests"][0]["input_token_cap"] * 500
+                     + 10000 * 2000) * 2 / 1_000_000)
+        self.assertAlmostEqual(budget["reserved_kie_credits"], expected, places=3)
 
     def test_authoring_ceiling_fails_before_provider_submission(self):
         profile = json.loads(json.dumps(self.profile))
@@ -83,6 +90,55 @@ class HyperFramesProfileTests(unittest.TestCase):
                                               chars_per_second=12)
         self.assertGreaterEqual(len(parts), 2)
         self.assertEqual(" ".join(" ".join(parts).split()), " ".join(source.split()))
+
+    def test_scene_capacity_fails_before_voice_generation(self):
+        profile = json.loads(json.dumps(self.profile))
+        profile["video"]["hyperframes"]["authoring"]["scenes_per_call"] = 4
+        profile["video"]["hyperframes"]["authoring"]["max_calls"] = 1
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(hyperframes, "segment_narration",
+                             return_value=[f"scene {i}" for i in range(5)]), \
+                patch.object(hyperframes.voiceover, "generate_voiceover_grouped") as tts:
+            with self.assertRaisesRegex(RuntimeError, "before starting paid voice"):
+                hyperframes.prepare_narration(
+                    "too long", profile, "English", Path(tmp) / "hyperframes",
+                    lambda *_: None)
+        tts.assert_not_called()
+
+    def test_short_authoring_chunk_cannot_shift_later_scenes(self):
+        profile = json.loads(json.dumps(self.profile))
+        profile["video"]["hyperframes"]["authoring"]["scenes_per_call"] = 4
+        beats = [{"text": f"Narration {i}.", "duration": 4.0}
+                 for i in range(1, 9)]
+        responses = [
+            {"scenes": [{"scene": 1, "title": "Authored 1"},
+                        {"scene": 3, "title": "Authored 3"}]},
+            {"scenes": [{"scene": i, "title": f"Authored {i}"}
+                        for i in range(5, 9)]},
+        ]
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(hyperframes.llm, "chat_json", side_effect=responses):
+            blueprint = hyperframes.build_blueprint(
+                beats, hyperframes._design(profile, {}), profile,
+                "gpt-5.6-luna", Path(tmp), lambda *_: None)
+        self.assertEqual(blueprint["scenes"][0]["title"], "Authored 1")
+        self.assertNotEqual(blueprint["scenes"][1]["title"], "Authored 3")
+        self.assertEqual(blueprint["scenes"][2]["title"], "Authored 3")
+        self.assertEqual(blueprint["scenes"][4]["title"], "Authored 5")
+
+    def test_blueprint_cache_contract_includes_render_and_runtime_inputs(self):
+        beats = [{"text": "One.", "duration": 4.0}]
+        design = hyperframes._design(self.profile, {})
+        first = hyperframes._blueprint_contract(
+            "One.", beats, design, self.profile, "gpt-5.6-luna")
+        changed = json.loads(json.dumps(self.profile))
+        changed["video"]["width"] = 1280
+        second = hyperframes._blueprint_contract(
+            "One.", beats, design, changed, "gpt-5.6-luna")
+        self.assertNotEqual(hyperframes.artifacts.digest(first),
+                            hyperframes.artifacts.digest(second))
+        self.assertEqual(first["compiler_version"], hyperframes.COMPILER_VERSION)
+        self.assertEqual(first["runtime_version"], hyperframes.CLI_VERSION)
 
     def _blueprint(self, root: Path):
         profile = json.loads(json.dumps(self.profile))
@@ -126,14 +182,23 @@ class HyperFramesProfileTests(unittest.TestCase):
             index = hyperframes.compile_project(root, blueprint, narration, cues)
             source = index.read_text()
             local_gsap_exists = (root / "vendor" / "gsap.min.js").exists()
+            motion = json.loads((root / "index.motion.json").read_text())
         self.assertIn('data-composition-id="main"', source)
         self.assertIn("gsap.timeline({paused:true})", source)
         self.assertIn('window.__timelines["main"] = tl', source)
-        self.assertIn("tl.from", source)
+        self.assertIn("tl.set", source)
+        self.assertIn("tl.to", source)
+        self.assertIn("tl.fromTo", source)
+        self.assertNotIn("tl.from(", source)
         self.assertIn("data-track-index=\"20\"", source)
         self.assertIn('http-equiv="Content-Security-Policy"', source)
         self.assertIn('src="vendor/gsap.min.js"', source)
         self.assertTrue(local_gsap_exists)
+        self.assertEqual(motion["duration"], blueprint["duration"])
+        self.assertTrue(any(a["kind"] == "appearsBy"
+                            for a in motion["assertions"]))
+        self.assertTrue(any(a["kind"] == "keepsMoving"
+                            for a in motion["assertions"]))
         self.assertNotIn("https://", source)
         self.assertNotIn("Math.random", source)
         self.assertNotIn("Date.now", source)
@@ -155,6 +220,34 @@ class HyperFramesProfileTests(unittest.TestCase):
                 patch.object(hyperframes, "_run_process", return_value=("not json", "")):
             with self.assertRaisesRegex(RuntimeError, "JSON object"):
                 hyperframes.check_project(Path(tmp))
+
+    def test_validation_report_is_resumable(self):
+        report = {"ok": True, "motion": {"enabled": True}}
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / "index.motion.json").write_text('{}')
+            with patch.object(hyperframes, "ensure_runtime"), \
+                    patch.object(hyperframes, "_run_process",
+                                 return_value=(json.dumps(report), "")) as command:
+                first = hyperframes.check_project(project)
+                second = hyperframes.check_project(project)
+        self.assertEqual(first, second)
+        command.assert_called_once()
+
+    def test_render_master_is_resumable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+
+            def fake_render(_project, output, *_args, **_kwargs):
+                output.write_bytes(b"video")
+                return output
+
+            with patch.object(hyperframes, "render_project", side_effect=fake_render) as command, \
+                    patch.object(hyperframes.render, "is_valid_video", return_value=True):
+                first = hyperframes.ensure_render_master(project, 30)
+                second = hyperframes.ensure_render_master(project, 30)
+        self.assertEqual(first, second)
+        command.assert_called_once()
 
     def test_delivery_receipts_satisfy_uploader_contract(self):
         import app as studio_app

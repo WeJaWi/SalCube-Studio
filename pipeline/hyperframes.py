@@ -25,7 +25,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 from . import artifacts, cancel, captions, config, llm, render, telemetry, voiceover
 
 
-ENGINE_VERSION = 1
+ENGINE_VERSION = 2
+COMPILER_VERSION = 2
 CLI_VERSION = "0.8.41"
 GSAP_VERSION = "3.14.2"
 GSAP_SHA256 = "c174bfce53a729418d57a8ad8625e7247c793a22fef8e2851e3cfa3de9cd8280"
@@ -80,6 +81,11 @@ def validate_profile(profile: Dict[str, Any]) -> None:
 
 def _atomic_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.read_text(encoding="utf-8") == value:
+            return
+    except OSError:
+        pass
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(value, encoding="utf-8")
     os.replace(tmp, path)
@@ -95,6 +101,11 @@ def _install_vendored_gsap(project: Path) -> Path:
         raise RuntimeError("vendored GSAP failed its integrity check")
     destination = project / "vendor" / "gsap.min.js"
     destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if hashlib.sha256(destination.read_bytes()).hexdigest() == GSAP_SHA256:
+            return destination
+    except OSError:
+        pass
     fd, name = tempfile.mkstemp(prefix=".gsap-", dir=destination.parent)
     os.close(fd)
     temporary = Path(name)
@@ -148,6 +159,31 @@ def segment_narration(text: str, target_seconds: float = 12.0,
     if current:
         output.append(current)
     return output or [text.strip()]
+
+
+def authoring_limits(profile: Dict[str, Any]) -> Dict[str, int]:
+    """Return the bounded scene capacity used by authoring and preflight."""
+    hf = (profile.get("video") or {}).get("hyperframes") or {}
+    authoring = hf.get("authoring") or {}
+    return {
+        "scenes_per_call": max(4, min(20, int(authoring.get("scenes_per_call") or 12))),
+        "max_calls": max(1, int(authoring.get("max_calls") or 8)),
+    }
+
+
+def validate_authoring_capacity(spans: Sequence[str], profile: Dict[str, Any]) -> None:
+    """Reject an unauthorable narration before the first TTS request."""
+    hf = (profile.get("video") or {}).get("hyperframes") or {}
+    if not bool((hf.get("authoring") or {}).get("enabled", True)):
+        return
+    limits = authoring_limits(profile)
+    capacity = limits["scenes_per_call"] * limits["max_calls"]
+    if len(spans) > capacity:
+        raise RuntimeError(
+            "HyperFrames narration needs "
+            f"{len(spans)} scenes, above the configured authoring capacity of "
+            f"{capacity}. Shorten the script or increase authoring.max_calls "
+            "before starting paid voice generation.")
 
 
 def _voice_id(profile: Dict[str, Any], language: str) -> Optional[str]:
@@ -210,6 +246,7 @@ def prepare_narration(narration: str, profile: Dict[str, Any], language: str,
     """Generate narration first so every later visual time is exact."""
     cfg = (profile.get("video") or {}).get("hyperframes") or {}
     spans = segment_narration(narration, float(cfg.get("target_scene_seconds") or 12))
+    validate_authoring_capacity(spans, profile)
     beats: List[Dict[str, Any]] = [{"text": text, "type": "hyperframes"} for text in spans]
     assets_dir = project.parent / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -322,7 +359,7 @@ def _fallback_scene(text: str, index: int, duration: float, seed: int) -> Dict[s
         "body": body,
         "layout": layouts[(local // 7) % len(layouts)],
         "transition": transitions[(local // 11) % len(transitions)],
-        "ambient": ("drift", "breathe", "rotate", "still")[(local // 13) % 4],
+        "ambient": ("drift", "breathe", "rotate")[(local // 13) % 3],
         "entrances": entrance,
         "narration": text,
         "duration": round(duration, 6),
@@ -349,7 +386,7 @@ def _coerce_scene(raw: Any, fallback: Dict[str, Any], index: int) -> Dict[str, A
         scene["layout"] = raw["layout"]
     if raw.get("transition") in ALLOWED_TRANSITIONS:
         scene["transition"] = raw["transition"]
-    if raw.get("ambient") in ("drift", "breathe", "rotate", "still"):
+    if raw.get("ambient") in ("drift", "breathe", "rotate"):
         scene["ambient"] = raw["ambient"]
     proposed = raw.get("entrances") if isinstance(raw.get("entrances"), dict) else {}
     for role, base in scene["entrances"].items():
@@ -383,10 +420,11 @@ Visual identity: {json.dumps(design, ensure_ascii=False)}
 
 Return ONLY this JSON shape:
 {{"scenes":[{{
+  "scene":integer,
   "kicker":"max 5 words", "title":"max 12 words", "body":"max 28 words",
   "layout":"editorial|split|statement|diagram|steps|quote",
   "transition":"crossfade|push-left|push-up|iris",
-  "ambient":"drift|breathe|rotate|still",
+  "ambient":"drift|breathe|rotate",
   "entrances":{{
     "kicker":{{"direction":"left|right|up|fade","distance":number,"duration":number,"ease":"power1.out|power2.out|power3.out|power4.out|expo.out|circ.out|sine.out|back.out(1.4)","at":number}},
     "title":{{same fields; direction left|right|scale|fade}},
@@ -421,18 +459,22 @@ def build_blueprint(beats: Sequence[Dict[str, Any]], design: Dict[str, Any],
     fallbacks = [_fallback_scene(row["text"], i, row["duration"], seed)
                  for i, row in enumerate(rows)]
     hf = (profile.get("video") or {}).get("hyperframes") or {}
-    authored: List[Any] = []
+    authored: Dict[int, Any] = {}
     if bool((hf.get("authoring") or {}).get("enabled", True)):
         authoring_cfg = hf.get("authoring") or {}
-        chunk_size = max(4, min(20, int((hf.get("authoring") or {}).get("scenes_per_call") or 12)))
-        max_calls = max(1, int((hf.get("authoring") or {}).get("max_calls") or 8))
+        limits = authoring_limits(profile)
+        chunk_size = limits["scenes_per_call"]
+        max_calls = limits["max_calls"]
         max_tokens = max(1000, min(12000, int((hf.get("authoring") or {}).get("max_tokens_per_call") or 6000)))
+        json_attempts = max(1, min(3, int(authoring_cfg.get("json_attempts") or 2)))
         max_credits = max(1, int(authoring_cfg.get("max_kie_credits") or 1000))
         # Conservative reservation rates in Kie credits per million tokens.
         # The profile may update these with a versioned pricing snapshot.
         in_rate = float(authoring_cfg.get("input_credits_per_million") or 500)
         out_rate = float(authoring_cfg.get("output_credits_per_million") or 2000)
-        uses_kie = (config.SCRIPT_MODELS.get(model) or {}).get("format") != "cli"
+        model_format = (config.SCRIPT_MODELS.get(model) or {}).get("format")
+        uses_kie = model_format != "cli"
+        api_output_cap = max_tokens + 4000 if model_format == "responses" else max_tokens
         reserved_credits = 0.0
         budget_rows: List[Dict[str, Any]] = []
         planned_requests: List[Tuple[int, str, int]] = []
@@ -444,8 +486,12 @@ def build_blueprint(beats: Sequence[Dict[str, Any]], design: Dict[str, Any],
             prompt = _planner_prompt(
                 rows[start:start + chunk_size], design, start, len(rows))
             input_tokens = math.ceil(len(prompt) / 4)
-            reservation = ((input_tokens * in_rate + max_tokens * out_rate)
-                           / 1_000_000) if uses_kie else 0.0
+            # UTF-8 bytes are a strict upper bound for ordinary tokenizer
+            # pieces. The fixed margin covers writer instructions and the
+            # JSON-repair suffix on every permitted attempt.
+            input_token_cap = len(prompt.encode("utf-8")) + 1024
+            reservation = (((input_token_cap * in_rate + api_output_cap * out_rate)
+                            * json_attempts) / 1_000_000) if uses_kie else 0.0
             if reserved_credits + reservation > max_credits:
                 raise RuntimeError(
                     "HyperFrames authoring would exceed its Kie ceiling: "
@@ -455,11 +501,15 @@ def build_blueprint(beats: Sequence[Dict[str, Any]], design: Dict[str, Any],
             budget_rows.append({
                 "scenes": [start + 1, min(len(rows), start + chunk_size)],
                 "estimated_input_tokens": input_tokens,
-                "max_output_tokens": max_tokens,
+                "input_token_cap": input_token_cap,
+                "requested_output_tokens": max_tokens,
+                "api_output_token_cap": api_output_cap,
+                "json_attempts": json_attempts,
                 "reserved_kie_credits": round(reservation, 3),
             })
         artifacts.write(project / "authoring-budget.json", {
-            "version": 1, "model": model, "uses_kie": uses_kie,
+            "version": 2, "model": model, "model_format": model_format,
+            "uses_kie": uses_kie, "json_attempts": json_attempts,
             "ceiling_kie_credits": max_credits,
             "reserved_kie_credits": round(reserved_credits, 3),
             "rates": {"input_per_million": in_rate, "output_per_million": out_rate},
@@ -478,12 +528,24 @@ def build_blueprint(beats: Sequence[Dict[str, Any]], design: Dict[str, Any],
             emit("hyperframes", f"Directing scenes {start + 1}-{min(len(rows), start + chunk_size)}…")
             result = llm.chat_json(
                 prompt,
-                model, max_tokens=max_tokens, attempts=2)
+                model, max_tokens=max_tokens, attempts=json_attempts)
             values = result.get("scenes")
-            authored.extend(values if isinstance(values, list) else [])
+            if not isinstance(values, list):
+                continue
+            chunk_end = min(len(rows), start + chunk_size)
+            for offset, value in enumerate(values[:chunk_size]):
+                if not isinstance(value, dict):
+                    continue
+                proposed = value.get("scene")
+                try:
+                    scene_index = int(proposed) - 1
+                except (TypeError, ValueError):
+                    scene_index = start + offset
+                if start <= scene_index < chunk_end and scene_index not in authored:
+                    authored[scene_index] = value
     scenes: List[Dict[str, Any]] = []
     for index, fallback in enumerate(fallbacks):
-        scene = _coerce_scene(authored[index] if index < len(authored) else {}, fallback, index)
+        scene = _coerce_scene(authored.get(index, {}), fallback, index)
         scene["start"] = round(starts[index], 6)
         scene["duration"] = round(rows[index]["duration"], 6)
         scenes.append(scene)
@@ -499,12 +561,40 @@ def build_blueprint(beats: Sequence[Dict[str, Any]], design: Dict[str, Any],
         "scenes": scenes,
     }
     artifacts.write(project / "video-blueprint.json", blueprint)
-    artifacts.write(project / "timeline.json", {
+    _write_timeline(project, blueprint)
+    return blueprint
+
+
+def _write_timeline(project: Path, blueprint: Dict[str, Any]) -> Path:
+    path = project / "timeline.json"
+    artifacts.write(path, {
         "schema_version": 1, "duration": blueprint["duration"],
         "scenes": [{"id": s["id"], "start": s["start"], "duration": s["duration"]}
-                   for s in scenes],
+                   for s in blueprint["scenes"]],
     })
-    return blueprint
+    return path
+
+
+def _blueprint_contract(narration: str, beats: Sequence[Dict[str, Any]],
+                        design: Dict[str, Any], profile: Dict[str, Any],
+                        model: str) -> Dict[str, Any]:
+    """Fingerprint every input that can alter scene planning or compilation."""
+    video = profile.get("video") or {}
+    return {
+        "engine_version": ENGINE_VERSION,
+        "compiler_version": COMPILER_VERSION,
+        "schema_version": SCHEMA_VERSION,
+        "runtime_version": CLI_VERSION,
+        "gsap_version": GSAP_VERSION,
+        "narration_sha256": hashlib.sha256(narration.encode("utf-8")).hexdigest(),
+        "durations": [round(float(b.get("duration") or 0), 6) for b in beats],
+        "design": design,
+        "model": model,
+        "width": int(video.get("width") or 1920),
+        "height": int(video.get("height") or 1080),
+        "fps": int(video.get("fps") or 30),
+        "profile_sha256": artifacts.digest(profile),
+    }
 
 
 def validate_blueprint(blueprint: Dict[str, Any]) -> None:
@@ -521,7 +611,7 @@ def validate_blueprint(blueprint: Dict[str, Any]) -> None:
         ids.add(scene.get("id"))
         start = float(scene.get("start") or 0)
         duration = float(scene.get("duration") or 0)
-        if duration <= 0:
+        if not math.isfinite(start) or not math.isfinite(duration) or duration <= 0:
             raise ValueError(f"scene {index + 1} has invalid duration")
         if abs(start - expected) > 0.05:
             raise ValueError(f"scene {index + 1} does not follow the narration timeline")
@@ -538,9 +628,13 @@ def validate_blueprint(blueprint: Dict[str, Any]) -> None:
             raise ValueError(f"scene {index + 1} must use at least three entrance eases")
     if abs(expected - float(blueprint.get("duration") or 0)) > 0.1:
         raise ValueError("blueprint duration does not match scene durations")
+    for name in ("width", "height", "fps"):
+        value = int(blueprint.get(name) or 0)
+        if value <= 0:
+            raise ValueError(f"blueprint has invalid {name}")
 
 
-def _entrance_vars(spec: Dict[str, Any]) -> str:
+def _entrance_start_vars(spec: Dict[str, Any]) -> Dict[str, Any]:
     direction = spec["direction"]
     distance = float(spec["distance"])
     values: Dict[str, Any] = {"opacity": 0}
@@ -554,10 +648,14 @@ def _entrance_vars(spec: Dict[str, Any]) -> str:
         values["y"] = distance
     elif direction == "scale":
         values["scale"] = 0.82
-    values["duration"] = float(spec["duration"])
-    values["ease"] = spec["ease"]
-    values["immediateRender"] = False
-    return json.dumps(values, separators=(",", ":"))
+    return values
+
+
+def _entrance_end_vars(spec: Dict[str, Any]) -> str:
+    return json.dumps({
+        "opacity": 1, "x": 0, "y": 0, "scale": 1,
+        "duration": float(spec["duration"]), "ease": spec["ease"],
+    }, separators=(",", ":"))
 
 
 def _scene_markup(scene: Dict[str, Any], index: int) -> str:
@@ -566,13 +664,13 @@ def _scene_markup(scene: Dict[str, Any], index: int) -> str:
     body = html.escape(scene["body"])
     kicker = html.escape(scene["kicker"])
     statement = html.escape(_summary(scene["narration"], 46))
-    return f'''    <section id="{sid}" class="scene layout-{scene['layout']}" aria-label="Scene {index + 1}" data-layout-allow-overlap data-layout-allow-overflow>
+    return f'''    <section id="{sid}" class="scene layout-{scene['layout']}" aria-label="Scene {index + 1}">
       <div class="scene-depth" data-layout-ignore></div>
-      <div class="scene-content">
-        <div id="{sid}-kicker" class="kicker">{kicker}</div>
-        <h2 id="{sid}-title" class="scene-title">{title}</h2>
-        <p id="{sid}-body" class="scene-body">{body}</p>
-        <div id="{sid}-accent" class="accent"><span></span><b>{statement}</b></div>
+      <div class="scene-content" data-layout-allow-overflow>
+        <div id="{sid}-kicker" class="kicker" style="opacity:0">{kicker}</div>
+        <h2 id="{sid}-title" class="scene-title" style="opacity:0">{title}</h2>
+        <p id="{sid}-body" class="scene-body" style="opacity:0">{body}</p>
+        <div id="{sid}-accent" class="accent" style="opacity:0"><span></span><b>{statement}</b></div>
       </div>
     </section>'''
 
@@ -615,12 +713,14 @@ def _timeline_js(blueprint: Dict[str, Any], cues: Sequence[captions.Segment]) ->
             spec = scene["entrances"][role]
             at = base + float(spec["at"])
             lines.append(
-                f'tl.from("#{scene["id"]}-{role}",{_entrance_vars(spec)},{at:.6f});')
+                f'tl.fromTo("#{scene["id"]}-{role}",'
+                f'{json.dumps(_entrance_start_vars(spec), separators=(",", ":"))},'
+                f'{_entrance_end_vars(spec)},{at:.6f});')
         ambient = scene.get("ambient")
         usable = max(0.4, float(scene["duration"]) - 1.2)
-        if ambient != "still" and usable > 0.5:
+        if usable > 0.5:
             cycle = min(3.5, max(1.2, usable / 2))
-            repeats = max(0, math.ceil(usable / cycle) - 1)
+            repeats = max(0, math.floor(usable / cycle) - 1)
             props = ({"x": 18} if ambient == "drift" else
                      {"scale": 1.06} if ambient == "breathe" else {"rotation": 7})
             props.update({"duration": round(cycle, 3), "ease": "sine.inOut",
@@ -635,8 +735,8 @@ def _timeline_js(blueprint: Dict[str, Any], cues: Sequence[captions.Segment]) ->
     for index, cue in enumerate(cues):
         start = max(0.0, float(cue.start))
         end = min(float(blueprint["duration"]), max(start + 0.12, float(cue.end)))
-        lines.append(f'tl.set("#caption-{index}",{{opacity:1,visibility:"visible"}},{start:.6f});')
-        lines.append(f'tl.from("#caption-{index}",{{y:18,opacity:0,duration:0.18,ease:"power3.out",immediateRender:false}},{start:.6f});')
+        lines.append(f'tl.set("#caption-{index}",{{visibility:"visible"}},{start:.6f});')
+        lines.append(f'tl.fromTo("#caption-{index}",{{y:18,opacity:0}},{{y:0,opacity:1,duration:0.18,ease:"power3.out"}},{start:.6f});')
         fade = max(start + 0.05, end - 0.12)
         lines.append(f'tl.to("#caption-{index}",{{opacity:0,scale:0.97,duration:0.12,ease:"power2.in"}},{fade:.6f});')
         lines.append(f'tl.set("#caption-{index}",{{opacity:0,visibility:"hidden"}},{end:.6f});')
@@ -646,6 +746,24 @@ def _timeline_js(blueprint: Dict[str, Any], cues: Sequence[captions.Segment]) ->
         f'tl.to("#{final_scene["id"]} .scene-content",{{opacity:0,y:-24,duration:0.4,ease:"power2.in"}},{exit_at:.6f});')
     lines += ['window.__timelines["main"] = tl;', "tl.seek(0);"]
     return "\n      ".join(lines)
+
+
+def _motion_spec(blueprint: Dict[str, Any]) -> Dict[str, Any]:
+    assertions: List[Dict[str, Any]] = []
+    for scene in blueprint["scenes"]:
+        sid = scene["id"]
+        title = scene["entrances"]["title"]
+        assertions.extend([
+            {
+                "kind": "appearsBy", "selector": f"#{sid}-title",
+                "bySec": round(float(scene["start"]) + float(title["at"])
+                               + float(title["duration"]), 3),
+            },
+        ])
+    assertions.append({
+        "kind": "keepsMoving", "withinSelector": "#root", "maxStaticSec": 2,
+    })
+    return {"duration": float(blueprint["duration"]), "assertions": assertions}
 
 
 @telemetry.timed("hyperframes_compile")
@@ -735,6 +853,8 @@ def compile_project(project: Path, blueprint: Dict[str, Any],
             raise ValueError(f"compiled HyperFrames source contains forbidden token: {forbidden}")
     index = project / "index.html"
     _atomic_text(index, source)
+    _atomic_text(project / "index.motion.json",
+                 json.dumps(_motion_spec(blueprint), ensure_ascii=False, indent=2))
     _atomic_text(project / "hyperframes.json", json.dumps({
         "$schema": "https://hyperframes.heygen.com/schema/hyperframes.json",
         "media": {"autoProxy": True},
@@ -748,6 +868,7 @@ def compile_project(project: Path, blueprint: Dict[str, Any],
     }, indent=2))
     _atomic_text(project / "meta.json", json.dumps({
         "engine_version": ENGINE_VERSION, "schema_version": SCHEMA_VERSION,
+        "compiler_version": COMPILER_VERSION, "runtime_version": CLI_VERSION,
         "duration": duration, "scenes": len(blueprint["scenes"]),
     }, indent=2))
     return index
@@ -820,6 +941,27 @@ def _json_object(raw: str, label: str) -> Dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError(f"{label} did not return a JSON object")
     return value
+
+
+def _optional_digest(path: Path) -> Optional[str]:
+    return artifacts.file_digest(path) if path.exists() else None
+
+
+def _composition_contract(project: Path) -> Dict[str, Any]:
+    return {
+        "engine_version": ENGINE_VERSION,
+        "compiler_version": COMPILER_VERSION,
+        "runtime_version": CLI_VERSION,
+        "gsap_version": GSAP_VERSION,
+        "sources": {
+            name: _optional_digest(project / name)
+            for name in (
+                "index.html", "index.motion.json", "hyperframes.json",
+                "vendor/gsap.min.js", "assets/narration.wav",
+                "assets/narration.srt",
+            )
+        },
+    }
 
 
 def doctor(*, force: bool = False) -> Dict[str, Any]:
@@ -903,12 +1045,31 @@ def _node_major() -> int:
 @telemetry.timed("hyperframes_check")
 def check_project(project: Path, samples: int = 15) -> Dict[str, Any]:
     ensure_runtime()
+    report_path = project / "validation-report.json"
+    manifest = project / "validation.manifest.json"
+    contract = {
+        "composition": _composition_contract(project),
+        "samples": max(5, samples),
+        "at_transitions": True,
+        "snapshots": True,
+        "frame_check": True,
+        "strict": True,
+        "caption_zone": "x0=0;y0=.80;x1=1;y1=1;severity=warning;seek=.5,1",
+    }
+    motion_required = (project / "index.motion.json").exists()
+    if artifacts.matches(manifest, contract, [report_path]):
+        cached = artifacts.read(report_path)
+        motion = cached.get("motion") if isinstance(cached.get("motion"), dict) else {}
+        if cached.get("ok") is True and \
+                (not motion_required or motion.get("enabled") is True):
+            telemetry.count("hyperframes_validation_cache_hit", 1)
+            return cached
     command_error: Optional[HyperFramesCommandError] = None
     try:
         stdout, stderr = _run_process([
             "npx", "--yes", f"hyperframes@{CLI_VERSION}", "check", ".", "--json",
             "--samples", str(max(5, samples)), "--at-transitions", "--snapshots",
-            "--frame-check",
+            "--frame-check", "--strict",
             "--caption-zone", "x0=0;y0=.80;x1=1;y1=1;severity=warning;seek=.5,1",
         ], project, timeout=900)
     except HyperFramesCommandError as exc:
@@ -922,11 +1083,15 @@ def check_project(project: Path, samples: int = 15) -> Dict[str, Any]:
         result = _json_object(stdout, "HyperFrames check")
     if not isinstance(result.get("ok"), bool):
         raise RuntimeError("HyperFrames validation report is missing boolean ok")
-    artifacts.write(project / "validation-report.json", result)
+    artifacts.write(report_path, result)
     if command_error is not None or result["ok"] is not True:
         raise RuntimeError(
             "HyperFrames validation failed: "
             + json.dumps(result, ensure_ascii=False)[-4000:])
+    motion = result.get("motion") if isinstance(result.get("motion"), dict) else {}
+    if motion_required and motion.get("enabled") is not True:
+        raise RuntimeError("HyperFrames validation did not execute motion assertions")
+    artifacts.publish(manifest, contract, [report_path])
     return result
 
 
@@ -934,6 +1099,7 @@ def check_project(project: Path, samples: int = 15) -> Dict[str, Any]:
 def render_project(project: Path, output: Path, fps: int, quality: str = "delivery",
                    gpu: bool = False, workers: int = 1) -> Path:
     draft = project / "rendered.mp4"
+    draft.unlink(missing_ok=True)
     command = [
         "npx", "--yes", f"hyperframes@{CLI_VERSION}", "render", ".",
         "--output", str(draft), "--fps", str(fps), "--quality", quality,
@@ -949,6 +1115,36 @@ def render_project(project: Path, output: Path, fps: int, quality: str = "delive
         output.unlink()
     shutil.move(str(draft), str(output))
     return output
+
+
+def ensure_render_master(project: Path, fps: int, quality: str = "delivery",
+                         gpu: bool = False, workers: int = 1) -> Path:
+    """Reuse a verified raw render after a crash or downstream export failure."""
+    output = project / "render-master.mp4"
+    manifest = project / "render-master.manifest.json"
+    contract = {
+        "composition": _composition_contract(project),
+        "fps": int(fps), "quality": quality, "gpu": bool(gpu),
+        "workers": max(1, min(8, int(workers))),
+    }
+    if artifacts.matches(manifest, contract, [output]) and render.is_valid_video(output):
+        telemetry.count("hyperframes_render_cache_hit", 1)
+        return output
+    render_project(project, output, fps, quality=quality, gpu=gpu, workers=workers)
+    artifacts.publish(manifest, contract, [output], hash_outputs=True)
+    return output
+
+
+def _atomic_copy(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    os.close(fd)
+    temporary = Path(name)
+    try:
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def publish_delivery_receipts(job_dir: Path, project: Path, blueprint_path: Path,
@@ -993,14 +1189,11 @@ def run(narration: str, inputs: Dict[str, Any], profile: Dict[str, Any],
     beats, master, _srt, duration, cues = prepare_narration(
         narration, profile, inputs.get("language") or "", project, emit)
     blueprint_path = project / "video-blueprint.json"
-    contract = {
-        "engine": ENGINE_VERSION, "narration": artifacts.file_digest(job_dir / "script.txt"),
-        "durations": [round(float(b.get("duration") or 0), 6) for b in beats],
-        "design": design, "model": model,
-    }
+    contract = _blueprint_contract(narration, beats, design, profile, model)
     manifest = project / "blueprint.manifest.json"
     if artifacts.matches(manifest, contract, [blueprint_path]):
         blueprint = artifacts.read(blueprint_path)
+        _write_timeline(project, blueprint)
         emit("hyperframes", f"Resuming: reusing {len(blueprint.get('scenes') or [])}-scene blueprint")
     else:
         blueprint = build_blueprint(beats, design, profile, model, project, emit)
@@ -1018,10 +1211,12 @@ def run(narration: str, inputs: Dict[str, Any], profile: Dict[str, Any],
     check_project(project, samples=15 if duration < 900 else 21)
     emit("render", f"Rendering HyperFrames visual master ({duration / 60:.1f} min)…")
     output = job_dir / "final.mp4"
-    render_project(project, output, int(blueprint["fps"]),
-                   quality=str(((profile.get("video") or {}).get("hyperframes") or {}).get("quality") or "delivery"),
-                   gpu=gpu_encode, workers=workers)
-    source_signature = artifacts.signature(output)
+    master_video = ensure_render_master(
+        project, int(blueprint["fps"]),
+        quality=str(((profile.get("video") or {}).get("hyperframes") or {}).get("quality") or "delivery"),
+        gpu=gpu_encode, workers=workers)
+    _atomic_copy(master_video, output)
+    source_signature = artifacts.signature(master_video)
     render.encode_final_export(
         output, job_dir, fps=int(blueprint["fps"]), quality="balanced",
         gpu=gpu_encode, log=lambda message: emit("render", message.strip()))

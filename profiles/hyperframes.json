@@ -43,7 +43,10 @@
         "scenes_per_call": 12,
         "max_calls": 8,
         "max_tokens_per_call": 6000,
-        "max_kie_credits": 1000
+        "json_attempts": 2,
+        "max_kie_credits": 1000,
+        "input_credits_per_million": 500,
+        "output_credits_per_million": 2000
       }
     }
   },
