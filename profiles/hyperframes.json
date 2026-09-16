@@ -1,0 +1,109 @@
+{
+  "name": "hyperframes",
+  "description": "Fully custom HTML/CSS/SVG/GSAP motion graphics. No stock, AI images, AI video, or avatar calls.",
+  "engine": "hannah",
+  "channel_context": "a premium narrated long-form explainer channel whose visuals are built entirely from typography, vector shapes, diagrams, charts, and custom motion",
+  "audience_line": "speaks clearly to one curious viewer and rewards sustained attention",
+  "defaults": {
+    "language": "English",
+    "length_chars": 8000
+  },
+  "video": {
+    "visual_engine": "hyperframes",
+    "external_visuals_allowed": false,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "host_budget_seconds": 0,
+    "broll_defaults": [],
+    "broll_mix": {
+      "stock": 0,
+      "stock_image": 0,
+      "ai_video": 0,
+      "ai_image": 0,
+      "host": 0,
+      "animation": 1
+    },
+    "hyperframes": {
+      "target_scene_seconds": 12,
+      "quality": "delivery",
+      "style": "warm editorial",
+      "pace": "measured",
+      "display_font": "Georgia",
+      "body_font": "Arial",
+      "palette": {
+        "background": "#161412",
+        "surface": "#27221D",
+        "foreground": "#F4EBDD",
+        "muted": "#C8B9A5",
+        "accent": "#D4864A"
+      },
+      "authoring": {
+        "enabled": true,
+        "scenes_per_call": 12,
+        "max_calls": 8,
+        "max_tokens_per_call": 6000,
+        "max_kie_credits": 1000
+      }
+    }
+  },
+  "host": {
+    "enabled": false,
+    "persona": "A precise, engaging narrator who turns difficult ideas into a clear visual journey.",
+    "register": "Confident, concrete, warm, and economical. Never refer to production mechanics."
+  },
+  "music": {
+    "enabled": false
+  },
+  "voices": {
+    "English": "elevenlabs_TTyZrDYo6LQowrH8mixJ",
+    "German": "elevenlabs_TTyZrDYo6LQowrH8mixJ"
+  },
+  "ai_disclosure": "",
+  "north_star": "Every sentence must earn its place and every visual must clarify, emphasize, or emotionally support the narration.",
+  "rules": [
+    "Write continuous spoken prose with no headers, bullet labels, stage directions, URLs, or production notes.",
+    "Use concrete explanations and truthful examples; never fabricate sources, studies, quotations, statistics, or named real people.",
+    "Keep the narration visually suggestive without mentioning animations, scenes, graphics, or what appears on screen.",
+    "Speak directly to one viewer and maintain a coherent argument from hook to conclusion.",
+    "If the language is German, use formal Sie consistently."
+  ],
+  "writing_sections": [
+    {
+      "name": "hook_and_promise",
+      "weight": 0.12,
+      "hint": "Open with a truthful pattern break, establish the central question, and promise a concrete understanding the video will deliver."
+    },
+    {
+      "name": "foundation",
+      "weight": 0.28,
+      "hint": "Build the core concepts in a logical sequence using precise definitions, contrasts, and memorable examples."
+    },
+    {
+      "name": "development",
+      "weight": 0.35,
+      "hint": "Deepen the idea through mechanisms, consequences, frameworks, processes, or evidence appropriate to the topic."
+    },
+    {
+      "name": "application",
+      "weight": 0.17,
+      "hint": "Translate the explanation into practical decisions, steps, questions, or takeaways the viewer can use."
+    },
+    {
+      "name": "close_block",
+      "weight": 0.08,
+      "hint": "Resolve the opening question, restate the central insight without repetition, and end with a resonant final thought."
+    }
+  ],
+  "hook_types": {
+    "bold_statement": "A surprising but truthful claim that the full video directly earns.",
+    "question": "A specific question the viewer genuinely needs answered.",
+    "short_story": "A compact scenario that makes the central mechanism immediately concrete.",
+    "pattern_break": "Challenge the viewer's default framing without exaggerating the evidence."
+  },
+  "cta_lines": {
+    "ebook": "If enabled, mention the e-book briefly and naturally near the midpoint, then return immediately to value.",
+    "like_subscribe": "Invite a like or subscription only after delivering value; keep it optional and brief.",
+    "community": "If enabled, describe the community honestly and without pressure."
+  }
+}

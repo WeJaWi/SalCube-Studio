@@ -18,7 +18,7 @@ from flask import (Flask, Response, g, jsonify, make_response, redirect,
 
 from pipeline import (ai33_tasks, analytics, animation, artifacts, cancel,
                       clients, cluster, config, delivery_doc, fleet, identity,
-                      jobs, llm, node_monitor, operations, orchestrator,
+                      hyperframes, jobs, llm, node_monitor, operations, orchestrator,
                       render as video_render, research, resources, scheduler,
                       stats, storage, telemetry, thumbnail)
 
@@ -253,6 +253,7 @@ def _fleet_worker_rows() -> list[dict]:
 _PHASE_START_PCT = {
     "start": 0, "outline": 0, "awaiting": 3, "script": 3, "plan": 8,
     "music": 10, "voiceover": 10, "host": 25, "broll": 30, "anim": 30,
+    "hyperframes": 30,
     "render": 50, "done": 100,
 }
 _RENDER_START_PCT = 50
@@ -384,6 +385,21 @@ def _profile_theme_defaults() -> dict:
             out[p.stem] = v.get("anim_themes_default") or ["classic"]
         except Exception:  # noqa: BLE001
             out[p.stem] = ["classic"]
+    return out
+
+
+def _profile_broll_defaults() -> dict:
+    """Profile name → checked B-roll sources when selected in the UI."""
+    import json as _json
+    standard = ["stock", "stock_image", "ai_video", "animation"]
+    out = {}
+    for p in config.PROFILES_DIR.glob("*.json"):
+        try:
+            v = _json.loads(p.read_text()).get("video", {})
+            chosen = v.get("broll_defaults")
+            out[p.stem] = chosen if isinstance(chosen, list) else standard
+        except Exception:  # noqa: BLE001
+            out[p.stem] = standard
     return out
 
 
@@ -1576,6 +1592,7 @@ def index():
         anim_templates=list(animation.TEMPLATES),
         anim_themes=list(animation.THEMES),
         profile_theme_defaults=_profile_theme_defaults(),
+        profile_broll_defaults=_profile_broll_defaults(),
         owner_access=not ACCESS or getattr(g, "user", {}).get("profiles") is None,
     )
 
@@ -1775,6 +1792,8 @@ def _build_inputs(data: dict, title: str) -> dict:
         "spotify_popup": bool(data.get("spotify_popup", False)),
         "spotify_popup_style": spotify_popup_style,
         "spotify_url": (data.get("spotify_url") or "").strip(),
+        "hyperframes_style": (data.get("hyperframes_style") or "").strip(),
+        "hyperframes_pace": (data.get("hyperframes_pace") or "").strip(),
         # Operational retry hint, set by the controller rather than exposed
         # as a normal creative parameter. Persisted so restarts keep the job
         # on the machine that owns its cached assets.
@@ -2061,11 +2080,19 @@ def start_render():
     if not titles and not resume:
         return jsonify({"error": "title is required"}), 400
 
+    selected_profile = (_job_profile(resume) or profile) if resume else profile
+    try:
+        profile_data = orchestrator.load_profile(selected_profile)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"profile could not be loaded: {exc}"}), 400
+    try:
+        if hyperframes.is_hyperframes_profile(profile_data):
+            hyperframes.validate_profile(profile_data)
+            hyperframes.ensure_runtime()
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"profile preflight failed: {exc}"}), 503
+
     if not resume:
-        try:
-            profile_data = orchestrator.load_profile(profile)
-        except Exception as exc:  # noqa: BLE001
-            return jsonify({"error": f"profile could not be loaded: {exc}"}), 400
         needs_research = bool((profile_data.get("research") or {}).get("enabled"))
         if not needs_research:
             batch_names = [_delivery_title_stem(title).casefold() for title in titles]

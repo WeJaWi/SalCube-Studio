@@ -915,13 +915,39 @@
       </div>
     </div>
 
-    <div class="section">
+    <div class="section" id="brollSection">
       <label>B-roll sources</label>
       <label class="check"><input type="checkbox" id="broll_stock" checked /> Stock footage (Pixabay + Pexels)</label>
       <label class="check"><input type="checkbox" id="broll_stock_image" checked /> Stock photos with slow zoom</label>
       <label class="check"><input type="checkbox" id="broll_ai_video" checked /> AI video (Grok Imagine)</label>
       <label class="check"><input type="checkbox" id="broll_animation" checked /> Animation templates</label>
       <label class="check" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-soft)"><input type="checkbox" id="mindmap" /> Mind-map presentation</label>
+    </div>
+
+    <div class="section hidden" id="hyperframesSection">
+      <label>HyperFrames creative direction</label>
+      <p class="sub" style="margin:0 0 10px">Every visible scene is custom HTML, SVG, typography and GSAP motion. Stock, AI images, AI video and avatars are disabled.</p>
+      <div class="row">
+        <div>
+          <label>Visual identity</label>
+          <select id="hyperframes_style">
+            <option value="warm editorial" selected>Warm editorial</option>
+            <option value="dark premium">Dark premium</option>
+            <option value="clean technical">Clean technical</option>
+            <option value="bold typographic">Bold typographic</option>
+            <option value="soft cinematic">Soft cinematic</option>
+          </select>
+        </div>
+        <div>
+          <label>Motion pacing</label>
+          <select id="hyperframes_pace">
+            <option value="calm">Calm</option>
+            <option value="measured" selected>Measured</option>
+            <option value="energetic">Energetic</option>
+          </select>
+        </div>
+      </div>
+      <p class="sub" style="font-size:12px;margin:10px 0 0">The authoring model is capped by the profile budget. Rendering itself uses no Kie credits.</p>
     </div>
 
     <div class="nested" id="tplBox">
@@ -1173,7 +1199,7 @@ function jobStageIndex(j) {
   }
   if (j.status === "done" || step === "done" || step === "drive" || step.includes("upload")) return 5;
   if (step === "render" || step.includes("ffmpeg")) return 4;
-  if (["broll", "anim", "host", "stock", "footage"].some(key => step.includes(key))) return 3;
+  if (["broll", "anim", "host", "stock", "footage", "hyperframes"].some(key => step.includes(key))) return 3;
   if (step === "voiceover" || step === "voice" || step === "music") return 2;
   if (step === "script" || step === "plan") return 1;
   return 0;
@@ -1211,14 +1237,32 @@ try {
 } catch (e) { /* storage can be unavailable in private/locked-down browsers */ }
 
 const PROFILE_THEMES = {{ profile_theme_defaults | tojson }};
+const PROFILE_BROLL = {{ profile_broll_defaults | tojson }};
 function applyProfileThemes() {
   const defaults = PROFILE_THEMES[$("#profile").value] || ["classic"];
   document.querySelectorAll(".theme").forEach(c => {
     c.checked = defaults.includes(c.value);
   });
 }
-$("#profile").addEventListener("change", applyProfileThemes);
+function applyProfileBroll() {
+  const hyperframes = $("#profile").value === "hyperframes";
+  const defaults = PROFILE_BROLL[$("#profile").value] ||
+    ["stock", "stock_image", "ai_video", "animation"];
+  ["stock", "stock_image", "ai_video", "animation"].forEach(source => {
+    $("#broll_" + source).checked = !hyperframes && defaults.includes(source);
+    $("#broll_" + source).disabled = hyperframes;
+  });
+  $("#brollSection").classList.toggle("hidden", hyperframes);
+  $("#tplBox").classList.toggle("hidden", hyperframes);
+  $("#hyperframesSection").classList.toggle("hidden", !hyperframes);
+  $("#tplBox").style.opacity = $("#broll_animation").checked ? 1 : .4;
+}
+$("#profile").addEventListener("change", () => {
+  applyProfileThemes();
+  applyProfileBroll();
+});
 applyProfileThemes();
+applyProfileBroll();
 
 function applyGpuToggleUi(on) {
   $("#gpuToggle").checked = on;
@@ -1302,6 +1346,8 @@ function buildPayload(title) {
     mindmap: $("#mindmap").checked,
     anim_templates: [...document.querySelectorAll(".tpl:checked")].map(c => c.value),
     anim_themes: [...document.querySelectorAll(".theme:checked")].map(c => c.value),
+    hyperframes_style: $("#hyperframes_style").value,
+    hyperframes_pace: $("#hyperframes_pace").value,
     comment_cta: $("#cta_comment").checked,
     rating_cta: $("#cta_rating").checked,
     patreon_split: $("#patreon_split").checked,
