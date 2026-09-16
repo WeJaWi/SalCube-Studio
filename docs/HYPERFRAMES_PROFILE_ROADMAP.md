@@ -32,6 +32,13 @@ items remain the follow-on roadmap rather than claims of completed work.
 - [x] Fail validation closed on malformed JSON, missing `ok`, or non-zero CLI exits.
 - [x] Run the pinned CLI doctor and require Node, FFmpeg, FFprobe, and Chrome checks.
 - [x] Advertise HyperFrames readiness in worker heartbeats and reject incompatible dispatches.
+- [x] Verify entrance/liveness intent through generated motion sidecars.
+- [x] Reject unsupported scene counts before paid voice generation.
+- [x] Enforce profile schema, CSS-token, DOM-node, scene, and tween limits.
+- [x] Preserve caption coverage with deterministic fallback timing and provenance.
+- [x] Resume validation only while its report and QA snapshots remain intact.
+- [x] Resume render masters and final exports from content-addressed receipts.
+- [x] Preserve the last verified final video until its replacement passes export validation.
 
 ## Product objective
 

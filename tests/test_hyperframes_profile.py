@@ -36,6 +36,14 @@ class HyperFramesProfileTests(unittest.TestCase):
         unsafe["thumbnail"]["enabled"] = True
         with self.assertRaisesRegex(ValueError, "thumbnail"):
             hyperframes.validate_profile(unsafe)
+        unsafe = json.loads(json.dumps(self.profile))
+        unsafe["video"]["hyperframes"]["palette"]["accent"] = "red;}</style>"
+        with self.assertRaisesRegex(ValueError, "palette.accent"):
+            hyperframes.validate_profile(unsafe)
+        unsafe = json.loads(json.dumps(self.profile))
+        unsafe["video"]["fps"] = 25
+        with self.assertRaisesRegex(ValueError, "fps"):
+            hyperframes.validate_profile(unsafe)
 
     def test_runtime_preflight_rejects_old_node_before_paid_work(self):
         with patch.object(hyperframes, "doctor", return_value={
@@ -91,6 +99,17 @@ class HyperFramesProfileTests(unittest.TestCase):
         self.assertGreaterEqual(len(parts), 2)
         self.assertEqual(" ".join(" ".join(parts).split()), " ".join(source.split()))
 
+    def test_caption_fallback_is_contiguous_readable_and_complete(self):
+        source = ("A deterministic fallback keeps every spoken word visible "
+                  "when the timing provider does not return a transcript.")
+        cues = hyperframes._fallback_caption_segments(source, 8.0)
+        self.assertGreater(len(cues), 1)
+        self.assertEqual(cues[0].start, 0.0)
+        self.assertEqual(cues[-1].end, 8.0)
+        self.assertEqual(" ".join(c.text for c in cues), source)
+        self.assertTrue(all(len(c.text) <= 55 for c in cues))
+        self.assertAlmostEqual(hyperframes._caption_coverage(cues, 8.0), 1.0)
+
     def test_scene_capacity_fails_before_voice_generation(self):
         profile = json.loads(json.dumps(self.profile))
         profile["video"]["hyperframes"]["authoring"]["scenes_per_call"] = 4
@@ -139,6 +158,15 @@ class HyperFramesProfileTests(unittest.TestCase):
                             hyperframes.artifacts.digest(second))
         self.assertEqual(first["compiler_version"], hyperframes.COMPILER_VERSION)
         self.assertEqual(first["runtime_version"], hyperframes.CLI_VERSION)
+
+    def test_composition_complexity_fails_before_browser_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blueprint = self._blueprint(Path(tmp))
+        profile = json.loads(json.dumps(self.profile))
+        profile["video"]["hyperframes"]["authoring"]["max_tweens"] = 100
+        with self.assertRaisesRegex(RuntimeError, "max_tweens"):
+            hyperframes.validate_composition_complexity(
+                blueprint, cue_count=100, profile=profile)
 
     def _blueprint(self, root: Path):
         profile = json.loads(json.dumps(self.profile))
@@ -234,6 +262,27 @@ class HyperFramesProfileTests(unittest.TestCase):
         self.assertEqual(first, second)
         command.assert_called_once()
 
+    def test_missing_validation_snapshot_invalidates_resume(self):
+        report = {
+            "ok": True,
+            "snapshots": {"enabled": True, "files": ["snapshots/frame.png"]},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+
+            def command(*_args, **_kwargs):
+                snapshot = project / "snapshots" / "frame.png"
+                snapshot.parent.mkdir(exist_ok=True)
+                snapshot.write_bytes(b"png")
+                return json.dumps(report), ""
+
+            with patch.object(hyperframes, "ensure_runtime"), \
+                    patch.object(hyperframes, "_run_process", side_effect=command) as run:
+                hyperframes.check_project(project)
+                (project / "snapshots" / "frame.png").unlink()
+                hyperframes.check_project(project)
+        self.assertEqual(run.call_count, 2)
+
     def test_render_master_is_resumable(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
@@ -248,6 +297,43 @@ class HyperFramesProfileTests(unittest.TestCase):
                 second = hyperframes.ensure_render_master(project, 30)
         self.assertEqual(first, second)
         command.assert_called_once()
+
+    def test_failed_final_export_preserves_last_verified_video(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp)
+            master = job / "master.mp4"
+            final = job / "final.mp4"
+            master.write_bytes(b"new master")
+            final.write_bytes(b"known good")
+            with patch.object(hyperframes, "_source_fingerprint",
+                              return_value={"sha256": "new"}), \
+                    patch.object(hyperframes.render, "encode_final_export",
+                                 side_effect=RuntimeError("encode failed")):
+                with self.assertRaisesRegex(RuntimeError, "encode failed"):
+                    hyperframes.ensure_final_export(job, master, 30)
+            self.assertEqual(final.read_bytes(), b"known good")
+            self.assertFalse((job / ".final-next.mp4").exists())
+
+    def test_verified_final_export_is_resumable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job = Path(tmp)
+            master = job / "master.mp4"
+            output = job / "final.mp4"
+            master.write_bytes(b"master")
+            output.write_bytes(b"verified output")
+            source = {"sha256": "fixed", "bytes": 6, "duration": 4.0}
+            contract = hyperframes._final_export_contract(source, 30, False)
+            hyperframes.artifacts.publish(
+                output.with_suffix(".export.json"), contract, [output],
+                hash_outputs=True)
+            with patch.object(hyperframes, "_source_fingerprint", return_value=source), \
+                    patch.object(hyperframes.render, "is_valid_video", return_value=True), \
+                    patch.object(hyperframes.render, "encode_final_export") as encode:
+                result, fingerprint = hyperframes.ensure_final_export(
+                    job, master, 30)
+        self.assertEqual(result, output)
+        self.assertEqual(fingerprint, source)
+        encode.assert_not_called()
 
     def test_delivery_receipts_satisfy_uploader_contract(self):
         import app as studio_app

@@ -46,7 +46,10 @@
         "json_attempts": 2,
         "max_kie_credits": 1000,
         "input_credits_per_million": 500,
-        "output_credits_per_million": 2000
+        "output_credits_per_million": 2000,
+        "max_scenes": 120,
+        "max_dom_nodes": 5000,
+        "max_tweens": 12000
       }
     }
   },

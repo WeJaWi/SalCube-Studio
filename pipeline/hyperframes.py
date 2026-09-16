@@ -26,7 +26,7 @@ from . import artifacts, cancel, captions, config, llm, render, telemetry, voice
 
 
 ENGINE_VERSION = 2
-COMPILER_VERSION = 2
+COMPILER_VERSION = 3
 CLI_VERSION = "0.8.41"
 GSAP_VERSION = "3.14.2"
 GSAP_SHA256 = "c174bfce53a729418d57a8ad8625e7247c793a22fef8e2851e3cfa3de9cd8280"
@@ -49,6 +49,9 @@ ALLOWED_EASES = (
     "power1.out", "power2.out", "power3.out", "power4.out", "expo.out",
     "circ.out", "sine.out", "back.out(1.4)",
 )
+ALLOWED_QUALITIES = ("draft", "looks", "delivery", "standard", "high")
+HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
+SAFE_FONT = re.compile(r"[A-Za-z0-9 À-ÖØ-öø-ÿ,.'-]{1,80}\Z")
 FORBIDDEN_SOURCE = (
     "fetch(", "XMLHttpRequest", "WebSocket", "EventSource", "<iframe",
     "<object", "<embed", "javascript:", "Date.now", "Math.random",
@@ -60,6 +63,24 @@ FORBIDDEN_SOURCE = (
 
 def is_hyperframes_profile(profile: Dict[str, Any]) -> bool:
     return str((profile.get("video") or {}).get("visual_engine") or "").lower() == "hyperframes"
+
+
+def _strict_config_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            or not math.isfinite(float(value)) or not float(value).is_integer():
+        raise ValueError(f"HyperFrames {label} must be an integer")
+    return int(value)
+
+
+def _contrast_ratio(first: str, second: str) -> float:
+    def luminance(color: str) -> float:
+        channels = [int(color[index:index + 2], 16) / 255
+                    for index in (1, 3, 5)]
+        linear = [value / 12.92 if value <= 0.04045
+                  else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    a, b = luminance(first), luminance(second)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
 
 
 def validate_profile(profile: Dict[str, Any]) -> None:
@@ -77,6 +98,72 @@ def validate_profile(profile: Dict[str, Any]) -> None:
         raise ValueError("HyperFrames profile cannot enable an avatar host")
     if (profile.get("thumbnail") or {}).get("enabled") is not False:
         raise ValueError("HyperFrames profile must set thumbnail.enabled=false")
+    width = _strict_config_int(video.get("width"), "width")
+    height = _strict_config_int(video.get("height"), "height")
+    fps = _strict_config_int(video.get("fps"), "fps")
+    if not (640 <= width <= 3840 and 360 <= height <= 2160):
+        raise ValueError("HyperFrames dimensions must be between 640x360 and 3840x2160")
+    if abs(width / height - 16 / 9) > 0.01:
+        raise ValueError("HyperFrames currently supports only 16:9 output")
+    if fps not in (24, 30, 60):
+        raise ValueError("HyperFrames fps must be 24, 30, or 60")
+    hf = video.get("hyperframes") or {}
+    if hf.get("quality") not in ALLOWED_QUALITIES:
+        raise ValueError("HyperFrames quality is unsupported")
+    try:
+        target_seconds = float(hf.get("target_scene_seconds"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("HyperFrames target_scene_seconds must be numeric") from exc
+    if not math.isfinite(target_seconds) or not 3 <= target_seconds <= 30:
+        raise ValueError("HyperFrames target_scene_seconds must be between 3 and 30")
+    palette = hf.get("palette") or {}
+    for role in ("background", "surface", "foreground", "muted", "accent"):
+        if not HEX_COLOR.fullmatch(str(palette.get(role) or "")):
+            raise ValueError(f"HyperFrames palette.{role} must be a six-digit hex color")
+    for role in ("foreground", "muted", "accent"):
+        if _contrast_ratio(str(palette[role]), str(palette["background"])) < 4.5:
+            raise ValueError(
+                f"HyperFrames palette.{role} must have at least 4.5:1 contrast "
+                "against the background")
+    for role in ("display_font", "body_font"):
+        if not SAFE_FONT.fullmatch(str(hf.get(role) or "")):
+            raise ValueError(f"HyperFrames {role} contains unsupported characters")
+    authoring = hf.get("authoring") or {}
+    if not isinstance(authoring.get("enabled"), bool):
+        raise ValueError("HyperFrames authoring.enabled must be boolean")
+    numeric_rules = {
+        "scenes_per_call": (4, 20), "max_calls": (1, 64),
+        "max_tokens_per_call": (1000, 12000), "json_attempts": (1, 3),
+        "max_kie_credits": (1, 1_000_000),
+        "input_credits_per_million": (0, 1_000_000),
+        "output_credits_per_million": (0, 1_000_000),
+        "max_scenes": (1, 500), "max_dom_nodes": (100, 50_000),
+        "max_tweens": (100, 50_000),
+    }
+    integer_rules = {
+        "scenes_per_call", "max_calls", "max_tokens_per_call", "json_attempts",
+        "max_scenes", "max_dom_nodes", "max_tweens",
+    }
+    for key, (low, high) in numeric_rules.items():
+        try:
+            value = float(authoring.get(key))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"HyperFrames authoring.{key} must be numeric") from exc
+        if not math.isfinite(value) or value < low or value > high:
+            raise ValueError(
+                f"HyperFrames authoring.{key} must be between {low} and {high}")
+        if key in integer_rules and not value.is_integer():
+            raise ValueError(f"HyperFrames authoring.{key} must be an integer")
+
+
+def complexity_limits(profile: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+    hf = (((profile or {}).get("video") or {}).get("hyperframes") or {})
+    authoring = hf.get("authoring") or {}
+    return {
+        "max_scenes": int(authoring.get("max_scenes") or 120),
+        "max_dom_nodes": int(authoring.get("max_dom_nodes") or 5000),
+        "max_tweens": int(authoring.get("max_tweens") or 12000),
+    }
 
 
 def _atomic_text(path: Path, value: str) -> None:
@@ -174,10 +261,11 @@ def authoring_limits(profile: Dict[str, Any]) -> Dict[str, int]:
 def validate_authoring_capacity(spans: Sequence[str], profile: Dict[str, Any]) -> None:
     """Reject an unauthorable narration before the first TTS request."""
     hf = (profile.get("video") or {}).get("hyperframes") or {}
-    if not bool((hf.get("authoring") or {}).get("enabled", True)):
-        return
-    limits = authoring_limits(profile)
-    capacity = limits["scenes_per_call"] * limits["max_calls"]
+    authoring = hf.get("authoring") or {}
+    capacity = complexity_limits(profile)["max_scenes"]
+    if bool(authoring.get("enabled", True)):
+        limits = authoring_limits(profile)
+        capacity = min(capacity, limits["scenes_per_call"] * limits["max_calls"])
     if len(spans) > capacity:
         raise RuntimeError(
             "HyperFrames narration needs "
@@ -202,20 +290,89 @@ def _escape_concat_path(path: Path) -> str:
     return str(path.resolve()).replace("'", "'\\''")
 
 
+def _caption_coverage(cues: Sequence[captions.Segment], duration: float) -> float:
+    intervals = sorted(
+        (max(0.0, float(cue.start)), min(duration, float(cue.end)))
+        for cue in cues if cue.text.strip() and float(cue.end) > float(cue.start))
+    covered = 0.0
+    cursor = 0.0
+    for start, end in intervals:
+        if end <= cursor:
+            continue
+        covered += end - max(start, cursor)
+        cursor = max(cursor, end)
+    return min(1.0, covered / duration) if duration > 0 else 0.0
+
+
+def _fallback_caption_segments(text: str, duration: float,
+                               max_chars: int = 44) -> List[captions.Segment]:
+    """Create readable deterministic cues when provider timing is unavailable."""
+    words = re.sub(r"\s+", " ", text.strip()).split()
+    if not words or duration <= 0:
+        return []
+    chunks: List[str] = []
+    current: List[str] = []
+    for word in words:
+        candidate = " ".join(current + [word])
+        if current and (len(candidate) > max_chars or len(current) >= 8):
+            chunks.append(" ".join(current))
+            current = []
+        current.append(word)
+    if current:
+        chunks.append(" ".join(current))
+    if len(chunks) > 1:
+        minimum_tail = min(20, max_chars // 2)
+        while len(chunks[-1]) < minimum_tail:
+            previous_words = chunks[-2].split()
+            if len(previous_words) <= 1:
+                break
+            moved = previous_words.pop()
+            candidate = f"{moved} {chunks[-1]}"
+            if len(candidate) > max_chars:
+                break
+            chunks[-2] = " ".join(previous_words)
+            chunks[-1] = candidate
+    weights = [max(1, len(chunk)) for chunk in chunks]
+    total = sum(weights)
+    elapsed = 0.0
+    output: List[captions.Segment] = []
+    for index, (chunk, weight) in enumerate(zip(chunks, weights)):
+        end = duration if index == len(chunks) - 1 else duration * (elapsed + weight) / total
+        output.append(captions.Segment(round(duration * elapsed / total, 3),
+                                        round(end, 3), chunk))
+        elapsed += weight
+    return output
+
+
+def _atomic_srt(path: Path, cues: Sequence[captions.Segment]) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        captions.write_srt(list(cues), temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _merge_narration(beats: Sequence[Dict[str, Any]], project: Path) -> Tuple[Path, Path, float, List[captions.Segment]]:
     assets_dir = project / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     master = assets_dir / "narration.wav"
     merged_srt = assets_dir / "narration.srt"
+    timing_report = assets_dir / "caption-timing.json"
     concat_file = assets_dir / "narration.concat.txt"
     audio_paths = [Path(b["audio"]) for b in beats]
     contract = {
         "engine": ENGINE_VERSION,
+        "caption_timing_version": 2,
         "audio": [artifacts.signature(p) for p in audio_paths],
+        "captions": [artifacts.signature(Path(b["srt"])) if b.get("srt") else None
+                     for b in beats],
+        "texts": [str(b.get("text") or "") for b in beats],
         "durations": [round(float(b.get("duration") or 0), 6) for b in beats],
     }
     manifest = assets_dir / "narration.manifest.json"
-    if not (artifacts.matches(manifest, contract, [master, merged_srt])
+    outputs = [master, merged_srt, timing_report]
+    if not (artifacts.matches(manifest, contract, outputs)
             and render.is_valid_audio(master, min_duration=0.25)):
         _atomic_text(concat_file, "".join(
             f"file '{_escape_concat_path(path)}'\n" for path in audio_paths))
@@ -225,15 +382,42 @@ def _merge_narration(beats: Sequence[Dict[str, Any]], project: Path) -> Tuple[Pa
         ])
         offset = 0.0
         all_cues: List[captions.Segment] = []
-        for beat in beats:
+        timing_rows: List[Dict[str, Any]] = []
+        for index, beat in enumerate(beats):
+            beat_duration = float(beat.get("duration") or 0)
             srt = beat.get("srt")
+            local_cues: List[captions.Segment] = []
             if srt and Path(srt).exists():
-                for cue in captions.parse_srt(Path(srt).read_text(encoding="utf-8", errors="ignore")):
-                    all_cues.append(captions.Segment(
-                        max(0.0, offset + cue.start), max(0.0, offset + cue.end), cue.text))
-            offset += float(beat.get("duration") or 0)
-        captions.write_srt(all_cues, merged_srt)
-        artifacts.publish(manifest, contract, [master, merged_srt])
+                parsed = captions.parse_srt(
+                    Path(srt).read_text(encoding="utf-8", errors="ignore"))
+                local_cues = [captions.Segment(
+                    max(0.0, min(beat_duration, float(cue.start))),
+                    max(0.0, min(beat_duration, float(cue.end))), cue.text)
+                    for cue in parsed if cue.text.strip()]
+            source = "provider"
+            if _caption_coverage(local_cues, beat_duration) < 0.8:
+                local_cues = _fallback_caption_segments(
+                    str(beat.get("text") or ""), beat_duration)
+                source = "deterministic-fallback"
+            all_cues.extend(captions.Segment(
+                round(offset + cue.start, 3), round(offset + cue.end, 3), cue.text)
+                for cue in local_cues if cue.end > cue.start)
+            timing_rows.append({
+                "scene": index + 1, "source": source,
+                "segments": len(local_cues),
+                "coverage": round(_caption_coverage(local_cues, beat_duration), 4),
+            })
+            offset += beat_duration
+        _atomic_srt(merged_srt, all_cues)
+        artifacts.write(timing_report, {
+            "schema_version": 1,
+            "duration": round(offset, 6),
+            "segments": len(all_cues),
+            "fallback_scenes": sum(
+                row["source"] == "deterministic-fallback" for row in timing_rows),
+            "scenes": timing_rows,
+        })
+        artifacts.publish(manifest, contract, outputs)
     cues = captions.parse_srt(merged_srt.read_text(encoding="utf-8", errors="ignore"))
     duration = render.probe_duration(master)
     if duration <= 0:
@@ -735,10 +919,13 @@ def _timeline_js(blueprint: Dict[str, Any], cues: Sequence[captions.Segment]) ->
     for index, cue in enumerate(cues):
         start = max(0.0, float(cue.start))
         end = min(float(blueprint["duration"]), max(start + 0.12, float(cue.end)))
+        cue_duration = max(0.12, end - start)
+        entrance_duration = min(0.18, max(0.03, cue_duration * 0.3))
+        exit_duration = min(0.12, max(0.03, cue_duration * 0.25))
         lines.append(f'tl.set("#caption-{index}",{{visibility:"visible"}},{start:.6f});')
-        lines.append(f'tl.fromTo("#caption-{index}",{{y:18,opacity:0}},{{y:0,opacity:1,duration:0.18,ease:"power3.out"}},{start:.6f});')
-        fade = max(start + 0.05, end - 0.12)
-        lines.append(f'tl.to("#caption-{index}",{{opacity:0,scale:0.97,duration:0.12,ease:"power2.in"}},{fade:.6f});')
+        lines.append(f'tl.fromTo("#caption-{index}",{{y:18,opacity:0}},{{y:0,opacity:1,duration:{entrance_duration:.3f},ease:"power3.out"}},{start:.6f});')
+        fade = max(start + entrance_duration, end - exit_duration)
+        lines.append(f'tl.to("#caption-{index}",{{opacity:0,scale:0.97,duration:{exit_duration:.3f},ease:"power2.in"}},{fade:.6f});')
         lines.append(f'tl.set("#caption-{index}",{{opacity:0,visibility:"hidden"}},{end:.6f});')
     final_scene = scenes[-1]
     exit_at = max(float(final_scene["start"]) + 0.5, float(blueprint["duration"]) - 0.45)
@@ -766,10 +953,36 @@ def _motion_spec(blueprint: Dict[str, Any]) -> Dict[str, Any]:
     return {"duration": float(blueprint["duration"]), "assertions": assertions}
 
 
+def validate_composition_complexity(blueprint: Dict[str, Any], cue_count: int,
+                                    profile: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+    """Bound generated DOM and timeline work before launching a browser."""
+    scene_count = len(blueprint.get("scenes") or [])
+    counts = {
+        "scenes": scene_count,
+        # section + depth + content + four copy nodes + accent span/bold.
+        "dom_nodes": 12 + scene_count * 9 + max(0, int(cue_count)),
+        # Four entrances, ambient motion, worst-case four-step transition,
+        # four caption operations, and the final exit.
+        "tweens": scene_count * 5 + max(0, scene_count - 1) * 4
+                  + max(0, int(cue_count)) * 4 + 1,
+    }
+    limits = complexity_limits(profile)
+    for count_key, limit_key in (
+            ("scenes", "max_scenes"), ("dom_nodes", "max_dom_nodes"),
+            ("tweens", "max_tweens")):
+        if counts[count_key] > limits[limit_key]:
+            raise RuntimeError(
+                f"HyperFrames composition needs {counts[count_key]} {count_key}, "
+                f"above configured {limit_key}={limits[limit_key]}")
+    return counts
+
+
 @telemetry.timed("hyperframes_compile")
 def compile_project(project: Path, blueprint: Dict[str, Any],
-                    narration: Path, cues: Sequence[captions.Segment]) -> Path:
+                    narration: Path, cues: Sequence[captions.Segment],
+                    profile: Optional[Dict[str, Any]] = None) -> Path:
     validate_blueprint(blueprint)
+    complexity = validate_composition_complexity(blueprint, len(cues), profile)
     project.mkdir(parents=True, exist_ok=True)
     _install_vendored_gsap(project)
     design = blueprint["design"]
@@ -870,6 +1083,7 @@ def compile_project(project: Path, blueprint: Dict[str, Any],
         "engine_version": ENGINE_VERSION, "schema_version": SCHEMA_VERSION,
         "compiler_version": COMPILER_VERSION, "runtime_version": CLI_VERSION,
         "duration": duration, "scenes": len(blueprint["scenes"]),
+        "complexity": complexity,
     }, indent=2))
     return index
 
@@ -964,6 +1178,41 @@ def _composition_contract(project: Path) -> Dict[str, Any]:
     }
 
 
+def _saved_validation_outputs(manifest: Path, project: Path,
+                              report: Path) -> List[Path]:
+    """Recover only project-local outputs from a prior validation receipt."""
+    root = project.resolve()
+    output_paths: List[Path] = []
+    for row in artifacts.read(manifest).get("outputs") or []:
+        if not isinstance(row, list) or not row or not isinstance(row[0], str):
+            return []
+        path = Path(row[0]).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return []
+        output_paths.append(path)
+    return output_paths if report.resolve() in output_paths else []
+
+
+def _validation_outputs(project: Path, report: Path,
+                        result: Dict[str, Any]) -> List[Path]:
+    output_paths = [report]
+    snapshots = result.get("snapshots") if isinstance(result.get("snapshots"), dict) else {}
+    for value in snapshots.get("files") or []:
+        if not isinstance(value, str):
+            continue
+        path = (project / value).resolve()
+        try:
+            path.relative_to(project.resolve())
+        except ValueError:
+            raise RuntimeError("HyperFrames returned a snapshot outside the project")
+        if not path.is_file():
+            raise RuntimeError(f"HyperFrames validation snapshot is missing: {Path(value).name}")
+        output_paths.append(path)
+    return output_paths
+
+
 def doctor(*, force: bool = False) -> Dict[str, Any]:
     """Return a cached, fail-closed readiness result for local rendering."""
     global _DOCTOR_CACHE
@@ -1043,7 +1292,8 @@ def _node_major() -> int:
 
 
 @telemetry.timed("hyperframes_check")
-def check_project(project: Path, samples: int = 15) -> Dict[str, Any]:
+def check_project(project: Path, samples: int = 15,
+                  emit: Callable[[str], None] = lambda *_: None) -> Dict[str, Any]:
     ensure_runtime()
     report_path = project / "validation-report.json"
     manifest = project / "validation.manifest.json"
@@ -1057,12 +1307,14 @@ def check_project(project: Path, samples: int = 15) -> Dict[str, Any]:
         "caption_zone": "x0=0;y0=.80;x1=1;y1=1;severity=warning;seek=.5,1",
     }
     motion_required = (project / "index.motion.json").exists()
-    if artifacts.matches(manifest, contract, [report_path]):
+    saved_outputs = _saved_validation_outputs(manifest, project, report_path)
+    if saved_outputs and artifacts.matches(manifest, contract, saved_outputs):
         cached = artifacts.read(report_path)
         motion = cached.get("motion") if isinstance(cached.get("motion"), dict) else {}
         if cached.get("ok") is True and \
                 (not motion_required or motion.get("enabled") is True):
             telemetry.count("hyperframes_validation_cache_hit", 1)
+            emit("Resuming: reusing matching strict validation and snapshots")
             return cached
     command_error: Optional[HyperFramesCommandError] = None
     try:
@@ -1091,7 +1343,8 @@ def check_project(project: Path, samples: int = 15) -> Dict[str, Any]:
     motion = result.get("motion") if isinstance(result.get("motion"), dict) else {}
     if motion_required and motion.get("enabled") is not True:
         raise RuntimeError("HyperFrames validation did not execute motion assertions")
-    artifacts.publish(manifest, contract, [report_path])
+    artifacts.publish(manifest, contract,
+                      _validation_outputs(project, report_path, result))
     return result
 
 
@@ -1118,7 +1371,8 @@ def render_project(project: Path, output: Path, fps: int, quality: str = "delive
 
 
 def ensure_render_master(project: Path, fps: int, quality: str = "delivery",
-                         gpu: bool = False, workers: int = 1) -> Path:
+                         gpu: bool = False, workers: int = 1,
+                         emit: Callable[[str], None] = lambda *_: None) -> Path:
     """Reuse a verified raw render after a crash or downstream export failure."""
     output = project / "render-master.mp4"
     manifest = project / "render-master.manifest.json"
@@ -1129,6 +1383,7 @@ def ensure_render_master(project: Path, fps: int, quality: str = "delivery",
     }
     if artifacts.matches(manifest, contract, [output]) and render.is_valid_video(output):
         telemetry.count("hyperframes_render_cache_hit", 1)
+        emit("Resuming: reusing verified HyperFrames render master")
         return output
     render_project(project, output, fps, quality=quality, gpu=gpu, workers=workers)
     artifacts.publish(manifest, contract, [output], hash_outputs=True)
@@ -1147,28 +1402,82 @@ def _atomic_copy(source: Path, destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def publish_delivery_receipts(job_dir: Path, project: Path, blueprint_path: Path,
-                              output: Path, fps: int,
-                              source_signature: Optional[list] = None,
-                              *, gpu: bool = False) -> None:
-    """Publish the same verified delivery contract as the legacy renderer."""
-    export_contract = {
-        "version": 2,
-        "source": source_signature,
+def _source_fingerprint(path: Path) -> Dict[str, Any]:
+    return {
+        "sha256": artifacts.file_digest(path),
+        "bytes": path.stat().st_size,
+        "duration": round(render.probe_duration(path), 6),
+    }
+
+
+def _final_export_contract(source_fingerprint: Any, fps: int,
+                           gpu: bool) -> Dict[str, Any]:
+    return {
+        "version": 3,
+        "source": source_fingerprint,
         "fps": int(fps),
         "quality": "balanced",
         "gpu": bool(gpu),
         "engine": "hyperframes",
         "engine_version": ENGINE_VERSION,
+        "compiler_version": COMPILER_VERSION,
     }
+
+
+def _verified_receipt_matches(receipt: Path, contract: Dict[str, Any],
+                              output: Path) -> bool:
+    record = artifacts.read(receipt)
+    return (record.get("version") == 1
+            and record.get("input") == artifacts.digest(contract)
+            and artifacts.output_matches(record, output))
+
+
+def ensure_final_export(job_dir: Path, master: Path, fps: int,
+                        *, gpu: bool = False,
+                        emit: Callable[[str], None] = lambda *_: None
+                        ) -> Tuple[Path, Dict[str, Any]]:
+    """Build final.mp4 atomically while preserving the last verified export."""
+    output = job_dir / "final.mp4"
+    receipt = output.with_suffix(".export.json")
+    source_fingerprint = _source_fingerprint(master)
+    contract = _final_export_contract(source_fingerprint, fps, gpu)
+    if (_verified_receipt_matches(receipt, contract, output)
+            and render.is_valid_video(output)):
+        telemetry.count("hyperframes_export_cache_hit", 1)
+        emit("Resuming: reusing verified final export")
+        return output, source_fingerprint
+    candidate = job_dir / ".final-next.mp4"
+    candidate.unlink(missing_ok=True)
+    try:
+        _atomic_copy(master, candidate)
+        render.encode_final_export(
+            candidate, job_dir, fps=int(fps), quality="balanced", gpu=gpu,
+            log=lambda message: emit(message.strip()))
+        if not render.is_valid_video(candidate):
+            raise RuntimeError("VidForge final export did not produce a playable video")
+        os.replace(candidate, output)
+        artifacts.publish(receipt, contract, [output], hash_outputs=True)
+    finally:
+        candidate.unlink(missing_ok=True)
+    return output, source_fingerprint
+
+
+def publish_delivery_receipts(job_dir: Path, project: Path, blueprint_path: Path,
+                              output: Path, fps: int,
+                              source_signature: Any = None,
+                              *, gpu: bool = False) -> None:
+    """Publish the same verified delivery contract as the legacy renderer."""
+    export_contract = _final_export_contract(source_signature, fps, gpu)
     artifacts.publish(output.with_suffix(".export.json"), export_contract,
                       [output], hash_outputs=True)
     render_contract = {
         "version": 1,
         "engine": "hyperframes",
         "engine_version": ENGINE_VERSION,
+        "compiler_version": COMPILER_VERSION,
         "runtime": CLI_VERSION,
         "blueprint": artifacts.file_digest(blueprint_path),
+        "source": source_signature,
         "fps": int(fps),
     }
     artifacts.publish(job_dir / "render.manifest.json", render_contract,
@@ -1206,20 +1515,19 @@ def run(narration: str, inputs: Dict[str, Any], profile: Dict[str, Any],
         artifacts.write(blueprint_path, blueprint)
         artifacts.publish(manifest, contract, [blueprint_path])
     validate_blueprint(blueprint)
-    compile_project(project, blueprint, master, cues)
+    compile_project(project, blueprint, master, cues, profile)
     emit("hyperframes", f"Validating {len(blueprint['scenes'])} scenes and {len(cues)} captions…")
-    check_project(project, samples=15 if duration < 900 else 21)
+    check_project(project, samples=15 if duration < 900 else 21,
+                  emit=lambda message: emit("hyperframes", message))
     emit("render", f"Rendering HyperFrames visual master ({duration / 60:.1f} min)…")
-    output = job_dir / "final.mp4"
     master_video = ensure_render_master(
         project, int(blueprint["fps"]),
         quality=str(((profile.get("video") or {}).get("hyperframes") or {}).get("quality") or "delivery"),
-        gpu=gpu_encode, workers=workers)
-    _atomic_copy(master_video, output)
-    source_signature = artifacts.signature(master_video)
-    render.encode_final_export(
-        output, job_dir, fps=int(blueprint["fps"]), quality="balanced",
-        gpu=gpu_encode, log=lambda message: emit("render", message.strip()))
+        gpu=gpu_encode, workers=workers,
+        emit=lambda message: emit("render", message))
+    output, source_signature = ensure_final_export(
+        job_dir, master_video, int(blueprint["fps"]), gpu=gpu_encode,
+        emit=lambda message: emit("render", message))
     publish_delivery_receipts(job_dir, project, blueprint_path, output,
                               int(blueprint["fps"]), source_signature,
                               gpu=gpu_encode)

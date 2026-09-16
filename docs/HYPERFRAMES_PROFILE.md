@@ -21,6 +21,8 @@ is invalid.
 
 1. The normal script workflow produces the approved narration.
 2. Voiceover is generated first and merged into one authoritative audio master.
+   Missing or incomplete provider caption timing is replaced with deterministic,
+   readable cues covering the full narration span.
 3. Semantic narration spans become exact-duration scenes.
 4. A conservative Kie authoring reservation is calculated, persisted, and
    compared with the profile ceiling before any authoring request is submitted.
@@ -30,8 +32,9 @@ is invalid.
    composition. It rejects remote I/O, iframes, dynamic code, wall-clock time,
    unseeded randomness, and infinite repeats.
 7. HyperFrames checks runtime behavior, layout, transition frames, captions,
-   contrast, and snapshots before rendering.
-8. The rendered MP4 passes through the existing VidForge final export contract.
+   motion assertions, contrast, and snapshots before rendering.
+8. The rendered MP4 passes through an atomic, resumable VidForge final export;
+   a failed replacement never destroys the last verified deliverable.
 
 ## Per-job artifacts
 
@@ -41,9 +44,12 @@ The job's `hyperframes/` directory retains:
 - `authoring-budget.json` — pre-submission cost reservation and ceiling
 - `video-blueprint.json` — deterministic scene and animation data
 - `timeline.json` — resolved scene timings in seconds
+- `assets/caption-timing.json` — caption provenance and per-scene coverage
 - `index.html` — executable composition source
+- `index.motion.json` — machine-verifiable entrance and liveness assertions
 - `hyperframes.json` and `package.json` — pinned project/runtime configuration
 - `validation-report.json` and `snapshots/` — render QA evidence
+- `render-master.mp4` — verified resumable HyperFrames intermediate
 - versioned input/output manifests used for safe resume
 
 The final video remains at the normal job path, `final.mp4`.
@@ -60,7 +66,9 @@ the reservation in `authoring-budget.json` before submission.
 ## Recovery and reproducibility
 
 The blueprint seed is derived from the narration, visual identity, and engine
-version. Artifact manifests hash their authoritative inputs. A resumed job
-reuses a matching blueprint and regenerates only invalid downstream output.
-CLI processes have explicit timeouts and are registered with the existing job
-cancellation system.
+version. Artifact manifests hash their authoritative inputs, including the
+profile, dimensions, fps, compiler, runtime, audio, motion assertions, and QA
+screenshots. A resumed job reuses matching validation, render-master, and final
+export artifacts and regenerates only invalid downstream output. CLI processes
+have explicit timeouts and are registered with the existing job cancellation
+system.
