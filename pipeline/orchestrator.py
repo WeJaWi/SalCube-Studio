@@ -20,8 +20,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import (animation, aivideo, artifacts, cancel, clients, config, footage, heygen, images,
-               llm, media_cache, music, render, script, telemetry, voiceover)
+from . import (animation, aivideo, artifacts, cancel, clients, config, footage,
+               heygen, hyperframes, images, llm, media_cache, music, render,
+               script, telemetry, voiceover)
 
 ProgressFn = Callable[[str, str], None]
 GateFn = Callable[[Dict[str, str], str], Tuple[str, str]]
@@ -404,6 +405,8 @@ def _run_pipeline(inputs, profile_name, job_dir, progress, gate, voice_gate,
         "source_metadata": (inputs.get("source_metadata")
                             if isinstance(inputs.get("source_metadata"), dict)
                             else {}),
+        "hyperframes_style": (inputs.get("hyperframes_style") or "").strip(),
+        "hyperframes_pace": (inputs.get("hyperframes_pace") or "").strip(),
     }
     if inputs["smart_stock"] not in ("vision", "text", "off"):
         inputs["smart_stock"] = "text"
@@ -590,6 +593,20 @@ def _run_pipeline(inputs, profile_name, job_dir, progress, gate, voice_gate,
             })
         except Exception:  # noqa: BLE001
             pass  # informational only — must never break the render
+
+    # HyperFrames is a complete visual engine, not a B-roll type.  Branch
+    # before legacy beat planning so this profile can never enter stock,
+    # AI-image, AI-video, avatar, or template fallback paths.  Narration is
+    # generated first inside the engine; the resulting word timings drive
+    # its custom scene blueprint and exact GSAP timeline.
+    if hyperframes.is_hyperframes_profile(profile):
+        if inputs.get("patreon_split"):
+            raise RuntimeError(
+                "Patreon split is not yet supported by the HyperFrames-only profile")
+        emit("hyperframes", "Using the isolated HyperFrames-only visual engine")
+        return hyperframes.run(
+            narration, inputs, profile, job_dir, model, emit,
+            gpu_encode=gpu_encode, workers=beat_workers)
 
     # 3. Plan b-roll beats, then place the host inside the credit budget.
     # The plan is persisted so a resumed run works with identical beats.

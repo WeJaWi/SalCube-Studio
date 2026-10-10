@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict
 
 import requests
 
-from . import artifacts, cancel, config, node_monitor, resources
+from . import artifacts, cancel, config, hyperframes, node_monitor, resources
 
 SLOT_STATUSES = frozenset({"running", "awaiting_approval", "retry_wait"})
 
@@ -126,6 +126,7 @@ class FleetWorker:
         # behavior; a current controller can drain/pause or lower capacity
         # without restarting this process.
         self._policy: dict = {"mode": "active", "max_jobs": None}
+        self._capabilities: dict = {"hyperframes": {"ready": False}}
         self._state_file = config.OUTPUT_DIR / "fleet_reporters.json"
         self.node_monitor = node_monitor.NodeMonitor(config.ROOT, config.OUTPUT_DIR)
         for jid, state in artifacts.read(self._state_file).items():
@@ -153,6 +154,14 @@ class FleetWorker:
         self.node_monitor.stop()
 
     def _payload(self) -> dict:
+        try:
+            self._capabilities["hyperframes"] = hyperframes.runtime_capability()
+        except Exception as exc:  # noqa: BLE001
+            self._capabilities["hyperframes"] = {
+                "ready": False, "engine_version": hyperframes.ENGINE_VERSION,
+                "cli_version": hyperframes.CLI_VERSION,
+                "error": str(exc)[-500:],
+            }
         with self._lock:
             jobs = [r.snapshot() for r in self._jobs.values()]
             policy = dict(self._policy)
@@ -183,7 +192,7 @@ class FleetWorker:
             load_1m = None
         return {
             "worker_id": self.worker_id, "name": self.name,
-            "protocol_version": 5,
+            "protocol_version": 6,
             "hardware": {"cpu_cores": config._detect_cpu_count(),
                          "ram_gb": round(config._detect_ram_gb(), 1),
                          "hw_encoder": config.gpu_encoder(),
@@ -199,6 +208,7 @@ class FleetWorker:
                         "render": resources.snapshot(),
                         "uptime_seconds": round(time.monotonic() - self._started_at)},
             "node": self.node_monitor.snapshot(),
+            "capabilities": dict(self._capabilities),
             "policy": policy,
             "cached_jobs": [p.name for p in config.OUTPUT_DIR.iterdir()
                             if p.is_dir() and p.name.isdigit() and (p / "plan.json").exists()][:200],
@@ -269,6 +279,23 @@ class FleetWorker:
             jid = str(spec.get("job_id") or "")
             if not jid:
                 continue
+            requirements = spec.get("requirements") or {}
+            if requirements.get("engine") == "hyperframes":
+                capability = self._capabilities.get("hyperframes") or {}
+                compatible = (
+                    capability.get("ready") is True
+                    and capability.get("engine_version") == requirements.get("engine_version")
+                    and capability.get("cli_version") == requirements.get("cli_version")
+                )
+                if not compatible:
+                    reporter = FleetReporter(jid, spec.get("attempt_id"))
+                    reporter.fail(
+                        "Worker rejected HyperFrames job: required runtime is not ready "
+                        f"(need engine {requirements.get('engine_version')}, "
+                        f"CLI {requirements.get('cli_version')})")
+                    with self._lock:
+                        self._jobs[jid] = reporter
+                    continue
             with self._lock:
                 mode = self._policy.get("mode") or "active"
                 physical_max = max(1, min(8, int(config.FLEET_MAX_JOBS)))

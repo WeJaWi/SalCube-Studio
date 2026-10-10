@@ -18,7 +18,7 @@ from flask import (Flask, Response, g, jsonify, make_response, redirect,
 
 from pipeline import (ai33_tasks, analytics, animation, artifacts, cancel,
                       clients, cluster, config, delivery_doc, fleet, identity,
-                      jobs, llm, node_monitor, operations, orchestrator,
+                      hyperframes, jobs, llm, node_monitor, operations, orchestrator,
                       render as video_render, research, resources, scheduler,
                       stats, storage, telemetry, thumbnail)
 
@@ -232,6 +232,8 @@ def _fleet_worker_rows() -> list[dict]:
                 "hardware": worker.get("hardware") if isinstance(worker.get("hardware"), dict) else {},
                 "metrics": worker.get("metrics") if isinstance(worker.get("metrics"), dict) else {},
                 "node": worker.get("node") if isinstance(worker.get("node"), dict) else {},
+                "capabilities": (worker.get("capabilities")
+                                 if isinstance(worker.get("capabilities"), dict) else {}),
                 "capacity": capacity,
                 "policy": policy,
                 "last_seen": worker.get("last_seen"),
@@ -253,6 +255,7 @@ def _fleet_worker_rows() -> list[dict]:
 _PHASE_START_PCT = {
     "start": 0, "outline": 0, "awaiting": 3, "script": 3, "plan": 8,
     "music": 10, "voiceover": 10, "host": 25, "broll": 30, "anim": 30,
+    "hyperframes": 30,
     "render": 50, "done": 100,
 }
 _RENDER_START_PCT = 50
@@ -384,6 +387,21 @@ def _profile_theme_defaults() -> dict:
             out[p.stem] = v.get("anim_themes_default") or ["classic"]
         except Exception:  # noqa: BLE001
             out[p.stem] = ["classic"]
+    return out
+
+
+def _profile_broll_defaults() -> dict:
+    """Profile name → checked B-roll sources when selected in the UI."""
+    import json as _json
+    standard = ["stock", "stock_image", "ai_video", "animation"]
+    out = {}
+    for p in config.PROFILES_DIR.glob("*.json"):
+        try:
+            v = _json.loads(p.read_text()).get("video", {})
+            chosen = v.get("broll_defaults")
+            out[p.stem] = chosen if isinstance(chosen, list) else standard
+        except Exception:  # noqa: BLE001
+            out[p.stem] = standard
     return out
 
 
@@ -884,6 +902,25 @@ def _wait_for_fleet_retry(job_id: str, reporter: fleet.FleetReporter) -> bool:
         time.sleep(min(0.5, remaining))
 
 
+def _profile_dispatch_requirements(profile_data: dict) -> dict:
+    if hyperframes.is_hyperframes_profile(profile_data):
+        return {"engine": "hyperframes", "engine_version": hyperframes.ENGINE_VERSION,
+                "cli_version": hyperframes.CLI_VERSION}
+    return {}
+
+
+def _worker_supports_profile(worker: dict, profile_data: dict) -> bool:
+    requirements = _profile_dispatch_requirements(profile_data)
+    if not requirements:
+        return True
+    capability = ((worker.get("capabilities") or {}).get("hyperframes") or {})
+    return (
+        capability.get("ready") is True
+        and capability.get("engine_version") == requirements["engine_version"]
+        and capability.get("cli_version") == requirements["cli_version"]
+    )
+
+
 def _fleet_dispatch_for(worker_id: str, free: int) -> list[dict]:
     """Claim eligible queued jobs up to this worker's available capacity."""
     if config.FLEET_ROLE != "main" or free <= 0 or UPDATE_LOCK_FILE.exists():
@@ -908,20 +945,25 @@ def _fleet_dispatch_for(worker_id: str, free: int) -> list[dict]:
                    if not JOBS[jid].get("local_only")]
         cached_jobs = set((worker or {}).get("cached_jobs") or [])
         job_ids.sort(key=lambda jid: jid not in cached_jobs)
-        job_ids = job_ids[:free]
         dispatch = []
         for job_id in job_ids:
+            if len(dispatch) >= free:
+                break
             job = JOBS[job_id]
             try:
                 profile_data = orchestrator.load_profile(job["profile"])
             except Exception as e:  # noqa: BLE001
                 job.update(status="error", step="error", error=f"fleet profile snapshot failed: {e}")
                 continue
+            if not _worker_supports_profile(worker or {}, profile_data):
+                continue
+            requirements = _profile_dispatch_requirements(profile_data)
             job.update(status="dispatched", step="fleet", dispatched_to=worker_id,
                        dispatched_at=datetime.now().isoformat(timespec="seconds"))
             job["attempt_id"] = secrets.token_hex(12) if int((worker or {}).get("protocol_version", 1)) >= 3 else None
             dispatch.append({"job_id": job_id, "inputs": job["inputs"],
                              "profile": job["profile"], "profile_data": profile_data,
+                             "requirements": requirements,
                              "attempt_id": job.get("attempt_id")})
     if dispatch:
         _persist_queue()
@@ -1576,6 +1618,7 @@ def index():
         anim_templates=list(animation.TEMPLATES),
         anim_themes=list(animation.THEMES),
         profile_theme_defaults=_profile_theme_defaults(),
+        profile_broll_defaults=_profile_broll_defaults(),
         owner_access=not ACCESS or getattr(g, "user", {}).get("profiles") is None,
     )
 
@@ -1775,6 +1818,8 @@ def _build_inputs(data: dict, title: str) -> dict:
         "spotify_popup": bool(data.get("spotify_popup", False)),
         "spotify_popup_style": spotify_popup_style,
         "spotify_url": (data.get("spotify_url") or "").strip(),
+        "hyperframes_style": (data.get("hyperframes_style") or "").strip(),
+        "hyperframes_pace": (data.get("hyperframes_pace") or "").strip(),
         # Operational retry hint, set by the controller rather than exposed
         # as a normal creative parameter. Persisted so restarts keep the job
         # on the machine that owns its cached assets.
@@ -2061,11 +2106,19 @@ def start_render():
     if not titles and not resume:
         return jsonify({"error": "title is required"}), 400
 
+    selected_profile = (_job_profile(resume) or profile) if resume else profile
+    try:
+        profile_data = orchestrator.load_profile(selected_profile)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"profile could not be loaded: {exc}"}), 400
+    try:
+        if hyperframes.is_hyperframes_profile(profile_data):
+            hyperframes.validate_profile(profile_data)
+            hyperframes.ensure_runtime()
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"profile preflight failed: {exc}"}), 503
+
     if not resume:
-        try:
-            profile_data = orchestrator.load_profile(profile)
-        except Exception as exc:  # noqa: BLE001
-            return jsonify({"error": f"profile could not be loaded: {exc}"}), 400
         needs_research = bool((profile_data.get("research") or {}).get("enabled"))
         if not needs_research:
             batch_names = [_delivery_title_stem(title).casefold() for title in titles]
@@ -2223,6 +2276,8 @@ def fleet_heartbeat():
                        "capacity": capacity,
                        "metrics": data.get("metrics") if isinstance(data.get("metrics"), dict) else {},
                        "node": _safe_node_report(data.get("node")),
+                       "capabilities": (node_monitor.sanitize(data.get("capabilities"))
+                                        if isinstance(data.get("capabilities"), dict) else {}),
                        "cached_jobs": [str(jid) for jid in (data.get("cached_jobs") or [])
                                        if str(jid).isdigit()][:200],
                        "jobs": reported,
@@ -2420,7 +2475,8 @@ def dispatch_to_worker(job_id: str):
         except Exception as e:  # noqa: BLE001
             return jsonify({"error": f"profile snapshot failed: {e}"}), 500
         spec = {"job_id": job_id, "inputs": job["inputs"],
-                "profile": job["profile"], "profile_data": profile_data}
+                "profile": job["profile"], "profile_data": profile_data,
+                "requirements": _profile_dispatch_requirements(profile_data)}
         # Choose and reserve while holding the fleet lock, so two simultaneous
         # manual sends cannot both consume the same last free slot.
         with _FLEET_LOCK:
@@ -2433,7 +2489,8 @@ def dispatch_to_worker(job_id: str):
                     continue
                 capacity = _fleet_capacity(worker, _fleet_policy(wid, settings))
                 if (age <= config.FLEET_STALE_SECONDS and capacity["effective_free"] > 0
-                        and (not requested or requested == wid)):
+                        and (not requested or requested == wid)
+                        and _worker_supports_profile(worker, profile_data)):
                     hardware = worker.get("hardware") or {}
                     render_metrics = (worker.get("metrics") or {}).get("render") or {}
                     score = (capacity["effective_free"] * 10 +
@@ -2442,7 +2499,11 @@ def dispatch_to_worker(job_id: str):
                              int(render_metrics.get("waiting_encoders") or 0) * 5)
                     choices.append((score, wid, worker))
             if not choices:
-                return jsonify({"error": "selected worker is unavailable, paused, or full"}), 409
+                detail = (" or lacks the required HyperFrames runtime"
+                          if hyperframes.is_hyperframes_profile(profile_data) else "")
+                return jsonify({
+                    "error": f"selected worker is unavailable, paused, full{detail}"
+                }), 409
             choices.sort(key=lambda item: (-item[0], item[1]))
             _, worker_id, worker = choices[0]
             job.update(status="dispatched", step="fleet", dispatched_to=worker_id,
